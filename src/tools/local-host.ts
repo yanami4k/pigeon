@@ -16,7 +16,6 @@ import {
   writeSync,
 } from "node:fs";
 import { lstat, readdir, readFile, stat, writeFile } from "node:fs/promises";
-import { homedir } from "node:os";
 import path from "node:path";
 import { hardenedGitArgs } from "./git-hardening.ts";
 import {
@@ -39,7 +38,7 @@ import {
   containedIn,
   LOCAL_PATH_RULES,
   resolveLocalReadPath,
-} from "./read-deny.ts";
+} from "./read-paths.ts";
 import {
   GIT_STATUS_ARGS,
   gitFileState,
@@ -63,8 +62,6 @@ import {
 export interface LocalHostOptions {
   // 平台（缺省 process.platform；测试注入）
   platform?: NodeJS.Platform;
-  // 禁读名单里 ~ 展开用的家目录（缺省 os.homedir()；测试注入临时目录）
-  homeDir?: string;
 }
 
 export function createLocalWorkspaceHost(
@@ -88,11 +85,11 @@ export function createLocalWorkspaceHost(
     async resolveForWrite(inputPath, writeOptions) {
       return resolveWorkspaceWritePath(workspaceRoot, inputPath, writeOptions);
     },
-    async resolveForRead(inputPath, deny) {
-      return resolveLocalReadPath(workspaceRoot, inputPath, deny, options.homeDir ?? homedir());
+    async resolveForRead(inputPath) {
+      return resolveLocalReadPath(workspaceRoot, inputPath);
     },
-    classifyReadPaths: (relPaths, deny, signal) =>
-      classifyLocalReadPaths(workspaceRoot, relPaths, deny, options.homeDir ?? homedir(), signal),
+    classifyReadPaths: (relPaths, signal) =>
+      classifyLocalReadPaths(workspaceRoot, relPaths, signal),
     // 辅助程序：先解析成绝对路径再启动（不在工作区里找程序）；环境屏蔽 git 的全局与系统配置、不带 ripgrep 配置；
     // git 另加 git-hardening.ts 的加固参数（与 Pigeon 后台起的其他 git 同一张表）；两路输出各自留到 maxOutputBytes
     async execHelper(program, args, execOptions) {

@@ -10,8 +10,7 @@
 //   ③ 输出截断：与本地实现共用同一个收集器——全量计字节数与哈希，只留开头；
 //   ④ 路径映射：模型给的路径在容器内按工作区根解析（符号链接解析后）再判包含，宿主路径不参与。
 // 宿主环境变量不进容器：容器内环境由镜像与本实现的 env 选项决定。
-// 决策 349：每次工具调用尽量一次进容器——读文件 1 次（检视：解析、是否文件、原文与 cksum 一次拿到；读档时连同禁读名单的
-// 真实路径，决策 355），改文件 2 次（检视
+// 决策 349：每次工具调用尽量一次进容器——读文件 1 次（检视：解析、是否文件、原文与 cksum 一次拿到），改文件 2 次（检视
 // 供审批预览与预检，写入脚本在同一次执行里复核路径、符号链接与 cksum 后写入），跑命令 1 次（命令前后的取证、命令本身与
 // 内存计数合在一个脚本里，输出以每次随机的分隔标记分段）。
 
@@ -36,15 +35,7 @@ import {
   WorkspacePathNotFoundError,
   WorkspaceWriteRefusedError,
 } from "../tools/paths.ts";
-import {
-  classifyRealPath,
-  deniedEntry,
-  POSIX_PATH_RULES,
-  ReadDeniedError,
-  type ReadPathClass,
-  type ResolvedDenyEntry,
-  readDeniedMessage,
-} from "../tools/read-deny.ts";
+import { classifyRealPath, POSIX_PATH_RULES, type ReadPathClass } from "../tools/read-paths.ts";
 import {
   gitFileState,
   type HostExecOptions,
@@ -201,49 +192,11 @@ const INSPECT_FUNCTION = [
   "}",
 ].join("\n");
 const INSPECT_SCRIPT = `${INSPECT_FUNCTION}\ninspect "$1"`;
-// 决策 355：禁读名单在容器里的真实路径。参数为名单各项；输出以 NUL 分隔，按项各两段——展开 ~（容器内的家目录）后的
-// 字面路径、它存在时的真实路径（不存在为空串）。经 trustedShell 执行：readlink 从系统目录解析，agent 改不了
-const DENY_ENTRIES_SCRIPT = [
-  'for p in "$@"; do',
-  `  case "$p" in "~") p="$HOME" ;; "~/"*) p="$HOME/\${p#"~/"}" ;; esac`,
-  `  printf '%s\\0' "$p"`,
-  `  if [ -e "$p" ]; then printf '%s\\0' "$(readlink -f -- "$p")"; else printf '\\0'; fi`,
-  "done",
-].join("\n");
-// 决策 355：读档的目标落在禁读名单内（标准输出为命中的那一项在名单里的序号）：不检视、不读出原文
-const EXIT_DENIED = 12;
-// 决策 355 合 349：读档解析（不限工作区）、禁读判定与检视一次进容器——第一个参数为目标（按工作区根写成的绝对路径，同
-// 检视），其后为名单各项。先输出名单各项（格式同 DENY_ENTRIES_SCRIPT：展开 ~ 后的字面路径、存在时的真实路径）；目标的
-// 真实路径等于某一项的这两者之一或落在其下（按路径段比：/root/.sshx 不算落在 /root/.ssh 之下）即输出该项序号、以
-// EXIT_DENIED 结束，不碰原文；都不中才检视（同 INSPECT_SCRIPT：解析结果、类型、内容哈希与原文）。工作区内外由执行端判定
-const READ_INSPECT_SCRIPT = [
-  INSPECT_FUNCTION,
-  'target="$1"; shift',
-  'tr=""; if [ -e "$target" ]; then rl "$target"; tr="$r"; fi',
-  'hit=""; i=0',
-  'for p in "$@"; do',
-  `  case "$p" in "~") p="$HOME" ;; "~/"*) p="$HOME/\${p#"~/"}" ;; esac`,
-  '  q=""; if [ -e "$p" ]; then rl "$p"; q="$r"; fi',
-  `  printf '%s\\0%s\\0' "$p" "$q"`,
-  '  if [ -z "$hit" ] && [ -n "$tr" ]; then',
-  '    for d in "$p" "$q"; do',
-  '      [ -n "$d" ] || continue',
-  // biome-ignore lint/suspicious/noTemplateCurlyInString: 这是容器里 shell 的参数展开，不是本文件的模板字符串
-  '      while [ "$d" != / ] && [ "${d%/}" != "$d" ]; do d="${d%/}"; done',
-  '      if [ "$d" = / ]; then hit=$i; else case "$tr" in "$d" | "$d"/*) hit=$i ;; esac; fi',
-  "    done",
-  "  fi",
-  "  i=$((i + 1))",
-  "done",
-  `if [ -n "$hit" ]; then printf '%s' "$hit"; exit ${EXIT_DENIED}; fi`,
-  'inspect "$target"',
-].join("\n");
-// 决策 355 / 368：grep、glob 的结果逐个取真实路径——参数为名单各项（输出同上）；标准输入给出 NUL 分隔的相对路径，
-// 每 500 个一批。GNU 的 realpath（-z -m）整批解析全部成功（退出码 0：每个输入恰好一个输出）时，先输出
-// "B NUL 个数 NUL" 与这批输入，再输出各自的真实路径；有一项失败或没有这种 realpath（busybox）时，整批改为逐个
-// readlink -f、成对输出 "P NUL 输入 NUL 真实路径 NUL"（取不到为空串），不会错位
+// 决策 355 / 368：grep、glob 的结果逐个取真实路径——标准输入给出 NUL 分隔的相对路径，每 500 个一批。GNU 的
+// realpath（-z -m）整批解析全部成功（退出码 0：每个输入恰好一个输出）时，先输出 "B NUL 个数 NUL" 与这批输入，
+// 再输出各自的真实路径；有一项失败或没有这种 realpath（busybox）时，整批改为逐个 readlink -f、成对输出
+// "P NUL 输入 NUL 真实路径 NUL"（取不到为空串），不会错位
 const CLASSIFY_SCRIPT = [
-  DENY_ENTRIES_SCRIPT,
   `xargs -0 -n 500 /bin/sh -c 'o=""; if realpath -z -m -- / >/dev/null 2>&1 && o="$(mktemp)" && realpath -z -m -- "$@" > "$o" 2>/dev/null; then printf "B\\0%s\\0" "$#"; printf "%s\\0" "$@"; cat "$o"; else for f do r="$(readlink -f -- "$f")" || r=""; printf "P\\0%s\\0%s\\0" "$f" "$r"; done; fi; [ -n "$o" ] && rm -f "$o"; exit 0' sh`,
 ].join("\n");
 // git-hardening.ts 的加固参数写成 shell 词（各项都不含单引号）
@@ -744,18 +697,6 @@ export function createContainerWorkspaceHost(options: ContainerHostOptions): Wor
   };
   const resolveRoot = async (): Promise<string> => (await resolveRootInfo()).real;
 
-  // 脚本输出里从 offset 起的名单各项：每项两段（字面路径、存在时的真实路径）
-  const denyEntriesOf = (
-    fields: readonly string[],
-    offset: number,
-    deny: readonly string[]
-  ): ResolvedDenyEntry[] =>
-    deny.map((entry, index) => {
-      const literal = fields[offset + index * 2] ?? "";
-      const real = fields[offset + index * 2 + 1] ?? "";
-      return { entry, paths: [...new Set([literal, real].filter((value) => value !== ""))] };
-    });
-
   // 决策 365：按标记杀容器里的进程（超时、中止、后台作业的停止）；容器不可用等失败不抛，调用方另有兜底
   const killMarked = async (marker: string, withScript = false): Promise<void> => {
     try {
@@ -766,7 +707,7 @@ export function createContainerWorkspaceHost(options: ContainerHostOptions): Wor
   };
 
   // 最近一次检视（决策 349）：exec、改写与新建时作废；写工具的解析在同一路径、其间没有 exec 与写入时直接取用。
-  // 读档解析（决策 355）通过禁读判定的检视同样留作最近一次检视
+  // 读档解析（决策 355）的检视同样留作最近一次检视
   let lastInspection: Inspection | undefined;
   // 检视用的绝对路径：与受保护路径判定（application/protected-paths.ts）同一写法——含 ".." 段的不折叠（内核先替换
   // 符号链接再处理 ".."），其余按工作区根拼成规范的绝对路径。同一个文件经两处判定与读写得到同一个键
@@ -829,43 +770,6 @@ export function createContainerWorkspaceHost(options: ContainerHostOptions): Wor
       throw gitMetadataRefused(inputPath);
     }
   };
-  // 决策 355 合 349：禁读判定与目标的检视，一次 exec（READ_INSPECT_SCRIPT）。落在名单内的在容器里即拒、不读出原文，
-  // 这里抛 ReadDeniedError；其余交回检视与名单各项的真实路径。不在这里留作最近一次检视
-  const inspectForRead = async (
-    key: string,
-    inputPath: string,
-    deny: readonly string[]
-  ): Promise<{ inspection: Inspection; entries: ResolvedDenyEntry[] }> => {
-    const result = await helper(false, trustedShell(READ_INSPECT_SCRIPT, key, ...deny));
-    if (daemonFailure(result)) {
-      throw new ContainerHostError(`容器不可用：${result.stderr.trim()}`);
-    }
-    const fields: string[] = [];
-    let position = 0;
-    while (fields.length < deny.length * 2) {
-      const end = result.stdout.indexOf(0, position);
-      if (end < 0) {
-        break;
-      }
-      fields.push(result.stdout.subarray(position, end).toString("utf8"));
-      position = end + 1;
-    }
-    if (result.exitCode === EXIT_DENIED) {
-      // 序号取不到时报整份名单：命中即拒，不因输出不全放行
-      const index = result.stdout.subarray(position).toString("utf8");
-      const hit = /^\d+$/.test(index) ? deny[Number(index)] : undefined;
-      throw new ReadDeniedError(readDeniedMessage(inputPath, hit ?? deny.join("、")));
-    }
-    const inspection =
-      result.exitCode === 0 && fields.length === deny.length * 2
-        ? parseInspection(key, result.stdout.subarray(position))
-        : undefined;
-    if (inspection === undefined) {
-      throw new WorkspacePathError(`路径不存在或不可读：${key}`);
-    }
-    return { inspection, entries: denyEntriesOf(fields, 0, deny) };
-  };
-
   // agent 命令的执行（文件头 ①–③）；给了 observe 时经观测脚本运行（决策 348、349），命令前后的取证另行交回。
   // streamCap 为分开的两路输出各自保留的上限（缺省同本机；辅助程序另给）
   const runExec = (
@@ -1157,34 +1061,14 @@ export function createContainerWorkspaceHost(options: ContainerHostOptions): Wor
       await refuseGitMetadata(inputPath, resolved, base);
       return resolved;
     },
-    // 决策 355：读档解析不限工作区。禁读判定在容器里先于检视做（落在名单内的不读出原文），与目标的检视合成一次进容器
-    // （决策 349：读文件 1 次）；工作区内外在这里判定。通过禁读判定的检视留作最近一次检视，随后的 isFile、readText、
-    // readBytes 直接取用。执行端另按同一份名单复核一次（与 classifyReadPaths 同一口径），作兜底
-    async resolveForRead(inputPath, deny) {
+    // 决策 355：读档解析不限工作区。目标的检视一次进容器（决策 349：读文件 1 次），工作区内外在这里判定；检视留作最近
+    // 一次检视，随后的 isFile、readText、readBytes 直接取用
+    async resolveForRead(inputPath) {
       const base = await resolveRoot();
-      const { inspection, entries } = await inspectForRead(
-        inspectionKey(inputPath),
-        inputPath,
-        deny
-      );
-      if (inspection.kind === "M") {
-        throw new WorkspacePathNotFoundError(`路径不存在或不可读：${inputPath}`);
-      }
-      const target = inspection.resolved;
-      if (target === undefined) {
-        throw new WorkspacePathError(`路径不存在或不可读：${inputPath}`);
-      }
-      if (hasControlChars(target)) {
-        throw controlCharsRefused(target);
-      }
-      const entry = deniedEntry(target, entries, POSIX_PATH_RULES);
-      if (entry !== undefined) {
-        throw new ReadDeniedError(readDeniedMessage(inputPath, entry));
-      }
-      lastInspection = inspection;
+      const target = inspectedPath(inputPath, await inspect(inspectionKey(inputPath)), base, true);
       return { path: target, outside: !insideRoot(base, target) };
     },
-    async classifyReadPaths(relPaths, deny, signal) {
+    async classifyReadPaths(relPaths, signal) {
       const base = await resolveRoot();
       const classes = new Map<string, ReadPathClass>();
       const realPaths = new Map<string, string>();
@@ -1193,23 +1077,22 @@ export function createContainerWorkspaceHost(options: ContainerHostOptions): Wor
       }
       const result = await helper(
         true,
-        trustedShell(CLASSIFY_SCRIPT, ...deny),
+        trustedShell(CLASSIFY_SCRIPT),
         relPaths.length > 0 ? `${relPaths.join("\0")}\0` : ""
       );
       if (daemonFailure(result)) {
         throw new ContainerHostError(`容器不可用：${result.stderr.trim()}`);
       }
       const fields = result.stdout.toString("utf8").split("\0");
-      const entries = denyEntriesOf(fields, 0, deny);
       const classify = (rel: string | undefined, real: string | undefined) => {
         if (rel !== undefined && rel !== "" && real !== undefined && real !== "") {
-          classes.set(rel, classifyRealPath(base, real, entries, POSIX_PATH_RULES));
+          classes.set(rel, classifyRealPath(base, real, POSIX_PATH_RULES));
           realPaths.set(rel, real);
         }
       };
       // 按批对齐；输出被截断（超时）即停，标明不完整
       let complete = true;
-      let index = deny.length * 2;
+      let index = 0;
       while (index < fields.length - 1) {
         const tag = fields[index];
         if (tag === "B") {

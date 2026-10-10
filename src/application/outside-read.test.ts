@@ -1,6 +1,6 @@
 // 工作区外只读（决策 355）——真实 pi-agent-core Agent + 审批闸：放手模式自动放行；非放手模式经人批准（[d] 按目录放权后
 // 同目录不再问；PreToolUse 钩子放行算批准）；无人值守（没有审批通道）拒绝；工作区内的读取照旧免审；
-// 禁读名单放手模式也拒；写与编辑仍限工作区。
+// 家目录下的凭据目录（如 ~/.ssh）与其他工作区外文件同一规则（决策 412）；写与编辑仍限工作区。
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -44,7 +44,6 @@ const read = (path: string): FakeReply => ({
 
 async function run(input: {
   ws: string;
-  home: string;
   approvalMode: "prompt" | "yolo";
   outsideReads: OutsideReadMode;
   replies: FakeReply[];
@@ -67,7 +66,7 @@ async function run(input: {
     pathConfinement: { kind: "workspace" },
     executionMode: "sequential",
   });
-  const host = createLocalWorkspaceHost(input.ws, { homeDir: input.home });
+  const host = createLocalWorkspaceHost(input.ws);
   const snapshot: InjectionSnapshot = {
     version: INJECTION_SNAPSHOT_VERSION,
     model: { provider: "fake-provider", id: "fake-model-1" },
@@ -108,13 +107,16 @@ async function run(input: {
   return { decisions, results, reasons: result.toolExecutions.map((r) => r.decision?.reason) };
 }
 
-test("放手模式：工作区外读取自动放行并读到内容；禁读文件照样拒；edit_file 改工作区外文件仍被围栏拒绝", async () => {
+test("放手模式：工作区外读取自动放行并读到内容，家目录下的 ~/.ssh 也一样；edit_file 改工作区外文件仍被围栏拒绝", async () => {
   const { base, ws, home, cleanup } = layout();
+  // 家目录指到临时目录（os.homedir() 在 Windows 上取 USERPROFILE，其余取 HOME），读的是"家目录下的 .ssh"
+  const saved = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE };
+  process.env.HOME = home;
+  process.env.USERPROFILE = home;
   try {
     const outside = join(base, "lib", "pkg", "a.js");
     const { decisions, results } = await run({
       ws,
-      home,
       approvalMode: "yolo",
       outsideReads: "allowed",
       replies: [
@@ -134,16 +136,20 @@ test("放手模式：工作区外读取自动放行并读到内容；禁读文�
       ["approved", "policy:yolo"],
     ]);
     assert.match(results[0] ?? "", /lib a/);
-    assert.match(results[1] ?? "", /禁读/);
+    assert.match(results[1] ?? "", /\| key$/m);
     assert.match(results[2] ?? "", /路径越出工作区根/);
     assert.equal(readFileSync(outside, "utf8"), "lib a\n");
   } finally {
+    for (const [name, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
     cleanup();
   }
 });
 
 test("非放手模式：工作区内不问人；工作区外问人（请求带真实路径），拒绝即不读；[d] 按目录放权后同目录不再问", async () => {
-  const { base, ws, home, cleanup } = layout();
+  const { base, ws, cleanup } = layout();
   try {
     const store = new SessionGrantStore({ workspaceRoot: ws });
     const answers = ["n", "d"];
@@ -160,7 +166,6 @@ test("非放手模式：工作区内不问人；工作区外问人（请求带�
     const pkg = join(base, "lib", "pkg");
     const { decisions, results } = await run({
       ws,
-      home,
       approvalMode: "prompt",
       outsideReads: "approval",
       replies: [
@@ -196,7 +201,7 @@ test("非放手模式：工作区内不问人；工作区外问人（请求带�
 });
 
 test("非放手模式：PreToolUse 钩子放行算批准，不再问人", async () => {
-  const { base, ws, home, cleanup } = layout();
+  const { base, ws, cleanup } = layout();
   try {
     const requests: ApprovalRequest[] = [];
     const approvalHandler: ApprovalHandler = async (request) => {
@@ -205,7 +210,6 @@ test("非放手模式：PreToolUse 钩子放行算批准，不再问人", async 
     };
     const { decisions, results } = await run({
       ws,
-      home,
       approvalMode: "prompt",
       outsideReads: "approval",
       replies: [read(join(base, "lib", "pkg", "a.js"))],
@@ -220,12 +224,11 @@ test("非放手模式：PreToolUse 钩子放行算批准，不再问人", async 
 });
 
 test("无人值守（没有审批通道）：工作区外读取拒绝、理由点明路径，工具不执行；工作区内照常", async () => {
-  const { base, ws, home, cleanup } = layout();
+  const { base, ws, cleanup } = layout();
   try {
     const outside = join(base, "lib", "pkg", "a.js");
     const { decisions, results, reasons } = await run({
       ws,
-      home,
       approvalMode: "prompt",
       outsideReads: "refused",
       replies: [read(outside), read("in.txt")],

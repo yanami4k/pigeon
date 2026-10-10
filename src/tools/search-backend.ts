@@ -9,7 +9,7 @@
 // 输出一律无歧义：rg 用 --json（只列文件名时用 --null），git 用 -z 并先按字面路径排除文件名含控制字符的文件；
 // grep -r 降级改为先列出候选文件、按真实路径筛过，只对允许的文件逐个搜（-h，不输出文件名），归属由这里按分隔行记；
 // 逐个搜时先打开文件，按 /proc 给出的已打开文件的真实路径复核（没有 /proc 时不复核）。
-// 每条结果都按真实路径筛（禁读的、经链接落在工作区外的略去）；文件名含换行或控制字符的一律略去。
+// 每条结果都按真实路径筛（经链接落在工作区外的略去）；文件名含换行或控制字符的一律略去。
 // .gitignore：rg 与 git 只在 git 仓库里遵守（rg 缺省如此，git 本就如此）；不在 git 仓库里时三种后端都不按它过滤，口径一致。
 import { randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
@@ -33,19 +33,18 @@ export const MAX_LINE_CHARS = 2000;
 // 一次最多按真实路径检查的文件数：超出的不搜、不列，计入略去
 export const SCREEN_LIMIT = 20_000;
 
-// 搜索起点：path 参数照读档的规则解析（真实路径、禁读名单、Windows 的设备前缀、UNC 与数据流写法），落在禁读名单内或
-// 工作区外即拒；给出相对工作区根的写法（正斜杠，根为 "."）与它是不是文件。执行端没有读档解析即报错（失败即拒）
+// 搜索起点：path 参数照读档的规则解析（按真实路径），落在工作区外即拒；给出相对工作区根的写法（正斜杠，根为 "."）
+// 与它是不是文件。执行端没有读档解析即报错（失败即拒）
 export async function searchStart(
   host: WorkspaceHost,
-  inputPath: string,
-  deny: readonly string[]
+  inputPath: string
 ): Promise<{ rel: string; isFile: boolean }> {
   const resolveForRead = host.resolveForRead;
   if (resolveForRead === undefined) {
     throw new SearchEnvironmentError("本执行端不能按读档规则解析路径，grep、glob 不可用");
   }
   const resolve = async (input: string): Promise<string> => {
-    const resolved = await resolveForRead.call(host, input, deny);
+    const resolved = await resolveForRead.call(host, input);
     if (resolved.outside) throw new SearchToolError(`路径越出工作区根：${input}`);
     return resolved.path;
   };
@@ -210,16 +209,15 @@ export interface GrepRecord {
   match: boolean;
 }
 
-// 略去的文件数：禁读的、经链接落在工作区外的、文件名含换行或控制字符的、超出检查上限或检查超时而未经检查的
+// 略去的文件数：经链接落在工作区外的、文件名含换行或控制字符的、超出检查上限或检查超时而未经检查的
 export interface Omitted {
-  denied: number;
   outside: number;
   unsafe: number;
   unchecked: number;
 }
 
 export function noneOmitted(): Omitted {
-  return { denied: 0, outside: 0, unsafe: 0, unchecked: 0 };
+  return { outside: 0, unsafe: 0, unchecked: 0 };
 }
 
 // 文件名含换行或其他控制字符
@@ -257,12 +255,11 @@ export function backendFailure(stderr: string, exitCode: number | null): Error {
 }
 
 // 逐个文件按真实路径筛（决策 355 / 368，三种后端一律如此）：文件名含换行或控制字符的略去；超出 SCREEN_LIMIT 的不查、
-// 略去；其余交执行端按真实路径分类，可读的留下，禁读的与经链接落在工作区外的略去；检查超时或中止而没查到的略去；
+// 略去；其余交执行端按真实路径分类，可读的留下，经链接落在工作区外的略去；检查超时或中止而没查到的略去；
 // 取不到真实路径的（列出之后被删）略去不计。执行端没有分类能力即报错（失败即拒）
 export async function screenFiles(
   host: WorkspaceHost,
   relPaths: readonly string[],
-  deny: readonly string[],
   omitted: Omitted,
   signal: AbortSignal | undefined
 ): Promise<Map<string, string>> {
@@ -278,11 +275,10 @@ export async function screenFiles(
   omitted.unchecked += safe.length - checked.length;
   const allowed = new Map<string, string>();
   if (checked.length === 0) return allowed;
-  const { classes, realPaths, incomplete } = await host.classifyReadPaths(checked, deny, signal);
+  const { classes, realPaths, incomplete } = await host.classifyReadPaths(checked, signal);
   for (const rel of checked) {
     const kind = classes.get(rel);
     if (kind === "ok") allowed.set(rel, realPaths.get(rel) ?? "");
-    else if (kind === "denied") omitted.denied += 1;
     else if (kind === "outside") omitted.outside += 1;
     else if (incomplete) omitted.unchecked += 1;
   }
@@ -312,7 +308,6 @@ export interface GrepRun {
 }
 
 interface RunContext {
-  deny: readonly string[];
   signal: AbortSignal | undefined;
   timeoutMs: number | undefined;
 }
@@ -406,7 +401,6 @@ async function screenRecords(
   const allowed = await screenFiles(
     host,
     query.filesOnly ? keptFiles : kept.map((record) => record.path),
-    context.deny,
     omitted,
     context.signal
   );
@@ -421,10 +415,9 @@ export async function runGrep(
   host: WorkspaceHost,
   backend: SearchBackend,
   query: GrepQuery,
-  options: { deny: readonly string[]; signal: AbortSignal | undefined; timeoutMs?: number }
+  options: { signal: AbortSignal | undefined; timeoutMs?: number }
 ): Promise<GrepRun> {
   const context: RunContext = {
-    deny: options.deny,
     signal: options.signal,
     timeoutMs: options.timeoutMs,
   };
@@ -508,13 +501,7 @@ export async function runGrep(
   const candidates = query.start.isFile
     ? [query.start.rel]
     : nulList((await exec(host, "find", findArgs(query.start.rel), context)).stdout, platform);
-  const allowed = await screenFiles(
-    host,
-    candidates.filter(query.keep),
-    context.deny,
-    omitted,
-    context.signal
-  );
+  const allowed = await screenFiles(host, candidates.filter(query.keep), omitted, context.signal);
   if (allowed.size === 0) {
     return { records: [], files: [], omitted, incomplete: false };
   }
@@ -601,13 +588,11 @@ export async function runListing(
   options: {
     prefilter: string | undefined;
     keep: (relPath: string) => boolean;
-    deny: readonly string[];
     signal: AbortSignal | undefined;
     timeoutMs?: number;
   }
 ): Promise<{ files: string[]; omitted: Omitted; incomplete: boolean }> {
   const context: RunContext = {
-    deny: options.deny,
     signal: options.signal,
     timeoutMs: options.timeoutMs,
   };
@@ -649,7 +634,7 @@ export async function runListing(
     throw backendFailure(result.stderr, result.exitCode);
   }
   const omitted = noneOmitted();
-  const allowed = await screenFiles(host, listed, options.deny, omitted, options.signal);
+  const allowed = await screenFiles(host, listed, omitted, options.signal);
   return {
     files: [...new Set(listed)].filter((file) => allowed.has(file)),
     omitted,
@@ -684,8 +669,7 @@ export function resultNotes(input: {
 // 各类略去的文件数（没有略去的不写）
 export function omittedNotes(omitted: Omitted): string[] {
   const notes: string[] = [];
-  const { denied, outside, unsafe, unchecked } = omitted;
-  if (denied > 0) notes.push(`已按禁读名单略去 ${denied} 个文件`);
+  const { outside, unsafe, unchecked } = omitted;
   if (outside > 0) notes.push(`已略去经链接指向工作区以外的 ${outside} 个文件`);
   if (unsafe > 0) notes.push(`已略去文件名含换行或控制字符的 ${unsafe} 个文件`);
   if (unchecked > 0) {
