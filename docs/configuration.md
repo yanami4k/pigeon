@@ -237,7 +237,7 @@ export const modelInfo = {
 | `tools.runCommand.outputTailBytes` | 输出超长时保留的末尾 | 24576（24 KiB） |
 | `tools.runCommand.savedOutputsMaxBytes` | 每个会话落盘的完整输出总量上限，满了删最旧的 | 209715200（200 MiB） |
 | `tools.runCommand.timeoutSeconds` | 不给 `timeout_seconds` 时的单次超时（秒）；大于上限时按上限 | 120 |
-| `tools.runCommand.maxTimeoutSeconds` | `timeout_seconds` 的上限（秒），给得更大即拒绝执行 | 600 |
+| `tools.runCommand.maxTimeoutSeconds` | `timeout_seconds` 的上限（秒），给得更大按上限执行并在结果里注明 | 600 |
 | `tools.runCommand.maxBackgroundJobs` | 每个会话同时在跑的后台作业上限，超出即拒绝 | 2 |
 | `tools.runCommand.maxBackgroundJobsTotal` | 整次运行（同一进程里的主会话与各 worker）同时在跑的后台作业上限 | 8 |
 | `tools.runCommand.backgroundOutputMaxBytes` | 单个后台作业的输出文件上限，超出只留末尾 | 16777216（16 MiB） |
@@ -247,7 +247,7 @@ run_command 的输出超过开头加末尾两段时，结果里留开头与末�
 
 ### 单次超时与后台作业
 
-run_command 的单次超时缺省 120 秒，模型可用参数 `timeout_seconds` 另设，至多 600 秒（缺省与上限见上表，可改）；给得超过上限即拒绝执行并说明上限，不悄悄压到上限。到时终止整个进程组：本机 Linux/macOS 对整组发 SIGKILL，本机 Windows 杀进程树；容器执行端里命令以 setsid 另起进程组并带一个每次随机的标记环境变量，到时宿主另发一次辅助调用，按标记在容器里找到命令连同它的子孙进程杀掉（组长带标记的整组杀，再逐个杀带标记的），命令后的文件变化照常取到，不再重启容器；中止或超时落在命令开始之前（观测脚本还在取证）时，连观测脚本一起杀掉，命令不会再被起来。
+run_command 的单次超时缺省 120 秒，模型可用参数 `timeout_seconds` 另设，上限 600 秒（缺省与上限见上表，可改）；给得超过上限按上限执行，结果里注明给的值已夹到上限（决策 411）。到时终止整个进程组：本机 Linux/macOS 对整组发 SIGKILL，本机 Windows 杀进程树；容器执行端里命令以 setsid 另起进程组并带一个每次随机的标记环境变量，到时宿主另发一次辅助调用，按标记在容器里找到命令连同它的子孙进程杀掉（组长带标记的整组杀，再逐个杀带标记的），命令后的文件变化照常取到，不再重启容器；中止或超时落在命令开始之前（观测脚本还在取证）时，连观测脚本一起杀掉，命令不会再被起来。
 
 开发服务器、watch、长构建这类命令可带参数 `background: true` 在后台运行：立即交回作业号（j1、j2……），命令在执行端里接着跑，输出持续写进本会话的落盘目录（与上文完整输出同一处，单个文件超过上限只留末尾），作业结束后可用 read_file 按虚拟路径读全文。两件配套工具与 run_command 一同注册：`job_output` 读状态与上次查看之后的新增输出，可带 `wait_seconds`（至多 600）等它结束，不给作业号时等任意一个结束或列出全部作业；`job_kill` 停掉本会话的作业。作业的命令退出时，它放到后台的子孙（`x &`、`nohup`）随作业结束一并停掉（本机 Linux/macOS 按进程组，Windows 按进程树，容器里按组与标记），作业结束后不留进程。`job_output` 是读类工具，可与其他读类工具并行；`job_kill` 串行。两者只看、只停本会话的作业，免审批。
 

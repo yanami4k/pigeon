@@ -91,6 +91,27 @@ test("超时：终止进程并抛环境类错误", async () => {
   });
 });
 
+test("决策 411：timeout_seconds 超过上限按上限执行，结果里注明夹取", async () => {
+  await withRoot(async (root) => {
+    const tool = createRunCommandTool({ workspaceRoot: root, maxTimeoutMs: 1000 });
+    const quick = await tool.execute("tc-c1", { command: `${NODE} -e "1"`, timeout_seconds: 30 });
+    assert.deepEqual(quick.details.timeoutClamped, { requestedSeconds: 30, appliedSeconds: 1 });
+    const text = quick.content[0];
+    assert.ok(text?.type === "text" && text.text.includes("夹到上限 1 秒"), JSON.stringify(text));
+    // 按上限（1 秒）到时终止，而不是等到给的 30 秒
+    await assert.rejects(
+      tool.execute("tc-c2", {
+        command: `${NODE} -e "setTimeout(() => {}, 20000)"`,
+        timeout_seconds: 30,
+      }),
+      (error: unknown) =>
+        error instanceof RunCommandTimeoutError &&
+        error.message.includes("命令超时（1 秒）") &&
+        error.message.includes("夹到上限")
+    );
+  });
+});
+
 test("输出按字节截断并标记，哈希按全量输出", async () => {
   await withRoot(async (root) => {
     const tool = createRunCommandTool({ workspaceRoot: root, maxOutputBytes: 10 });

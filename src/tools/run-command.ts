@@ -169,6 +169,8 @@ export interface ExecEvidence {
   memoryLimitExceeded?: MemoryLimitExceeded;
   // 决策 365：命令执行期间在跑的后台作业（作业号与命令）
   backgroundJobs?: Array<{ id: string; command: string }>;
+  // 决策 411：timeout_seconds 超过上限，按上限执行（秒）
+  timeoutClamped?: { requestedSeconds: number; appliedSeconds: number };
   // 决策 365：以后台作业启动（其余字段为启动时的占位：没有退出码与输出）
   background?: { jobId: string; output: string };
 }
@@ -256,7 +258,7 @@ export function runCommandTexts(input: {
     (input.maxTimeoutMs ?? DEFAULT_RUN_COMMAND_MAX_TIMEOUT_MS) / 1000
   );
   const timeoutText =
-    `单次超时缺省 ${timeoutSeconds} 秒，可用 timeout_seconds 另设，至多 ${maxTimeoutSeconds} 秒；` +
+    `单次超时缺省 ${timeoutSeconds} 秒，可用 timeout_seconds 另设，上限 ${maxTimeoutSeconds} 秒（给得更大按上限执行）；` +
     "到时整个进程组（命令和它起的子进程）都被终止。";
   const backgroundText =
     input.backgroundJobs === undefined
@@ -576,7 +578,11 @@ export function createRunCommandTool(
       const inspection = inspect(parsed.command);
       const { command, alias } = inspection;
       const authorized = shellAuthorized.delete(toolCallId);
-      const timeoutMs = commandTimeoutMs(parsed.timeout_seconds, defaultTimeoutMs, maxTimeoutMs);
+      const { timeoutMs, clamped } = commandTimeout(
+        parsed.timeout_seconds,
+        defaultTimeoutMs,
+        maxTimeoutMs
+      );
       if (!permitted(inspection.input, command)) {
         const names = options.allowlist?.join("、") ?? "";
         throw new RunCommandError(
@@ -691,6 +697,7 @@ export function createRunCommandTool(
           ? { memoryLimitExceeded: run.memoryLimitExceeded }
           : {}),
         ...(backgroundJobs.length > 0 ? { backgroundJobs } : {}),
+        ...(clamped !== undefined ? { timeoutClamped: clamped } : {}),
       };
       if (run.spawnError !== undefined) {
         if (run.spawnError.code === "ENOENT") {
@@ -722,15 +729,29 @@ export function durationText(ms: number): string {
   return ms % 1000 === 0 ? `${ms / 1000} 秒` : `${ms} 毫秒`;
 }
 
-// 本次命令的超时：给了 timeout_seconds 用它（超过上限即拒绝，免得模型以为设上了），否则用缺省
-function commandTimeoutMs(seconds: number | undefined, defaultMs: number, maxMs: number): number {
-  if (seconds === undefined) return defaultMs;
+// 本次命令的超时：给了 timeout_seconds 用它，否则用缺省。决策 411：超过上限按上限执行，交回夹取的情形（结果里注明，
+// 免得模型以为设上了）
+function commandTimeout(
+  seconds: number | undefined,
+  defaultMs: number,
+  maxMs: number
+): { timeoutMs: number; clamped?: NonNullable<ExecEvidence["timeoutClamped"]> } {
+  if (seconds === undefined) return { timeoutMs: defaultMs };
   if (seconds * 1000 > maxMs) {
-    throw new RunCommandError(
-      `timeout_seconds 至多 ${Math.floor(maxMs / 1000)}（给的是 ${seconds}）；更久的命令请用 background 在后台运行`
-    );
+    return {
+      timeoutMs: maxMs,
+      clamped: { requestedSeconds: seconds, appliedSeconds: Math.floor(maxMs / 1000) },
+    };
   }
-  return seconds * 1000;
+  return { timeoutMs: seconds * 1000 };
+}
+
+// 决策 411：夹取的说明一句
+function timeoutClampedText(clamped: NonNullable<ExecEvidence["timeoutClamped"]>): string {
+  return (
+    `timeout_seconds 给的是 ${clamped.requestedSeconds}，超过上限，已夹到上限 ${clamped.appliedSeconds} 秒执行；` +
+    "更久的命令请用 background 在后台运行"
+  );
 }
 
 function comspecOf(env: NodeJS.ProcessEnv): string {
@@ -827,6 +848,7 @@ function resultText(evidence: ExecEvidence, headBytes: number): string {
   const lines = [
     `$ ${evidence.command}${evidence.alias !== undefined ? `（短名 ${evidence.alias}）` : ""}${route}`,
     `退出码：${evidence.exitCode ?? "无"}${evidence.signal !== undefined ? `（信号 ${evidence.signal}）` : ""}`,
+    ...(evidence.timeoutClamped !== undefined ? [timeoutClampedText(evidence.timeoutClamped)] : []),
     ...(evidence.memoryLimitExceeded !== undefined
       ? [memoryLimitText(evidence.memoryLimitExceeded)]
       : []),

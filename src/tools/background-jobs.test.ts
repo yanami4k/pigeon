@@ -174,13 +174,10 @@ test.skipIf(POSIX ? false : "进程组只在 POSIX 上")(
 );
 
 test.skipIf(POSIX ? false : "进程组只在 POSIX 上")(
-  "单次超时：timeout_seconds 超过上限即拒绝、不与 background 同用；到时杀整个进程组",
+  "单次超时：timeout_seconds 不与 background 同用；到时杀整个进程组",
   async () => {
     const h = setup();
     try {
-      await assert.rejects(h.run("echo hi", { timeout_seconds: 601 }), (error: Error) =>
-        ["timeout_seconds", "600"].every((part) => error.message.includes(part))
-      );
       await assert.rejects(
         h.run("echo hi", { timeout_seconds: 5, background: true }),
         (error: Error) =>
