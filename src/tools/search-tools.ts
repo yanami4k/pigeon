@@ -6,6 +6,7 @@ import {
   createGrepTool,
   GREP_TOOL,
   GrepParamsSchema,
+  type GrepToolOptions,
   type SearchToolOptions,
 } from "./grep.ts";
 import type { ToolRegistration } from "./registry.ts";
@@ -36,7 +37,7 @@ export function searchToolRegistrations(): ToolRegistration[] {
 
 export function createSearchTools(
   host: WorkspaceHost,
-  options: { grep: SearchToolOptions; glob: SearchToolOptions }
+  options: { grep: GrepToolOptions; glob: SearchToolOptions }
 ) {
   const backendOf = backendCache(host, options.grep);
   return [

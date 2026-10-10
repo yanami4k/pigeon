@@ -229,7 +229,7 @@ export const modelInfo = {
 
 | 键 | 含义 | 缺省 |
 | --- | --- | --- |
-| `tools.grep.maxResults` | grep 至多列出的匹配条数（files_only 时为文件数），超出给出总数 | 200 |
+| `tools.grep.maxResults` | grep 至多列出的匹配条数（files_only 时为文件数），超出给出总数；另有列出部分的字数预算（常量，见下文"读档工具"一节末尾） | 200 |
 | `tools.glob.maxResults` | glob 至多列出的文件个数，超出给出总数 | 100 |
 | `tools.readFile.maxBytes` | read_file 单次返回的正文至多这么多字节，到了即停并给出续读的 offset | 51200（50 KiB） |
 | `tools.readFile.maxLineChars` | 单行超过这么多字符即截断显示并注明原长 | 2000 |
@@ -431,6 +431,8 @@ pigeon migrate-config [--root <项目根>]
 禁读名单只管读档工具；`run_command` 经 shell 读文件不在此列，由命令审批把关。
 
 `grep`、`glob` 两个读档工具（决策 368）经执行端在本机或容器里运行：优先 ripgrep（本机随包附带，依赖 `@vscode/ripgrep`，按平台拆成可选依赖、二进制直接打在包里，MIT），没有则在 git 仓库里用 `git grep`、`git ls-files`，再退到 `grep -r`、`find`。这些后端是 Pigeon 自己的辅助程序，不走 agent 的执行通道：程序先解析成绝对路径再启动（本机在 PATH 的绝对目录里找，跳过相对目录与工作区之内的目录，ripgrep 只用随包二进制；容器里系统目录优先），输出一律无歧义（rg 用 `--json`，git 用 `-z` 并把文件名含控制字符的文件排除在搜索之外，`grep -r` 降级先列出候选文件、按真实路径筛过再逐个搜，搜时先打开文件、按 `/proc` 给出的已打开文件的真实路径复核，没有 `/proc` 时不复核），git 不读系统与全局配置并关掉 `core.fsmonitor`，ripgrep 不读配置文件（`RIPGREP_CONFIG_PATH`）、`.ignore` 与全局 gitignore。缺省遵守 `.gitignore`（只在 git 仓库里）、跳过 `.git`；结果条数上限见 `tools` 一节。
+
+`grep` 的内容结果按文件分组（决策 408）：每个文件先写一行路径，其下逐行"行号: 内容"（上下文行为"行号- 内容"，同一文件里不相连的段之间用 `--`），文件之间空一行；`files_only` 的输出不变，每行一个路径。列出的部分另设 16,000 字的预算（常量）：超出时结果里只放前面放得下的整行，末尾写明总匹配条数与文件数，提示宽泛的搜索先用 `files_only` 只列文件或缩小 `path`；条数上限以内的全文存进会话的落盘目录，给出虚拟路径 `pigeon://outputs/<会话号>/<编号>`，与 run_command 的完整输出同一处、同样用 read_file 读，计入同一落盘总量上限（`tools.runCommand.savedOutputsMaxBytes`）。
 
 ## 本机模式的风险与容器沙箱
 

@@ -1274,7 +1274,8 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
       }),
       ...(jobs.available ? [createJobOutputTool(jobs), createJobKillTool(jobs)] : []),
       ...createSearchTools(workspaceHost, {
-        grep: { ...searchOptions, maxResults: searchLimits.grepMaxResults },
+        // 决策 408：超过字数预算的 grep 全文存进本会话的落盘目录（与 run_command 同一处）
+        grep: { ...searchOptions, maxResults: searchLimits.grepMaxResults, outputs: outputStore },
         glob: { ...searchOptions, maxResults: searchLimits.globMaxResults },
       }),
       ...(sessionSearch
