@@ -82,6 +82,8 @@ export interface HostExecResult {
   stderr: string;
   // 决策 333：命令因超出沙箱内存上限被杀（容器实现在设了内存上限时判定）
   memoryLimitExceeded?: MemoryLimitExceeded;
+  // 决策 410：超时那一刻命令本身（直接子进程）已经退出、是它的子孙仍占着输出才没结束（本机实现判定）
+  outputHeldAfterExit?: true;
 }
 
 // 超出内存上限：certain 为容器内存事件的 oom_kill 计数在命令前后增加；读不到计数、命令以 137 结束时为 false（可能）

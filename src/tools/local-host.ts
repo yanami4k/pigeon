@@ -482,6 +482,9 @@ function runLocalProcess(
   const stdoutOnly = createHeadCollector(streamCap);
   const stderrOnly = createHeadCollector(streamCap);
   let timedOut = false;
+  // 决策 410：直接子进程已退出（输出管道可能仍被它的子孙占着）；超时那一刻已退出的记下
+  let exited = false;
+  let heldAfterExit = false;
   const finish = (
     partial: Omit<
       HostExecResult,
@@ -490,6 +493,7 @@ function runLocalProcess(
   ): HostExecResult => ({
     ...partial,
     timedOut,
+    ...(heldAfterExit ? { outputHeldAfterExit: true as const } : {}),
     ...collected.finish(),
     stdout: stdoutOnly.finish().output,
     stderr: stderrOnly.finish().output,
@@ -549,6 +553,7 @@ function runLocalProcess(
     };
     const timer = setTimeout(() => {
       timedOut = true;
+      heldAfterExit = exited;
       terminate();
     }, options.timeoutMs);
     const onAbort = () => terminate();
@@ -560,6 +565,9 @@ function runLocalProcess(
     child.on("error", (error: NodeJS.ErrnoException) => {
       cleanup();
       settle(() => finish({ spawned: child.pid !== undefined, spawnError: error, exitCode: null }));
+    });
+    child.on("exit", () => {
+      exited = true;
     });
     child.on("close", (code, signal) => {
       cleanup();

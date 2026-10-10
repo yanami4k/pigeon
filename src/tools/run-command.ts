@@ -274,6 +274,10 @@ export function runCommandTexts(input: {
         "人按 Esc 中断当前一轮时后台作业照跑，会话结束时停止。" +
         `起服务、守护进程，或判分、使用者在会话结束后还要用到的长时间进程，再加 ${KEEP_AFTER_SESSION_PARAM}: true：` +
         "会话结束时不等它、不停它，进程留着继续跑，输出照样写进那个文件；会话里照常可用 job_output 查看、job_kill 停掉。";
+  // 决策 410：命令以输出全部关闭为结束——放到后台又没把输出重定向走的进程会让命令一直等到超时
+  const heldText =
+    `命令要等输出全部关闭才算结束：命令里${input.platform === "win32" ? "用 start /b" : "用 &"}放到后台、又没把输出重定向走的进程` +
+    `会一直占着输出，命令要等到超时才结束，连同那个进程一起被终止。${heldOutputAdvice(input.platform, input.backgroundJobs !== undefined)}`;
   const shell = input.platform === "win32" ? "cmd.exe" : "/bin/sh -c";
   const toolShell = {
     yolo: `管道、重定向、&& 串联等需要 shell 的命令经 ${shell} 运行。`,
@@ -303,8 +307,17 @@ export function runCommandTexts(input: {
       `在工作区根运行一条命令。普通命令不经 shell 直接执行；${toolShell}${toolApproval}` +
       `可用设置 commands 一节登记的短名。结果带退出码、输出与执行前后的文件变化（不含 Pigeon 自己的治理目录 ${PIGEON_DIR}）。` +
       `输出过长时自动保留开头与结尾，中间注明省略的行数，并把全文存为 ${OUTPUTS_URI_PREFIX}<会话号>/<编号>，可用 read_file 按需读取，` +
-      `不必自己用 tail、head 截取。${timeoutText}${backgroundText}`,
+      `不必自己用 tail、head 截取。${timeoutText}${backgroundText}${heldText}`,
   };
+}
+
+// 决策 410：一直运行的进程怎么起——有后台作业时用后台作业（服务标保留）；非放到后台不可时先把输出重定向到文件
+export function heldOutputAdvice(platform: NodeJS.Platform, backgroundJobs: boolean): string {
+  const redirect = platform === "win32" ? "start /b 命令 > 文件 2>&1" : "命令 > 文件 2>&1 &";
+  return backgroundJobs
+    ? `一直运行的进程用 background: true 作为后台作业启动（服务、会话结束后还要用的进程再加 ${KEEP_AFTER_SESSION_PARAM}: true）；` +
+        `非放到后台不可时，先把输出重定向到文件（${redirect}）。`
+    : `一直运行的进程非放到后台不可时，先把输出重定向到文件（${redirect}）。`;
 }
 
 // 命令串 → 参数数组：空白切分；单引号内原样；双引号内只认 \" 与 \\ 两种转义；
@@ -736,8 +749,13 @@ export function createRunCommandTool(
         throw run.spawnError;
       }
       if (run.timedOut) {
+        // 决策 410：命令本身已退出、是它放到后台的进程占着输出才没结束的，点明原因并给出两种做法
+        const held =
+          run.outputHeldAfterExit === true
+            ? `命令本身已经退出，是它放到后台的进程仍占着输出，命令才没有结束。${heldOutputAdvice(platform, options.jobs?.available === true)}\n`
+            : "";
         throw new RunCommandTimeoutError(
-          `命令超时（${durationText(timeoutMs)}）已终止整个进程组：${command}\n${resultText(evidence, headBytes)}`
+          `命令超时（${durationText(timeoutMs)}）已终止整个进程组：${command}\n${held}${resultText(evidence, headBytes)}`
         );
       }
       if (signal?.aborted === true) {

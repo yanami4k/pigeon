@@ -80,13 +80,36 @@ test("执行：参数数组直接 spawn，结果 details 记退出码、输出�
   });
 });
 
+// 决策 410：超时那一刻命令本身已退出、是它放到后台的进程占着输出时，点明原因并给出做法；命令本身没退出的超时不出这一句
+const HELD = "仍占着输出";
+
 test("超时：终止进程并抛环境类错误", async () => {
   await withRoot(async (root) => {
     const tool = createRunCommandTool({ workspaceRoot: root, timeoutMs: 300 });
     await assert.rejects(
       tool.execute("tc-2", { command: `${NODE} -e "setTimeout(() => {}, 20000)"` }),
       (error: unknown) =>
-        error instanceof RunCommandTimeoutError && /命令超时（300 毫秒）已终止/.test(error.message)
+        error instanceof RunCommandTimeoutError &&
+        /命令超时（300 毫秒）已终止/.test(error.message) &&
+        !error.message.includes(HELD)
+    );
+  });
+});
+
+test("决策 410：命令本身已退出、放到后台的进程占着输出到超时，结果里点明原因并给出重定向的做法", async () => {
+  await withRoot(async (root) => {
+    const tool = createRunCommandTool({ workspaceRoot: root, timeoutMs: 1000 });
+    // 子进程继承输出，父进程随即退出。Windows 上分离启动才不随父进程结束（工作目录不在工作区，免得挡住删除）；
+    // 其余平台留在命令的进程组里，到时随整组终止
+    const spawnChild =
+      "require('child_process').spawn(process.execPath, ['-e', 'setTimeout(() => {}, 8000)'], " +
+      "{ stdio: 'inherit', detached: process.platform === 'win32', cwd: require('os').tmpdir() }).unref()";
+    await assert.rejects(
+      tool.execute("tc-h", { command: `${NODE} -e "${spawnChild}"` }),
+      (error: unknown) =>
+        error instanceof RunCommandTimeoutError &&
+        error.message.includes(HELD) &&
+        error.message.includes("2>&1")
     );
   });
 });
