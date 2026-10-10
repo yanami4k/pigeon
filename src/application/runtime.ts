@@ -676,6 +676,8 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
   const approval: RunCommandApproval =
     approvalMode === "yolo" ? "yolo" : deps.createApprovalHandler !== undefined ? "prompt" : "none";
   const commandTexts = runCommandTexts({ platform: workspaceHost.platform, approval });
+  // 决策 407：放权时写工具接受工作区以外的路径（与放权下 shell 的能力一致）；未放权时照旧只写工作区
+  const writeOptions = { outsideWrites: approval === "yolo" };
   // 决策 368：grep、glob 的上限与禁读名单；本机执行端先用随包附带的 ripgrep，容器里用容器自己的
   const searchLimits = searchLimitsOf(settings);
   const searchOptions = {
@@ -1247,9 +1249,9 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
         ...readOptions,
       }),
       replaceMode
-        ? createReplaceEditTool(workspaceHost, reads)
-        : createEditFileTool(workspaceHost, reads),
-      createWriteFileTool(workspaceHost, reads),
+        ? createReplaceEditTool(workspaceHost, reads, writeOptions)
+        : createEditFileTool(workspaceHost, reads, writeOptions),
+      createWriteFileTool(workspaceHost, reads, writeOptions),
       createRunCommandTool({
         workspaceRoot: deps.workspaceRoot,
         host: workspaceHost,
@@ -1272,7 +1274,8 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
       }),
       ...(jobs.available ? [createJobOutputTool(jobs), createJobKillTool(jobs)] : []),
       ...createSearchTools(workspaceHost, {
-        grep: { ...searchOptions, maxResults: searchLimits.grepMaxResults },
+        // 决策 408：超过字数预算的 grep 全文存进本会话的落盘目录（与 run_command 同一处）
+        grep: { ...searchOptions, maxResults: searchLimits.grepMaxResults, outputs: outputStore },
         glob: { ...searchOptions, maxResults: searchLimits.globMaxResults },
       }),
       ...(sessionSearch
@@ -1442,21 +1445,29 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
     adapter.notify(`${JOB_NOTICE_PREFIX}${escapeStatusText(lostJobsText(lostJobs))}`);
     deps.storeWarn?.(lostJobsText(lostJobs));
   }
-  // 写工具改过的文件记作前台改动（作业结束时从期间变化里扣除）；job_output 以外的工具调用清零不带等待的连续查询
-  const relativeToRoot = (resolved: string): string =>
-    (deps.workspaceHost !== undefined
-      ? path.posix.relative(workspaceHost.root, resolved)
-      : path.relative(deps.workspaceRoot, resolved)
-    ).replaceAll("\\", "/");
+  // 写工具改过的文件记作前台改动（作业结束时从期间变化里扣除）；job_output 以外的工具调用清零不带等待的连续查询。
+  // 决策 407：放权时写到工作区以外的文件不进工作区的改动统计
+  const relativeToRoot = (resolved: string): string | undefined => {
+    const relative =
+      deps.workspaceHost !== undefined
+        ? path.posix.relative(workspaceHost.root, resolved)
+        : path.relative(deps.workspaceRoot, resolved);
+    const unified = relative.replaceAll("\\", "/");
+    return unified === ".." || unified.startsWith("../") || path.isAbsolute(relative)
+      ? undefined
+      : unified;
+  };
   adapter.subscribeToolResults((notice) => {
     if (notice.toolName !== JOB_OUTPUT_TOOL) jobs.resetQueries();
     const resolved = (notice.details as { resolvedPath?: unknown } | undefined)?.resolvedPath;
-    if (
+    const relative =
       !notice.isError &&
       typeof resolved === "string" &&
       registry.get(notice.toolName)?.tier === "write"
-    ) {
-      jobs.noteForegroundChanges([relativeToRoot(resolved)]);
+        ? relativeToRoot(resolved)
+        : undefined;
+    if (relative !== undefined) {
+      jobs.noteForegroundChanges([relative]);
     }
   });
   // 决策 323：PostCompact 钩子——压缩完成后通知（无决策能力；触发位置 turn / run-start 记 auto、manual 记 manual）

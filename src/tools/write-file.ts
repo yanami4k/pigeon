@@ -2,12 +2,18 @@
 // 围栏）、不写受保护路径（治理层按写档与工作区围栏判定）、审批属写档、写前复核照 334（目标本身是符号链接拒写，路径在检查之后
 // 变了拒写；新建时目标在检查之后被别人建了也不覆盖）。
 // 覆盖已存在的文件前须本会话读过它，且读后未变（读取记录按读取当时整个文件的哈希判断）；成功后按写成的内容更新读取记录。
+// 决策 407：放权时（options.outsideWrites）接受工作区以外的路径，其余规矩照旧。
 // 预检在内存完成、零写副作用，审批预览 diff 与执行共享同一段预检；预览按行比对，分散的改动各成一段。内容原样写入，不改行尾。
 import { type Static, Type } from "typebox";
 import { Value } from "typebox/value";
 import { type AppliedEdit, buildEditDiff, splitContent } from "./hashline.ts";
 import { asWorkspaceHost } from "./local-host.ts";
-import { assertWritePathText } from "./paths.ts";
+import {
+  assertWritePathText,
+  OUTSIDE_WRITE_SENTENCE,
+  type WritePathOptions,
+  type WriteToolOptions,
+} from "./paths.ts";
 import type { FileReadTracker } from "./read-tracker.ts";
 import { changedSpan } from "./replace-edit.ts";
 import type { WorkspaceHost } from "./workspace-host.ts";
@@ -39,29 +45,37 @@ export interface WriteFileDetails {
   removedLines: number;
 }
 
-export const WRITE_FILE_DESCRIPTION =
-  "新建文本文件，或用给出的内容整体覆盖已存在的文件（限工作区内）。" +
-  "覆盖已存在的文件前须先在本会话用 read_file 读过它，且读后文件没有被改过；只改其中一部分请用 edit_file。" +
-  "目录不存在会自动创建；目标是符号链接时拒写。";
+// 决策 407：放权时说明可写工作区以外
+export function writeFileDescription(outsideWrites: boolean): string {
+  return (
+    `新建文本文件，或用给出的内容整体覆盖已存在的文件${outsideWrites ? `。${OUTSIDE_WRITE_SENTENCE}` : "（限工作区内）。"}` +
+    "覆盖已存在的文件前须先在本会话用 read_file 读过它，且读后文件没有被改过；只改其中一部分请用 edit_file。" +
+    "目录不存在会自动创建；目标是符号链接时拒写。"
+  );
+}
 
 // 决策 098：workspace 给目录即本地工作区，给执行端实现即由它承接读写；reads 为本会话的读取记录
 export function createWriteFileTool(
   workspace: string | WorkspaceHost,
-  reads: FileReadTracker
+  reads: FileReadTracker,
+  options: WriteToolOptions = {}
 ): PigeonAgentTool<typeof WriteFileParamsSchema, WriteFileDetails> & PreviewableTool {
   const host = asWorkspaceHost(workspace);
+  const outside = options.outsideWrites === true;
+  const pathOptions: WritePathOptions = { outside };
   return {
     name: WRITE_FILE_TOOL,
     label: WRITE_FILE_TOOL,
-    description: WRITE_FILE_DESCRIPTION,
+    description: writeFileDescription(outside),
     parameters: WriteFileParamsSchema,
     executionMode: "sequential",
     async preview(params) {
-      return (await planWrite(host, reads, Value.Parse(WriteFileParamsSchema, params))).diff;
+      return (await planWrite(host, reads, Value.Parse(WriteFileParamsSchema, params), pathOptions))
+        .diff;
     },
     async execute(_toolCallId, params, signal): Promise<PigeonToolResult<WriteFileDetails>> {
       const args = Value.Parse(WriteFileParamsSchema, params);
-      const plan = await planWrite(host, reads, args);
+      const plan = await planWrite(host, reads, args, pathOptions);
       signal?.throwIfAborted();
       if (plan.created) {
         await (host.createText as NonNullable<WorkspaceHost["createText"]>)(
@@ -97,12 +111,17 @@ export function createWriteFileTool(
 }
 
 // 围栏 + 读过且读后未变的检查 + 内存里算出改动（零写副作用）
-async function planWrite(host: WorkspaceHost, reads: FileReadTracker, args: WriteFileParams) {
+async function planWrite(
+  host: WorkspaceHost,
+  reads: FileReadTracker,
+  args: WriteFileParams,
+  pathOptions: WritePathOptions
+) {
   if (host.resolveForCreate === undefined || host.createText === undefined) {
     throw new WriteFileError("当前执行端不支持 write_file");
   }
   assertWritePathText(args.path);
-  const target = await host.resolveForCreate(args.path);
+  const target = await host.resolveForCreate(args.path, pathOptions);
   let oldLines: string[] = [];
   if (target.exists) {
     if (!(await host.isFile(target.path))) {

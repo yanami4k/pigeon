@@ -183,7 +183,7 @@ test.skipIf(hasBusybox ? false : "没有 Docker 或 busybox 镜像")(
       const grep = createGrepTool(host, { maxResults: 50, only: "grep" });
       const result = await grep.execute("tc", { pattern: "foo" });
       const text = result.content.map((block) => ("text" in block ? block.text : "")).join("");
-      assert.ok(text.split("\n").includes("a.txt:1:foo here"), text);
+      assert.ok(text.includes("a.txt\n1: foo here"), text);
       assert.doesNotMatch(text, /foo (key|outside|git|newline)/);
       assert.deepEqual([result.details.total, result.details.unsafeOmitted], [1, 1]);
     } finally {

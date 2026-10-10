@@ -792,7 +792,13 @@ export function createContainerWorkspaceHost(options: ContainerHostOptions): Wor
     lastInspection = inspection;
     return inspection;
   };
-  const inspectedPath = (inputPath: string, inspection: Inspection, base: string): string => {
+  // outside 为真（决策 407：放权时的写工具）不判工作区边界
+  const inspectedPath = (
+    inputPath: string,
+    inspection: Inspection,
+    base: string,
+    outside = false
+  ): string => {
     if (inspection.kind === "M") {
       throw new WorkspacePathNotFoundError(`路径不存在或不可读：${inputPath}`);
     }
@@ -802,7 +808,7 @@ export function createContainerWorkspaceHost(options: ContainerHostOptions): Wor
     if (hasControlChars(inspection.resolved)) {
       throw controlCharsRefused(inspection.resolved);
     }
-    if (!insideRoot(base, inspection.resolved)) {
+    if (!outside && !insideRoot(base, inspection.resolved)) {
       throw new WorkspacePathError(`路径越出工作区根：${inputPath}`);
     }
     return inspection.resolved;
@@ -1140,14 +1146,14 @@ export function createContainerWorkspaceHost(options: ContainerHostOptions): Wor
     },
     // 同一路径刚检视过（其间没有 exec 与写入）即直接取用：审批预览、预检、执行之间不再重复进容器；
     // 原文在这之后被改动的，由写入脚本按检视时的 cksum 复核拦下
-    async resolveForWrite(inputPath) {
+    async resolveForWrite(inputPath, writeOptions) {
       const base = await resolveRoot();
       const key = inspectionKey(inputPath);
       const inspection = lastInspection?.key === key ? lastInspection : await inspect(key);
       if (inspection.symlink !== undefined) {
         throw symlinkRefused(inputPath, inspection.symlink);
       }
-      const resolved = inspectedPath(inputPath, inspection, base);
+      const resolved = inspectedPath(inputPath, inspection, base, writeOptions?.outside === true);
       await refuseGitMetadata(inputPath, resolved, base);
       return resolved;
     },
@@ -1308,7 +1314,7 @@ export function createContainerWorkspaceHost(options: ContainerHostOptions): Wor
         throw new ContainerHostError(`写入失败：${resolvedPath}（${result.stderr.trim()}）`);
       }
     },
-    async resolveForCreate(inputPath) {
+    async resolveForCreate(inputPath, writeOptions) {
       if (hasControlChars(inputPath)) {
         throw controlCharsRefused(inputPath);
       }
@@ -1338,7 +1344,7 @@ export function createContainerWorkspaceHost(options: ContainerHostOptions): Wor
           `路径解析结果为空或含控制字符，拒绝写入：${JSON.stringify(target)}`
         );
       }
-      if (!insideRoot(base, target)) {
+      if (writeOptions?.outside !== true && !insideRoot(base, target)) {
         throw new WorkspacePathError(`路径越出工作区根：${inputPath}`);
       }
       // 覆盖与新建都不写版本库元数据

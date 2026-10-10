@@ -18,7 +18,12 @@ import {
   splitContent,
 } from "./hashline.ts";
 import { asWorkspaceHost } from "./local-host.ts";
-import { assertWritePathText } from "./paths.ts";
+import {
+  assertWritePathText,
+  OUTSIDE_WRITE_SENTENCE,
+  type WritePathOptions,
+  type WriteToolOptions,
+} from "./paths.ts";
 import type { FileReadTracker } from "./read-tracker.ts";
 import { planAndWrite, type WorkspaceHost } from "./workspace-host.ts";
 import type { PigeonAgentTool, PigeonToolResult, PreviewableTool } from "./wrap.ts";
@@ -66,16 +71,23 @@ export interface EditFileDetails {
 
 // 决策 098：workspace 给目录即本地工作区，给执行端实现即由它承接读写
 // 决策 358：reads 为本会话的读取记录，成功写入后按写成的内容更新
+// 决策 407：放权时（options.outsideWrites）接受工作区以外的路径，说明随之交代
 export function createEditFileTool(
   workspace: string | WorkspaceHost,
-  reads?: FileReadTracker
+  reads?: FileReadTracker,
+  options: WriteToolOptions = {}
 ): PigeonAgentTool<typeof EditFileParamsSchema, EditFileDetails> & PreviewableTool {
   const host = asWorkspaceHost(workspace);
+  const outside = options.outsideWrites === true;
+  const pathOptions: WritePathOptions = { outside };
   return {
     name: "edit_file",
     label: "edit_file",
     description:
-      "编辑工作区内已存在的文本文件。必须先用 read_file 读取：edits 按 N#TAG 锚点寻址" +
+      (outside
+        ? `编辑已存在的文本文件。${OUTSIDE_WRITE_SENTENCE}`
+        : "编辑工作区内已存在的文本文件。") +
+      "必须先用 read_file 读取：edits 按 N#TAG 锚点寻址" +
       "（read 输出的行前缀），snapshot 填 read 输出的 [PATH#TAG] 中的快照标签。" +
       "操作：replace（换 anchor 到 endAnchor 的行）/ insertAfter（anchor 后插入）/ delete（删行）。" +
       "多处编辑全部预检通过才落盘；文件读后已变化（快照过期）会被拒绝，需重新 read_file。",
@@ -85,7 +97,7 @@ export function createEditFileTool(
     // 执行前预览（审批展示用）：与 execute 共享同一 planEdits 预检，但零副作用。
     // 注意 TOCTOU：预览与执行是两次独立读取，快照预检在执行时仍会兜底。
     async preview(params) {
-      const plan = await planEdits(host, Value.Parse(EditFileParamsSchema, params));
+      const plan = await planEdits(host, Value.Parse(EditFileParamsSchema, params), pathOptions);
       return buildEditDiff(plan.args.path, plan.split.lines, plan.applied);
     },
     async execute(_toolCallId, params, signal): Promise<PigeonToolResult<EditFileDetails>> {
@@ -95,7 +107,7 @@ export function createEditFileTool(
       const plan = await planAndWrite({
         host,
         inputPath: args.path,
-        plan: () => planEdits(host, args),
+        plan: () => planEdits(host, args, pathOptions),
         contentOf: (planned) => joinContent(planned.newLines, planned.split),
         signal,
       });
@@ -131,10 +143,10 @@ export function createEditFileTool(
 
 // 读 + 围栏 + 快照预检 + 内存落地（零写副作用）；任一编辑失败整单抛错，文件零改动。
 // execute 与 preview 共享同一预检路径，保证"预览所见 = 执行所得"。
-async function planEdits(host: WorkspaceHost, args: EditFileParams) {
+async function planEdits(host: WorkspaceHost, args: EditFileParams, pathOptions: WritePathOptions) {
   // 决策 334：要写的文件本身是符号链接即拒写
   assertWritePathText(args.path);
-  const resolvedPath = await host.resolveForWrite(args.path);
+  const resolvedPath = await host.resolveForWrite(args.path, pathOptions);
   if (!(await host.isFile(resolvedPath))) {
     throw new EditFileError(`不是常规文件：${args.path}`);
   }

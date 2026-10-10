@@ -91,8 +91,9 @@ export interface OutsideReadTool {
   authorizeOutsideRead(toolCallId: string): void;
 }
 
+// 放手模式下写工具也可写工作区以外（决策 407），allowed 的说法因此不说只读
 const OUTSIDE_SENTENCES: Readonly<Record<OutsideReadMode, string>> = {
-  allowed: "工作区以外的文件也可读（用绝对路径），只读、不能改；凭据目录（如 ~/.ssh）不可读。",
+  allowed: "工作区以外的文件也可读（用绝对路径）；凭据目录（如 ~/.ssh）不可读。",
   approval:
     "工作区以外的文件也可读（用绝对路径），须经人批准（可按目录放权），只读、不能改；凭据目录（如 ~/.ssh）不可读。",
   refused: "",

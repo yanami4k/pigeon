@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { test } from "vitest";
 import { createFakeStreamFn } from "../pi-runtime/fixtures.ts";
 import { DEFAULT_EDIT_MODE, type EditMode } from "../tools/edit-mode.ts";
-import { REPLACE_EDIT_DESCRIPTION } from "../tools/replace-edit.ts";
+import { replaceEditDescription } from "../tools/replace-edit.ts";
 import { runCommandTexts } from "../tools/run-command.ts";
 import { runHeadless } from "./headless-core.ts";
 import { PARALLEL_READS_SENTENCE, TRUNCATION_GUIDANCE } from "./runtime.ts";
@@ -88,7 +88,8 @@ test("编辑模式显式 hashline：edit_file 与 read_file 的描述带锚点�
 test("编辑模式缺省为 replace：不传编辑模式时装配出 replace 版 edit_file 与 read_file", async () => {
   assert.equal(DEFAULT_EDIT_MODE, "replace");
   const { systemPrompt, edit, read } = await advertised(undefined);
-  assert.equal(edit?.description, REPLACE_EDIT_DESCRIPTION);
+  // 本文件的运行一律 yolo：说明是放权时的那份（决策 407：交代可写工作区以外）
+  assert.equal(edit?.description, replaceEditDescription(true));
   assert.deepEqual(Object.keys(edit?.parameters.properties ?? {}).sort(), [
     "new_string",
     "old_string",

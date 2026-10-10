@@ -678,7 +678,13 @@ export function resultNotes(input: {
       : `共 ${input.total} ${input.unit}`;
     notes.push(`${count}，只列出前 ${input.shown} ${input.measure}；请缩小范围（${input.narrow}）`);
   }
-  const { denied, outside, unsafe, unchecked } = input.omitted;
+  return [...notes, ...omittedNotes(input.omitted)];
+}
+
+// 各类略去的文件数（没有略去的不写）
+export function omittedNotes(omitted: Omitted): string[] {
+  const notes: string[] = [];
+  const { denied, outside, unsafe, unchecked } = omitted;
   if (denied > 0) notes.push(`已按禁读名单略去 ${denied} 个文件`);
   if (outside > 0) notes.push(`已略去经链接指向工作区以外的 ${outside} 个文件`);
   if (unsafe > 0) notes.push(`已略去文件名含换行或控制字符的 ${unsafe} 个文件`);

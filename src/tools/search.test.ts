@@ -2,12 +2,22 @@
 // 遵守 .gitignore、跳过 .git、含隐藏文件；上限与总数提示；模式里的 shell 特殊字符原样交给后端、不被解释；
 // 以 - 开头的模式与目录不被当成选项；禁读名单的路径从结果里滤掉并注明条数。机器上没有的后端跳过。
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "vitest";
+import { CommandOutputStore } from "./command-output.ts";
 import { createGlobTool } from "./glob.ts";
 import { GlobPatternError, globToRegExp } from "./glob-match.ts";
-import { createGrepTool } from "./grep.ts";
+import { createGrepTool, GREP_OUTPUT_BUDGET } from "./grep.ts";
 import { createLocalWorkspaceHost } from "./local-host.ts";
 import { ReadDeniedError } from "./read-deny.ts";
 import {
@@ -45,19 +55,19 @@ for (const git of [true, false]) {
         assert.deepEqual(other, first, `${kinds[index + 1]} 与 ${kinds[0]} 的结果不同`);
       }
       const all = first?.grep[0] ?? "";
-      assert.match(all, /^\.hidden\/h\.ts:1:foo hidden$/m);
-      assert.match(all, /^-dash\/d\.ts:1:foo dash$/m);
+      assert.match(all, /^\.hidden\/h\.ts\n1: foo hidden$/m);
+      assert.match(all, /^-dash\/d\.ts\n1: foo dash$/m);
       // git 仓库的 .git 里放了含 foo 的文件（见夹具），搜不到
       assert.doesNotMatch(all, /\.git\/|in git dir/);
       assert.equal(/ignored\/x\.ts|x\.log/.test(all), !git, all);
-      assert.equal(first?.grep[2], "src/a.ts-1-alpha foo\nsrc/a.ts:2:beta\nsrc/a.ts-3-foo:bar");
+      assert.equal(first?.grep[2], "src/a.ts\n1- alpha foo\n2: beta\n3- foo:bar");
       // shell 特殊字符原样当正则：命中那一行，且没有任何命令被执行
-      assert.match(first?.grep[4] ?? "", /^src\/a\.ts:5:x; echo hi > pwned;/m);
+      assert.match(first?.grep[4] ?? "", /^src\/a\.ts\n5: x; echo hi > pwned;/m);
       for (const name of ["pwned", "pwned2", "pwned3"]) {
         assert.equal(existsSync(join(root, name)), false, name);
       }
-      assert.match(first?.grep[5] ?? "", /^src\/a\.ts:4:-v flag$/m);
-      assert.equal(first?.grep[6], "-dash/d.ts:1:foo dash");
+      assert.match(first?.grep[5] ?? "", /^src\/a\.ts\n4: -v flag$/m);
+      assert.equal(first?.grep[6], "-dash/d.ts\n1: foo dash");
       // glob：按修改时间从新到旧
       assert.equal(first?.glob[1], "src/b.md");
       assert.deepEqual(first?.glob[2]?.split("\n"), ["src/b.md", "src/a.ts"]);
@@ -120,9 +130,10 @@ test.skipIf(process.platform === "win32" ? "Windows 的文件名不能含冒号�
         }
         const grep = createGrepTool(host, { maxResults: 200, only, bundledRipgrep: true });
         const result = await grep.execute("tc", { pattern: "foo (safe|colon|key|newline)" });
-        const lines = text(result).split("\n");
-        assert.ok(lines.includes("a.txt:1:foo safe"), `${only}：${lines.join(" | ")}`);
-        assert.ok(lines.includes("a.txt:1:x:1:foo colon"), `${only}：${lines.join(" | ")}`);
+        // 分组输出里路径独占一行：名字带"冒号数字冒号"也不会与行号混淆
+        const all = text(result);
+        assert.ok(all.includes("a.txt\n1: foo safe"), `${only}：${all}`);
+        assert.ok(all.includes("a.txt:1:x\n1: foo colon"), `${only}：${all}`);
         assert.doesNotMatch(text(result), /foo (key|newline)/, only);
         assert.equal(result.details.total, 2, only);
         assert.equal(result.details.unsafeOmitted, 1, only);
@@ -133,6 +144,62 @@ test.skipIf(process.platform === "win32" ? "Windows 的文件名不能含冒号�
     }
   }
 );
+
+test("内容结果按文件分组：每个文件只写一次路径，其下逐行「行号: 内容」，文件之间空一行；只列文件的输出照旧每行一个路径", async () => {
+  const { root, cleanup } = makeSearchTree(false);
+  try {
+    const host = createLocalWorkspaceHost(root, { homeDir: join(root, "no-home") });
+    const grep = createGrepTool(host, { maxResults: 200, bundledRipgrep: true });
+    const groups = text(await grep.execute("tc", { pattern: "foo" })).split("\n\n");
+    const paths = groups.map((group) => group.split("\n")[0]);
+    assert.deepEqual(paths, [...new Set(paths)].sort());
+    for (const group of groups) {
+      for (const line of group.split("\n").slice(1)) assert.match(line, /^\d+: .*foo/);
+    }
+    assert.equal(groups.find((group) => group.startsWith("many.txt\n"))?.split("\n").length, 31);
+    const listed = await grep.execute("tc", { pattern: "foo", files_only: true });
+    assert.equal(text(listed), paths.join("\n"));
+  } finally {
+    cleanup();
+  }
+});
+
+test("列出的部分超过字数预算：只放预算内的整行，写明总条数与文件数并提示先只列文件，全文（条数上限以内）存进落盘目录", async () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "pigeon-grep-budget-")));
+  const state = mkdtempSync(join(tmpdir(), "pigeon-grep-outputs-"));
+  try {
+    for (const name of ["a.txt", "b.txt", "c.txt"]) {
+      writeFileSync(join(root, name), `needle ${"x".repeat(90)}\n`.repeat(100));
+    }
+    const outputs = new CommandOutputStore({
+      base: state,
+      outputsRoot: join(state, "outputs"),
+      sessionId: "s1",
+      maxBytes: 1 << 20,
+    });
+    const host = createLocalWorkspaceHost(root, { homeDir: join(root, "no-home") });
+    const grep = createGrepTool(host, { maxResults: 250, bundledRipgrep: true, outputs });
+    const result = await grep.execute("tc", { pattern: "needle" });
+    const out = text(result);
+    const listing = out.slice(0, out.lastIndexOf("\n\n"));
+    assert.ok(listing.length <= GREP_OUTPUT_BUDGET, String(listing.length));
+    assert.deepEqual(
+      [result.details.total, result.details.files, result.details.overBudget],
+      [300, 3, true]
+    );
+    assert.ok(result.details.shown < 250, String(result.details.shown));
+    assert.match(out, /300 条匹配、3 个文件/);
+    assert.match(out, /files_only/);
+    const uri = result.details.savedOutput?.uri ?? "";
+    assert.ok(out.includes(uri) && uri !== "", out);
+    const saved = (await outputs.readWindow(uri, 1, 10_000)).lines.join("\n");
+    assert.ok(saved.startsWith(listing));
+    assert.equal(saved.split("\n").filter((line) => /^\d+: needle/.test(line)).length, 250);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(state, { recursive: true, force: true });
+  }
+});
 
 test("rg 不读 .ignore（与 git 的口径一致）", async (t) => {
   const { root, cleanup } = makeSearchTree(true);

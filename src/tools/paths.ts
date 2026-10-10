@@ -98,10 +98,30 @@ export function realRootOf(workspaceRoot: string): string {
   return real;
 }
 
+// 决策 407：写工具（edit_file、write_file）的路径选项。outside 为真（放权时）接受工作区以外的路径，其余规矩照旧：
+// 路径含控制字符拒写、要写的文件本身是符号链接拒写、不写版本库元数据、写入前复核。缺省只写工作区
+export interface WritePathOptions {
+  outside?: boolean;
+}
+
+// 写工具（edit_file 两种模式、write_file）的选项（决策 407）：outsideWrites 为真（放权时）接受工作区以外的路径，
+// 由装配层按本会话的审批状态给出；缺省只写工作区
+export interface WriteToolOptions {
+  outsideWrites?: boolean;
+}
+
+// 决策 407：放权时写工具的说明里交代可写工作区以外
+export const OUTSIDE_WRITE_SENTENCE = "工作区以外的文件也可写（用绝对路径）。";
+
 // 把 inputPath 解析成工作区根内的真实绝对路径；逃逸（../、根外绝对路径、
 // 符号链接/junction 解析后越界）一律拒绝。目标必须已存在（realpath 解析符号链接的前提）——
 // M3 的 read/edit 都只面向既有文件。
 export function resolveWorkspacePath(workspaceRoot: string, inputPath: string): string {
+  return resolveRealPath(workspaceRoot, inputPath, false);
+}
+
+// 同 resolveWorkspacePath；outside 为真时不判工作区边界（决策 407）
+function resolveRealPath(workspaceRoot: string, inputPath: string, outside: boolean): string {
   if (hasControlChars(inputPath)) {
     throw controlCharsRefused(inputPath);
   }
@@ -118,7 +138,7 @@ export function resolveWorkspacePath(workspaceRoot: string, inputPath: string): 
   }
   // path.relative 判包含关系：win32 下大小写不敏感，越界时为 .. 加分隔符开头或给出绝对路径
   const rel = path.relative(realRoot, realTarget);
-  if (isOutsideRelative(rel)) {
+  if (!outside && isOutsideRelative(rel)) {
     throw new WorkspacePathError(`路径越出工作区根：${inputPath}`);
   }
   return realTarget;
@@ -143,9 +163,13 @@ export function isPathInsideDir(workspaceRoot: string, dir: string, inputPath: s
 }
 
 // 决策 334：写工具的路径解析——同 resolveWorkspacePath，另在模型给的路径本身（最后一级）是符号链接时拒写并指出其指向
-//（路径上的目录是符号链接的照常解析）
-export function resolveWorkspaceWritePath(workspaceRoot: string, inputPath: string): string {
-  const resolved = resolveWorkspacePath(workspaceRoot, inputPath);
+//（路径上的目录是符号链接的照常解析）。决策 407：options.outside 为真时不判工作区边界
+export function resolveWorkspaceWritePath(
+  workspaceRoot: string,
+  inputPath: string,
+  options: WritePathOptions = {}
+): string {
+  const resolved = resolveRealPath(workspaceRoot, inputPath, options.outside === true);
   const realRoot = realRootOf(workspaceRoot);
   assertNotGitMetadata(realRoot, resolved, inputPath);
   const given = path.resolve(realRoot, inputPath);
@@ -225,10 +249,11 @@ function deepestExisting(target: string): { existing: string; rest: string[] } {
 
 // 决策 358：write_file 的解析。目标已存在：同 resolveWorkspaceWritePath（模型给的路径本身是符号链接即拒写）；
 // 不存在：路径上最深的已存在一层按真实路径解析（须是目录），拼上其余各段，须仍在工作区根内。
-// 两种情形都不写版本库元数据（.git），路径含控制字符一律拒绝
+// 两种情形都不写版本库元数据（.git），路径含控制字符一律拒绝。决策 407：options.outside 为真时不判工作区边界
 export function resolveWorkspaceCreatePath(
   workspaceRoot: string,
-  inputPath: string
+  inputPath: string,
+  options: WritePathOptions = {}
 ): { path: string; exists: boolean } {
   if (hasControlChars(inputPath)) {
     throw controlCharsRefused(inputPath);
@@ -237,7 +262,7 @@ export function resolveWorkspaceCreatePath(
   const given = path.resolve(realRoot, inputPath);
   const { existing, rest } = deepestExisting(given);
   if (rest.length === 0) {
-    return { path: resolveWorkspaceWritePath(workspaceRoot, inputPath), exists: true };
+    return { path: resolveWorkspaceWritePath(workspaceRoot, inputPath, options), exists: true };
   }
   let realExisting: string;
   try {
@@ -249,7 +274,7 @@ export function resolveWorkspaceCreatePath(
     throw new WorkspacePathError(`路径上的 ${existing} 不是目录：${inputPath}`);
   }
   const target = path.join(realExisting, ...rest);
-  if (isOutsideRelative(path.relative(realRoot, target))) {
+  if (options.outside !== true && isOutsideRelative(path.relative(realRoot, target))) {
     throw new WorkspacePathError(`路径越出工作区根：${inputPath}`);
   }
   assertNotGitMetadata(realRoot, target, inputPath);
