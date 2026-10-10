@@ -8,6 +8,7 @@
 //      （决策 366；改动行多时只列头尾各三行），不回传 diff 或锚点。
 // 工具名沿用 edit_file，写档、串行执行、工作区路径围栏与 hashline 版一致。同一次回复里连发的几个编辑按顺序执行（353）。
 // 决策 358：成功写入后按写成的内容更新本会话的读取记录。
+// 决策 407：放权时（options.outsideWrites）接受工作区以外的路径，说明随之交代。
 import { type Static, Type } from "typebox";
 import { Value } from "typebox/value";
 import { EDIT_NO_CHANGE_PREFIX } from "./edit-mode.ts";
@@ -19,7 +20,12 @@ import {
   splitContent,
 } from "./hashline.ts";
 import { asWorkspaceHost } from "./local-host.ts";
-import { assertWritePathText } from "./paths.ts";
+import {
+  assertWritePathText,
+  OUTSIDE_WRITE_SENTENCE,
+  type WritePathOptions,
+  type WriteToolOptions,
+} from "./paths.ts";
 import type { FileReadTracker } from "./read-tracker.ts";
 import { planAndWrite, type WorkspaceHost } from "./workspace-host.ts";
 import type { PigeonAgentTool, PigeonToolResult, PreviewableTool } from "./wrap.ts";
@@ -51,27 +57,39 @@ export interface ReplaceEditDetails {
   removedLines: number;
 }
 
-export const REPLACE_EDIT_DESCRIPTION =
-  "编辑工作区内已存在的文本文件：把 old_string 替换为 new_string。必须先用 read_file 读取；" +
-  "old_string 须与文件原文逐字一致（含缩进与空白，不带行号前缀），且在文件里恰好出现一次，" +
-  "出现多次时加上前后文使其唯一；old_string 与 new_string 相同会被拒绝。" +
-  "对同一文件或几个文件的多处修改，可以在同一次回复里连发几个 edit_file，会按顺序执行。" +
-  "回执给出这处改动在新文件里的行区间与上下各两行。";
+export function replaceEditDescription(outsideWrites: boolean): string {
+  return (
+    `${outsideWrites ? "编辑已存在的文本文件" : "编辑工作区内已存在的文本文件"}：把 old_string 替换为 new_string。` +
+    (outsideWrites ? OUTSIDE_WRITE_SENTENCE : "") +
+    "必须先用 read_file 读取；" +
+    "old_string 须与文件原文逐字一致（含缩进与空白，不带行号前缀），且在文件里恰好出现一次，" +
+    "出现多次时加上前后文使其唯一；old_string 与 new_string 相同会被拒绝。" +
+    "对同一文件或几个文件的多处修改，可以在同一次回复里连发几个 edit_file，会按顺序执行。" +
+    "回执给出这处改动在新文件里的行区间与上下各两行。"
+  );
+}
 
 // 决策 098：workspace 给目录即本地工作区，给执行端实现即由它承接读写；reads 为本会话的读取记录（决策 358）
 export function createReplaceEditTool(
   workspace: string | WorkspaceHost,
-  reads?: FileReadTracker
+  reads?: FileReadTracker,
+  options: WriteToolOptions = {}
 ): PigeonAgentTool<typeof ReplaceEditParamsSchema, ReplaceEditDetails> & PreviewableTool {
   const host = asWorkspaceHost(workspace);
+  const outside = options.outsideWrites === true;
+  const pathOptions: WritePathOptions = { outside };
   return {
     name: "edit_file",
     label: "edit_file",
-    description: REPLACE_EDIT_DESCRIPTION,
+    description: replaceEditDescription(outside),
     parameters: ReplaceEditParamsSchema,
     executionMode: "sequential",
     async preview(params) {
-      const plan = await planReplace(host, Value.Parse(ReplaceEditParamsSchema, params));
+      const plan = await planReplace(
+        host,
+        Value.Parse(ReplaceEditParamsSchema, params),
+        pathOptions
+      );
       return buildEditDiff(plan.args.path, plan.oldLines, [plan.applied]);
     },
     async execute(_toolCallId, params, signal): Promise<PigeonToolResult<ReplaceEditDetails>> {
@@ -80,7 +98,7 @@ export function createReplaceEditTool(
       const plan = await planAndWrite({
         host,
         inputPath: args.path,
-        plan: () => planReplace(host, args),
+        plan: () => planReplace(host, args, pathOptions),
         contentOf: (planned) => planned.newRaw,
         signal,
       });
@@ -110,10 +128,14 @@ export function createReplaceEditTool(
 }
 
 // 读 + 围栏 + 唯一匹配预检 + 内存落地（零写副作用）
-async function planReplace(host: WorkspaceHost, args: ReplaceEditParams) {
+async function planReplace(
+  host: WorkspaceHost,
+  args: ReplaceEditParams,
+  pathOptions: WritePathOptions
+) {
   // 决策 334：要写的文件本身是符号链接即拒写
   assertWritePathText(args.path);
-  const resolvedPath = await host.resolveForWrite(args.path);
+  const resolvedPath = await host.resolveForWrite(args.path, pathOptions);
   if (!(await host.isFile(resolvedPath))) {
     throw new ReplaceEditError(`不是常规文件：${args.path}`);
   }

@@ -1,6 +1,7 @@
 // 容器执行端的新建（决策 358 照 334）：两段容器内脚本经替身容器（本机执行的假 docker）验——新建含中间目录、读后覆盖；
 // 路径按内核顺序解析（链接 l→a/b 时 l/../.pigeon/x 落在 a/.pigeon/x，与受保护路径的容器判定同一口径，不按词法折叠成
 // .pigeon/x）；路径里的换行不被吃掉、解析结果含控制字符即拒绝；检查之后被别人建了不覆盖、路径上的目录被换成链接拒写。
+// 决策 407：放权时可新建、覆盖、编辑工作区以外的文件，未放权时越出工作区根即拒。
 import assert from "node:assert/strict";
 import {
   existsSync,
@@ -18,6 +19,7 @@ import { test } from "vitest";
 import { WorkspacePathError, WorkspaceWriteRefusedError } from "../tools/paths.ts";
 import { createReadFileTool } from "../tools/read-file.ts";
 import { FileReadTracker } from "../tools/read-tracker.ts";
+import { createReplaceEditTool } from "../tools/replace-edit.ts";
 import { createWriteFileTool } from "../tools/write-file.ts";
 import { localDockerHost } from "./local-docker-fixtures.ts";
 
@@ -103,4 +105,30 @@ test.skipIf(!POSIX)("容器：检查之后被别人建了不覆盖；路径上�
       rmSync(away, { recursive: true, force: true });
     }
   })
+);
+
+test.skipIf(!POSIX)(
+  "容器：放权时可新建、覆盖、编辑工作区以外的文件；未放权时越出工作区根即拒",
+  () =>
+    withContainer(async (_root, docker) => {
+      const away = mkdtempSync(join(tmpdir(), "pigeon-container-outside-"));
+      try {
+        const target = join(away, "d", "new.txt");
+        const reads = new FileReadTracker();
+        await assert.rejects(
+          () =>
+            createWriteFileTool(docker.host, reads).execute("w0", { path: target, content: "x" }),
+          WorkspacePathError
+        );
+        assert.equal(existsSync(join(away, "d")), false);
+        const write = createWriteFileTool(docker.host, reads, { outsideWrites: true });
+        await write.execute("w1", { path: target, content: "one\n" });
+        await write.execute("w2", { path: target, content: "two\n" });
+        const edit = createReplaceEditTool(docker.host, reads, { outsideWrites: true });
+        await edit.execute("e1", { path: target, old_string: "two", new_string: "three" });
+        assert.equal(readFileSync(target, "utf8"), "three\n");
+      } finally {
+        rmSync(away, { recursive: true, force: true });
+      }
+    })
 );

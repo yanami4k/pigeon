@@ -85,8 +85,8 @@ export function createLocalWorkspaceHost(
     async resolveExisting(inputPath) {
       return resolveWorkspacePath(workspaceRoot, inputPath);
     },
-    async resolveForWrite(inputPath) {
-      return resolveWorkspaceWritePath(workspaceRoot, inputPath);
+    async resolveForWrite(inputPath, writeOptions) {
+      return resolveWorkspaceWritePath(workspaceRoot, inputPath, writeOptions);
     },
     async resolveForRead(inputPath, deny) {
       return resolveLocalReadPath(workspaceRoot, inputPath, deny, options.homeDir ?? homedir());
@@ -138,8 +138,8 @@ export function createLocalWorkspaceHost(
       assertWritePathUnchanged(resolvedPath);
       await writeFile(resolvedPath, content, "utf8");
     },
-    async resolveForCreate(inputPath) {
-      return resolveWorkspaceCreatePath(workspaceRoot, inputPath);
+    async resolveForCreate(inputPath, writeOptions) {
+      return resolveWorkspaceCreatePath(workspaceRoot, inputPath, writeOptions);
     },
     async createText(resolvedPath, content) {
       createWorkspaceFile(resolvedPath, content);

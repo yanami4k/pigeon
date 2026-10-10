@@ -4,7 +4,7 @@
 // 快照与分叉与读写、执行同属"在该工作区上做事"，挂在同一层（096 ①）：本轮只留占位，见 snapshot / fork 的说明。
 // 本文件只放接口与不依赖实现的包装；本地实现在 local-host.ts，容器实现在 execution/container-host.ts。
 import { PIGEON_DIR } from "../state/paths.ts";
-import { WorkspaceContentChangedError } from "./paths.ts";
+import { WorkspaceContentChangedError, type WritePathOptions } from "./paths.ts";
 import type { ReadPathClassification, ReadTarget } from "./read-deny.ts";
 
 // 系统程序所在的目录（root 所有、agent 改不了）：Pigeon 自己执行的程序按它们优先解析
@@ -221,8 +221,8 @@ export interface WorkspaceHost {
   // 路径围栏：把模型给的路径解析成工作区内既有目标的规范路径；不存在或解析后越出工作区根抛 WorkspacePathError
   resolveExisting(inputPath: string): Promise<string>;
   // 写工具用的解析（决策 334）：同 resolveExisting，另在模型给的路径本身是符号链接时拒写（WorkspaceWriteRefusedError），
-  // 报出其指向
-  resolveForWrite(inputPath: string): Promise<string>;
+  // 报出其指向。决策 407：options.outside 为真（放权时）不判工作区边界
+  resolveForWrite(inputPath: string, options?: WritePathOptions): Promise<string>;
   // 决策 355：读档的解析——不限工作区：给出符号链接解析后的真实路径与它是否落在工作区根之外；落在禁读名单 deny
   //（~ 按本执行端的家目录展开）之内抛 ReadDeniedError，不存在抛 WorkspacePathNotFoundError。
   // 可选：没有实现的执行端读档只限工作区之内（照 resolveExisting）
@@ -248,8 +248,12 @@ export interface WorkspaceHost {
   // 可选：没有实现的执行端 glob 按路径排序
   fileMtimes?(relPaths: readonly string[]): Promise<Map<string, number>>;
   // 决策 358（write_file）：目标已存在时同 resolveForWrite（exists 为真）；不存在时按路径上最深的已存在一层的真实路径拼上
-  // 其余各段，须仍在工作区根内（exists 为假）。两个实现都有；可缺省只为测试里手拼的执行端
-  resolveForCreate?(inputPath: string): Promise<{ path: string; exists: boolean }>;
+  // 其余各段，须仍在工作区根内（exists 为假；决策 407：options.outside 为真时不判工作区边界）。两个实现都有；可缺省只为
+  // 测试里手拼的执行端
+  resolveForCreate?(
+    inputPath: string,
+    options?: WritePathOptions
+  ): Promise<{ path: string; exists: boolean }>;
   // 决策 358 照 334：新建 resolveForCreate 给出的不存在的路径——复核路径上最深的已存在一层未变，补建中间目录，目标已存在
   // 即拒写（不覆盖）
   createText?(resolvedPath: string, content: string): Promise<void>;

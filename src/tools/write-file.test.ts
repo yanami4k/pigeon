@@ -2,7 +2,7 @@
 // 目标是符号链接拒写，链接与它指向的文件都不变。受保护路径的拒写在 application/write-file-protected.test.ts。
 // 另：路径含控制字符拒写（write_file 与 edit_file 两种模式）；新建越出工作区根、检查后被别人建了、检查后路径上的目录被
 // 换成链接都拒写；失败的读取不算读过；读取记录按文件字节判断；审批预览逐行分段；run_command 长命令照常执行，超出执行端
-// 能执行的长度直接给出明确错误。
+// 能执行的长度直接给出明确错误。决策 407：放权时 write_file 与 edit_file（两种模式）可写工作区以外，未放权时照旧拒写。
 import assert from "node:assert/strict";
 import {
   existsSync,
@@ -18,8 +18,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "vitest";
 import { createEditFileTool } from "./edit-file.ts";
+import { lineTag, snapshotTag } from "./hashline.ts";
 import {
   createWorkspaceFile,
+  OUTSIDE_WRITE_SENTENCE,
   resolveWorkspaceCreatePath,
   WorkspacePathError,
   WorkspaceWriteRefusedError,
@@ -159,6 +161,56 @@ test.skipIf(process.platform === "win32")(
       rmSync(away, { recursive: true, force: true });
     })
 );
+
+test("放权时 write_file 与 edit_file（两种模式）可写工作区以外的绝对路径，说明随之交代；未放权时越出工作区根即拒、什么也不改", () =>
+  withRoot(async (root) => {
+    const away = mkdtempSync(join(tmpdir(), "pigeon-write-outside-"));
+    try {
+      const created = join(away, "sub", "new.txt");
+      const existing = join(away, "old.txt");
+      writeFileSync(existing, "alpha\n");
+      const hashlineEdit = (line: string, to: string) => ({
+        path: existing,
+        snapshot: snapshotTag(`${line}\n`),
+        edits: [{ op: "replace" as const, anchor: `1#${lineTag(line)}`, lines: [to] }],
+      });
+      const reads = new FileReadTracker();
+      const toolsWith = (outsideWrites: boolean) => ({
+        write: createWriteFileTool(root, reads, { outsideWrites }),
+        replace: createReplaceEditTool(root, reads, { outsideWrites }),
+        hashline: createEditFileTool(root, reads, { outsideWrites }),
+      });
+      const closed = toolsWith(false);
+      const refused = (error: unknown) =>
+        error instanceof WorkspacePathError && /越出工作区根/.test(error.message);
+      await assert.rejects(
+        () => closed.write.execute("w", { path: created, content: "x" }),
+        refused
+      );
+      await assert.rejects(
+        () => closed.replace.execute("e", { path: existing, old_string: "alpha", new_string: "x" }),
+        refused
+      );
+      await assert.rejects(() => closed.hashline.execute("e", hashlineEdit("alpha", "x")), refused);
+      assert.equal(existsSync(join(away, "sub")), false);
+      assert.equal(readFileSync(existing, "utf8"), "alpha\n");
+      const open = toolsWith(true);
+      for (const tool of Object.values(closed)) {
+        assert.equal(tool.description.includes(OUTSIDE_WRITE_SENTENCE), false);
+      }
+      for (const tool of Object.values(open)) {
+        assert.equal(tool.description.includes(OUTSIDE_WRITE_SENTENCE), true);
+      }
+      await open.write.execute("w1", { path: created, content: "one\n" });
+      await open.write.execute("w2", { path: created, content: "two\n" });
+      assert.equal(readFileSync(created, "utf8"), "two\n");
+      await open.replace.execute("e1", { path: existing, old_string: "alpha", new_string: "beta" });
+      await open.hashline.execute("e2", hashlineEdit("beta", "gamma"));
+      assert.equal(readFileSync(existing, "utf8"), "gamma\n");
+    } finally {
+      rmSync(away, { recursive: true, force: true });
+    }
+  }));
 
 test("失败的读取不算读过；读后未变按文件字节判断（不同的非法字节也看得出）", () =>
   withRoot(async (root) => {
