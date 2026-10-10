@@ -549,13 +549,14 @@ test.skipIf(POSIX ? false : "进程组只在 POSIX 上")(
       pids.push(pid);
       assert.deepEqual(h.events.at(-1), { phase: "kept", jobId: "j2", pid });
       killTrackedChildren();
-      const records = join(h.state, "jobs");
-      assert.deepEqual(existsSync(records) ? readdirSync(records) : [], []);
       const outputs = join(h.state, "outputs", "s1");
       const live = join(outputs, readdirSync(outputs).find((name) => name.endsWith(".tmp")) ?? "");
       const size = statSync(live).size;
       await until(() => statSync(live).size > size);
       assert.ok(alive(pid) && alive(child));
+      // 记录在启动后异步取进程信息才写，交出后等过输出增长再查，免得查在写之前
+      const records = join(h.state, "jobs");
+      assert.deepEqual(existsSync(records) ? readdirSync(records) : [], []);
     } finally {
       await h.cleanup();
     }
