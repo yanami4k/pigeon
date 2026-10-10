@@ -789,8 +789,8 @@ async function runSettlingJobs(
     closeoutMs: bundle.jobCloseoutMs,
   });
   const result = last ?? first;
-  // 等作业时被中断（墙钟、上限、外部中止、worker 被停）：按中止交回
-  return halted() && jobs.running().length > 0 ? { ...result, status: "aborted" } : result;
+  // 等作业时被中断（墙钟、上限、外部中止、worker 被停）：按中止交回（决策 409：保留的作业不等，不算）
+  return halted() && jobs.toSettle().length > 0 ? { ...result, status: "aborted" } : result;
 }
 
 function readyHandle(bundle: RuntimeBundle): WorkerRuntimeHandle {

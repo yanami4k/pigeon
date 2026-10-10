@@ -1,6 +1,7 @@
 // 后台作业的应用层接法（决策 365）：结束通知同一轮的合并成一条、已由 job_output 交回的撤回不重复；无人值守收尾先交
 // 「仍在跑」让模型处理一轮、再等作业，总时限按每次运行各自计、到了停掉余下的并拒绝新开，总时限为 0 即直接停掉；续跑时
-// 认出上一进程丢失的作业；装配冒烟——headless 收尾、墙钟到了中止并停掉作业、运行出错不进收尾
+// 认出上一进程丢失的作业；装配冒烟——headless 收尾、墙钟到了中止并停掉作业、运行出错不进收尾。决策 409：会话结束后保留的
+// 作业不进收尾、会话结束不停，记「保留」、进保留名单，无人值守结果里列出
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -87,8 +88,13 @@ function controlledJobs() {
     perSession: 4,
     outputMaxBytes: 1024 * 1024,
   });
-  const start = (command: string) =>
-    jobs.start({ command, plan: { program: command, args: [], verbatim: false }, env: {} });
+  const start = (command: string, keep = false) =>
+    jobs.start({
+      command,
+      plan: { program: command, args: [], verbatim: false },
+      env: {},
+      ...(keep ? { keep } : {}),
+    });
   const finish = async (index: number) => {
     ends[index]?.({ exitCode: 0 });
     await jobs.wait(jobs.get(`j${index + 1}`), 5000);
@@ -195,7 +201,36 @@ test("收尾总时限为 0：不交「仍在跑」、不等，直接停掉作业
   }
 });
 
-test("续跑：只有启动、没有结束记录的作业算丢失；作业号接着用过的最大号", () => {
+test("决策 409：保留的作业不进收尾——不等、不列进「仍在跑」，收尾与会话结束都不停；会话结束记「保留」、进保留名单", async () => {
+  const c = controlledJobs();
+  try {
+    const events: string[] = [];
+    c.jobs.setEventSink((event) => events.push(event.phase));
+    await c.start("cmd-kept", true);
+    await c.start("cmd-quick");
+    const target = noticeTarget((runs) => {
+      if (runs === 1) void c.finish(1);
+    });
+    new JobNotices(c.jobs, target);
+    await settleBackgroundJobs({ jobs: c.jobs, target, stopped: () => false, closeoutMs: 3000 });
+    assert.equal(target.runs(), 2);
+    assert.ok(!target.all().some((text) => text.includes("cmd-kept")));
+    await c.jobs.killAll("aborted");
+    assert.equal(c.jobs.get("j1").state, "running");
+    assert.deepEqual(
+      c.jobs.detachKept().map((job) => job.id),
+      ["j1"]
+    );
+    assert.deepEqual(c.jobs.pool.keptJobs(), [
+      { sessionId: "s1", jobId: "j1", command: "cmd-kept" },
+    ]);
+    assert.deepEqual(events, ["started", "started", "ended", "kept"]);
+  } finally {
+    await c.cleanup();
+  }
+});
+
+test("续跑：只有启动、没有结束记录的作业算丢失（标了保留的不算）；作业号接着用过的最大号", () => {
   const entry = (event: Parameters<typeof backgroundJobEntry>[0]) => ({
     type: "custom",
     ...backgroundJobEntry(event),
@@ -214,8 +249,9 @@ test("续跑：只有启动、没有结束记录的作业算丢失；作业号�
       started("j2"),
       entry({ phase: "ended", jobId: "j2", state: "exited", exitCode: 0, outputBytes: 0 }),
       { type: "custom", customType: SessionEntryType.BackgroundJob, data: { event: "started" } },
+      entry({ phase: "started", jobId: "j3", command: "c", marker: "m", output: "o", keep: true }),
     ]),
-    { lost: [{ jobId: "j1", command: "cmd j1" }], lastId: 2 }
+    { lost: [{ jobId: "j1", command: "cmd j1" }], lastId: 3 }
   );
 });
 
@@ -224,7 +260,8 @@ function backgroundRun(
   root: string,
   body: string,
   replies: Array<{ text: string }>,
-  failOnCall?: number
+  failOnCall?: number,
+  extra: Record<string, unknown> = {}
 ) {
   const script = join(root, "..", `${root.split(/[\\/]/).pop()}-job.mjs`);
   writeFileSync(script, body);
@@ -235,7 +272,7 @@ function backgroundRun(
         toolCalls: [
           {
             name: "run_command",
-            args: { command: `"${process.execPath}" "${script}"`, background: true },
+            args: { command: `"${process.execPath}" "${script}"`, background: true, ...extra },
           },
         ],
       },
@@ -254,13 +291,26 @@ function jobEntries(root: string, sessionId: string) {
     .map((entry) => (entry as unknown as { data: { event: string; reason?: string } }).data);
 }
 
+// Windows 上刚停掉的进程放开工作目录要一会儿：删不掉的稍后再试（至多 5 秒）
+async function removeDir(dir: string): Promise<void> {
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      rmSync(dir, { recursive: true, force: true });
+      return;
+    } catch (error) {
+      if (attempt >= 50) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+  }
+}
+
 async function inWorkspace(run: (root: string, home: string) => Promise<void>): Promise<void> {
   const root = mkdtempSync(join(tmpdir(), "pigeon-jobs-headless-"));
   const home = mkdtempSync(join(tmpdir(), "pigeon-jobs-home-"));
   try {
     await run(root, home);
   } finally {
-    rmSync(root, { recursive: true, force: true });
+    await removeDir(root);
     rmSync(home, { recursive: true, force: true });
     // backgroundRun 把作业脚本写在工作区旁边（不在工作区里），一并删掉
     rmSync(`${root}-job.mjs`, { force: true });
@@ -346,4 +396,51 @@ test("装配：运行出错不进收尾轮，作业随运行面释放停掉并�
         ["ended", "aborted"],
       ]
     );
+  }));
+
+test("装配：标了会话结束后保留的作业不进收尾轮、会话结束不停；结果里列出作业号、命令与进程号，会话记录记「保留」", () =>
+  inWorkspace(async (root, home) => {
+    const streamFn = backgroundRun(
+      root,
+      "setTimeout(() => {}, 300_000);",
+      [{ text: "服务起好了" }],
+      undefined,
+      { keep_after_session: true }
+    );
+    const result = await runHeadless({
+      task: "起个服务",
+      governanceRoot: root,
+      workspaceRoot: root,
+      streamFn,
+      yolo: true,
+      homeDir: home,
+    });
+    const pid = result.keptJobs?.[0]?.pid ?? 0;
+    const alive = () => {
+      try {
+        process.kill(pid, 0);
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    try {
+      assert.equal(result.status, "completed");
+      assert.equal(streamFn.calls.length, 2);
+      assert.deepEqual(
+        result.keptJobs?.map((job) => [job.sessionId, job.jobId, job.command.includes("-job.mjs")]),
+        [[result.sessionId, "j1", true]]
+      );
+      assert.ok(pid > 0 && alive());
+      assert.deepEqual(
+        jobEntries(root, result.sessionId).map((data) => data.event),
+        ["started", "kept"]
+      );
+    } finally {
+      // 先停掉保留的进程，工作区才删得掉
+      if (pid > 0 && alive()) process.kill(process.platform === "win32" ? pid : -pid, "SIGKILL");
+      for (let i = 0; i < 100 && pid > 0 && alive(); i += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+    }
   }));

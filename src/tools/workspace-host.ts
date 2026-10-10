@@ -170,6 +170,9 @@ export interface HostJobOptions {
   // 本作业的标记（RUN_MARKER_VAR 的值）
   marker: string;
   onOutput(chunk: Buffer): void;
+  // 决策 409：会话结束后保留的作业——两路输出直接写进 outputFd（追加打开的输出文件，不经 Pigeon 的管道，Pigeon 退出后
+  // 进程照样写得进去）；各平台都分离启动、不登记进程退出时的兜底终止，组长退出后不清扫组里的子孙（容器里同样不清扫）
+  keep?: { outputFd: number };
 }
 
 export interface HostJobExit {
@@ -199,6 +202,10 @@ export interface HostJob {
   done: Promise<HostJobExit>;
   kill(): Promise<void>;
   record(): Promise<JobProcessRecord | undefined>;
+  // 决策 409：本机作业的进程号（容器里的作业没有）
+  pid?: number;
+  // 决策 409：会话结束时交出保留的作业——不再让它拖住 Pigeon 进程退出（进程照常跑）
+  detach?(): void;
 }
 
 // 一次被观测的执行：命令的结果与命令前后的取证；超时、中止等拿不到命令后取证时 after 缺省（调用方另取）

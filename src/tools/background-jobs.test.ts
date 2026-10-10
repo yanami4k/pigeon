@@ -2,19 +2,30 @@
 // 整次运行的同时在跑上限（超出拒绝、列出在跑的）；停止与超时都杀整个进程组；单个输出文件超过上限只留末尾；期间变化扣除
 // 前台改动；不带等待的连续查询另计；落盘编号取号即占号；组长退出后组里的残留一并清掉；收尾期间的等待受剩余时限约束；
 // 崩溃后按记录清理，核对启动时间与标记，进程号被复用的不杀组长，查不到的记录留着，组长不在时照样按标记扫；
-// Windows 与 macOS 的认进程各一条（只在各自平台上跑）
+// Windows 与 macOS 的认进程各一条（只在各自平台上跑）。决策 409：会话结束后保留的作业——组长退出后不清扫子孙；会话结束
+// 不停、不写记录、不随进程退出的兜底终止；交出后输出照样写进文件
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "vitest";
+import { onTestFinished, test } from "vitest";
 import { VIRTUAL_PATH_HINT } from "../state/paths.ts";
 import { cleanupOrphanedJobs, JobPool, SessionJobs } from "./background-jobs.ts";
 import { CommandOutputStore } from "./command-output.ts";
 import { createJobKillTool, createJobOutputTool, JOB_IDLE_QUERY_LIMIT } from "./job-tools.ts";
 import { createLocalWorkspaceHost } from "./local-host.ts";
 import { compareLocalProcess, localProcessRecord } from "./process-identity.ts";
+import { killTrackedChildren } from "./process-tree.ts";
 import { createRunCommandTool, RunCommandTimeoutError } from "./run-command.ts";
 import { RUN_MARKER_VAR } from "./workspace-host.ts";
 
@@ -85,6 +96,7 @@ function setup(
   };
   return {
     root,
+    state,
     jobs,
     store,
     pool,
@@ -500,3 +512,52 @@ test("无人值守收尾期间，job_output 的等待不超过收尾的剩余时
     await h.cleanup();
   }
 });
+
+test.skipIf(POSIX ? false : "进程组只在 POSIX 上")(
+  "决策 409：保留的作业——组长退出后子孙留着；会话结束不停、不写记录、不随进程退出的兜底终止，交出后输出照样写进文件",
+  async () => {
+    const h = setup();
+    const pids: number[] = [];
+    onTestFinished(() => {
+      for (const pid of pids) {
+        for (const target of [-pid, pid]) {
+          try {
+            process.kill(target, "SIGKILL");
+          } catch {
+            // 已结束
+          }
+        }
+      }
+    });
+    const keep = { background: true, keep_after_session: true };
+    try {
+      const childFile = join(h.root, "child.pid");
+      writeFileSync(join(h.root, "spawn-exit.sh"), `sleep 300 &\necho $! > '${childFile}'\n`);
+      await h.run("sh spawn-exit.sh", keep);
+      const done = await h.output({ job_id: "j1", wait_seconds: 30 });
+      assert.equal(done.details.jobs[0]?.state, "exited");
+      const child = Number(readFileSync(childFile, "utf8"));
+      pids.push(child);
+      assert.ok(alive(child));
+      await h.run(h.node('setInterval(() => console.log("tick"), 100);'), keep);
+      assert.deepEqual(await h.jobs.killAll("aborted"), []);
+      assert.deepEqual(
+        h.jobs.detachKept().map((job) => job.id),
+        ["j2"]
+      );
+      const pid = h.pool.keptJobs()[0]?.pid ?? 0;
+      pids.push(pid);
+      assert.deepEqual(h.events.at(-1), { phase: "kept", jobId: "j2", pid });
+      killTrackedChildren();
+      const records = join(h.state, "jobs");
+      assert.deepEqual(existsSync(records) ? readdirSync(records) : [], []);
+      const outputs = join(h.state, "outputs", "s1");
+      const live = join(outputs, readdirSync(outputs).find((name) => name.endsWith(".tmp")) ?? "");
+      const size = statSync(live).size;
+      await until(() => statSync(live).size > size);
+      assert.ok(alive(pid) && alive(child));
+    } finally {
+      await h.cleanup();
+    }
+  }
+);

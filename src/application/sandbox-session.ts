@@ -192,8 +192,10 @@ export async function runHeadlessInSandbox(
     throw error;
   }
   const closed = await closeSandbox(sandbox);
+  // 决策 409：沙箱容器随收尾删除，里面保留的作业随之结束，不列为保留中
+  const { keptJobs: _kept, ...rest } = result;
   return {
-    ...result,
+    ...rest,
     ...(closed.exported !== undefined ? { sandbox: closed.exported } : {}),
     sandboxNotice: closed.notice,
   };

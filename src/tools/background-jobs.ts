@@ -9,6 +9,8 @@
 // - 记录：每个在跑的作业在治理目录的 state/jobs 下有一个记录文件（所属进程号、认进程的信息），结束即删；崩溃后下次启动
 //   按记录清理（cleanupOrphanedJobs）。记录在工作区里、命令改得动：清理只认记录里的进程号、标记与容器名，核对启动时间与
 //   标记（或命令行）一致才杀，不采用记录里的任何程序路径。
+// - 决策 409：会话结束后保留的作业（keep）——进程直接写输出文件，收尾不等、会话结束不停（killAll 不含它），不写记录文件
+//   （崩溃后的清理碰不到它）；会话结束时记一条"保留"、交出跟踪（detachKept），登记进作业池的保留名单。
 import { createHash, randomBytes } from "node:crypto";
 import {
   closeSync,
@@ -50,18 +52,22 @@ export class BackgroundJobError extends Error {
 
 const NOFOLLOW = constants.O_NOFOLLOW ?? 0;
 
-// 一个作业的输出文件：只追加；超过上限时砍掉前面、留下末尾一半。偏移按逻辑算（砍掉的也计在内）
+// 一个作业的输出文件：只追加；超过上限时砍掉前面、留下末尾一半。偏移按逻辑算（砍掉的也计在内）。
+// 决策 409：保留的作业由进程直接写（openForChild 之后），大小按文件现有的算，不砍前面
 class JobOutputFile {
   readonly #fd: number;
   readonly #max: number;
+  readonly #file: string;
   readonly dev: string;
   readonly ino: string;
   #size = 0;
   #dropped = 0;
   #closed = false;
+  #external = false;
   error: string | undefined;
 
   constructor(file: string, maxBytes: number) {
+    this.#file = file;
     mkdirSync(path.dirname(file), { recursive: true });
     this.#fd = openSync(
       file,
@@ -74,8 +80,28 @@ class JobOutputFile {
     this.#max = maxBytes;
   }
 
+  // 决策 409：给进程直接写的描述符——同一个文件另以追加方式打开（与本对象读用的描述符不共用读写位置），核对是同一个文件。
+  // 调用方交给进程后关掉；此后本对象只读不写
+  openForChild(): number {
+    const fd = openSync(this.#file, constants.O_WRONLY | constants.O_APPEND | NOFOLLOW);
+    const stat = fstatSync(fd, { bigint: true });
+    if (String(stat.dev) !== this.dev || String(stat.ino) !== this.ino) {
+      closeSync(fd);
+      throw new Error("作业的输出文件已被替换");
+    }
+    this.#external = true;
+    return fd;
+  }
+
   // 已写出的总字节数（含砍掉的）与砍掉的字节数
   get total(): number {
+    if (this.#external && !this.#closed) {
+      try {
+        this.#size = fstatSync(this.#fd).size;
+      } catch {
+        // 取不到即按上次的
+      }
+    }
     return this.#dropped + this.#size;
   }
 
@@ -135,6 +161,8 @@ class JobOutputFile {
 
   // 结束：算出写下的内容的 sha256，交回身份（文件描述符留着给 job_output 与通知读新增输出与末尾，交给模型之后释放）
   finish(): { bytes: number; dev: string; ino: string; sha256: string } {
+    // 进程直接写的：先取一次现有大小
+    void this.total;
     const hash = createHash("sha256");
     const buffer = Buffer.alloc(64 * 1024);
     for (let position = 0; position < this.#size; ) {
@@ -170,7 +198,11 @@ export type BackgroundJobEvent =
       marker: string;
       output: string;
       toolCallId?: string;
+      // 决策 409：会话结束后保留
+      keep?: true;
     }
+  // 决策 409：会话结束时作业还在跑、标了保留：不停，记这一条（本机作业带进程号）
+  | { phase: "kept"; jobId: string; pid?: number }
   | {
       phase: "ended";
       jobId: string;
@@ -185,6 +217,8 @@ export type BackgroundJobEvent =
 export interface BackgroundJob {
   readonly id: string;
   readonly command: string;
+  // 决策 409：会话结束后保留
+  readonly keep: boolean;
   readonly startedAt: number;
   readonly state: JobState;
   readonly endedAt: number | undefined;
@@ -206,6 +240,7 @@ export interface BackgroundJob {
 class Job implements BackgroundJob {
   readonly id: string;
   readonly command: string;
+  readonly keep: boolean;
   readonly marker: string;
   readonly startedAt = Date.now();
   state: JobState = "running";
@@ -224,10 +259,13 @@ class Job implements BackgroundJob {
   readonly output: JobOutputFile;
   readonly slot: OutputSlot;
   finished!: Promise<void>;
+  // 决策 409：会话结束时已交出（保留的作业）：此后结束不再记录、不再通知
+  detached = false;
 
-  constructor(id: string, command: string, slot: OutputSlot, maxBytes: number) {
+  constructor(id: string, command: string, slot: OutputSlot, maxBytes: number, keep: boolean) {
     this.id = id;
     this.command = command;
+    this.keep = keep;
     this.marker = randomBytes(12).toString("hex");
     this.slot = slot;
     this.outputUri = slot.uri;
@@ -253,11 +291,21 @@ interface JobRecordFile {
   process: JobProcessRecord;
 }
 
-// 整次运行的作业池：同一进程里的各会话共用，管总数上限与记录文件
+// 决策 409：会话结束后保留中的作业（无人值守运行的结果据此列出）
+export interface KeptJob {
+  sessionId: string;
+  jobId: string;
+  command: string;
+  // 本机作业的进程号（容器里的作业没有）
+  pid?: number;
+}
+
+// 整次运行的作业池：同一进程里的各会话共用，管总数上限、记录文件与保留名单
 export class JobPool {
   total: number;
   readonly recordsDir: string | undefined;
   readonly #running = new Set<BackgroundJob>();
+  readonly #kept: KeptJob[] = [];
 
   constructor(options: { total: number; recordsDir?: string }) {
     this.total = options.total;
@@ -274,6 +322,15 @@ export class JobPool {
 
   release(job: BackgroundJob): void {
     this.#running.delete(job);
+  }
+
+  noteKept(job: KeptJob): void {
+    this.#kept.push(job);
+  }
+
+  // 各会话结束时保留下来的作业（按会话结束的先后）
+  keptJobs(): KeptJob[] {
+    return [...this.#kept];
   }
 
   writeRecord(marker: string, record: JobRecordFile): void {
@@ -331,6 +388,8 @@ export interface JobStartInput {
   plan: HostExecPlan;
   env: NodeJS.ProcessEnv;
   toolCallId?: string;
+  // 决策 409：会话结束后保留
+  keep?: boolean;
   // 作业结束时比出期间变化（开始时的取证由调用方先取好、封在里面）；不给即不报期间变化
   periodChanges?: () => Promise<FileChanges>;
 }
@@ -370,6 +429,11 @@ export class SessionJobs {
     return this.#options.sessionId;
   }
 
+  // 整次运行共用的作业池（决策 409：无人值守结果从它的保留名单里取）
+  get pool(): JobPool {
+    return this.#options.pool;
+  }
+
   get available(): boolean {
     return this.#options.host.startJob !== undefined;
   }
@@ -385,6 +449,11 @@ export class SessionJobs {
 
   running(): BackgroundJob[] {
     return this.list().filter((job) => job.state === "running");
+  }
+
+  // 决策 409：在跑、会话收尾时要等要停的（不含保留的）
+  toSettle(): BackgroundJob[] {
+    return this.running().filter((job) => !job.keep);
   }
 
   get(id: string): BackgroundJob {
@@ -494,8 +563,24 @@ export class SessionJobs {
       );
     }
     const slot = this.#options.store.next();
+    const keep = input.keep === true;
+    const job = new Job(
+      `j${this.#seq + 1}`,
+      input.command,
+      slot,
+      this.#options.outputMaxBytes,
+      keep
+    );
+    // 决策 409：保留的作业由进程直接写输出文件
+    let writer: number | undefined;
+    try {
+      writer = keep ? job.output.openForChild() : undefined;
+    } catch (error) {
+      job.output.release();
+      this.#options.store.discard(slot);
+      throw error;
+    }
     this.#seq += 1;
-    const job = new Job(`j${this.#seq}`, input.command, slot, this.#options.outputMaxBytes);
     this.#jobs.set(job.id, job);
     pool.reserve(job);
     this.#onEvent?.({
@@ -505,14 +590,23 @@ export class SessionJobs {
       marker: job.marker,
       output: job.outputUri,
       ...(input.toolCallId !== undefined ? { toolCallId: input.toolCallId } : {}),
+      ...(keep ? { keep: true as const } : {}),
     });
-    const handle = host.startJob(input.plan, {
-      env: input.env,
-      marker: job.marker,
-      onOutput: (chunk) => job.output.append(chunk),
-    });
+    let handle: HostJob;
+    try {
+      handle = host.startJob(input.plan, {
+        env: input.env,
+        marker: job.marker,
+        onOutput: (chunk) => job.output.append(chunk),
+        ...(writer !== undefined ? { keep: { outputFd: writer } } : {}),
+      });
+    } finally {
+      // 进程已有自己的一份
+      if (writer !== undefined) closeSync(writer);
+    }
     job.host = handle;
-    void handle.record().then((record) => {
+    // 决策 409：保留的作业不写记录文件——崩溃后的清理按记录找进程，碰不到它
+    void (keep ? Promise.resolve(undefined) : handle.record()).then((record) => {
       if (record !== undefined && job.state === "running") {
         pool.writeRecord(job.marker, {
           ownerPid: process.pid,
@@ -533,6 +627,8 @@ export class SessionJobs {
     exit: HostJobExit,
     periodChanges: JobStartInput["periodChanges"]
   ): Promise<void> {
+    // 会话结束时已交出的保留作业：会话记录已关，不再记、不再通知
+    if (job.detached) return;
     job.exit = exit;
     if (periodChanges !== undefined) {
       try {
@@ -597,9 +693,15 @@ export class SessionJobs {
     return job.state !== "running";
   }
 
-  // 等在跑的任意一个结束，至多 ms 毫秒；返回结束了的（没有为空）
-  async waitAny(ms: number, signal?: AbortSignal): Promise<BackgroundJob[]> {
-    const running = [...this.#jobs.values()].filter((job) => job.state === "running");
+  // 等在跑的任意一个结束，至多 ms 毫秒；返回结束了的（没有为空）。among 给出时只等其中的
+  async waitAny(
+    ms: number,
+    signal?: AbortSignal,
+    among?: readonly BackgroundJob[]
+  ): Promise<BackgroundJob[]> {
+    const running = [...this.#jobs.values()].filter(
+      (job) => job.state === "running" && (among === undefined || among.includes(job))
+    );
     if (running.length === 0) return [];
     await raceWithTimeout(
       running.map((job) => job.finished),
@@ -618,11 +720,34 @@ export class SessionJobs {
     await target.finished;
   }
 
-  // 停掉全部在跑的作业（会话或运行结束、收尾总时限到），交回停掉的
+  // 停掉全部在跑的作业（会话或运行结束、收尾总时限到），交回停掉的。决策 409：保留的不停
   async killAll(reason: JobKillReason): Promise<BackgroundJob[]> {
-    const running = [...this.#jobs.values()].filter((job) => job.state === "running");
+    const running = this.toSettle();
     await Promise.allSettled(running.map((job) => this.kill(job, reason)));
     return running;
+  }
+
+  // 决策 409：会话结束时，还在跑的保留作业不等、不停——记一条"保留"，交出作业池与执行端的跟踪（进程照常跑，输出照样写进
+  // 那个文件；不再拖住 Pigeon 进程退出），登记进作业池的保留名单。交回这些作业
+  detachKept(): BackgroundJob[] {
+    const kept = [...this.#jobs.values()].filter(
+      (job) => job.state === "running" && job.keep && !job.detached
+    );
+    for (const job of kept) {
+      job.detached = true;
+      job.host?.detach?.();
+      const pid = job.host?.pid;
+      this.#options.pool.release(job);
+      this.#options.pool.noteKept({
+        sessionId: this.#options.sessionId,
+        jobId: job.id,
+        command: job.command,
+        ...(pid !== undefined ? { pid } : {}),
+      });
+      job.output.release();
+      this.#onEvent?.({ phase: "kept", jobId: job.id, ...(pid !== undefined ? { pid } : {}) });
+    }
+    return kept;
   }
 }
 
@@ -660,7 +785,9 @@ function listRunning(jobs: readonly BackgroundJob[]): string {
 
 // 一个作业的状态一句
 export function jobStateText(job: BackgroundJob, now = Date.now()): string {
-  if (job.state === "running") return `在跑（已 ${elapsedText(now - job.startedAt)}）`;
+  if (job.state === "running") {
+    return `在跑（已 ${elapsedText(now - job.startedAt)}${job.keep ? "；会话结束后保留" : ""}）`;
+  }
   const took = `用时 ${elapsedText((job.endedAt ?? now) - job.startedAt)}`;
   const exit = job.exit;
   if (job.state === "failed") {

@@ -43,6 +43,8 @@ import type { PigeonAgentTool, PigeonToolResult, PreviewableTool } from "./wrap.
 
 export const RUN_COMMAND_TOOL = "run_command";
 export const DEFAULT_RUN_COMMAND_TIMEOUT_MS = 120_000;
+// 决策 409：后台作业"会话结束后保留"的参数名
+export const KEEP_AFTER_SESSION_PARAM = "keep_after_session";
 // 决策 365：timeout_seconds 参数的上限（设置可改）
 export const DEFAULT_RUN_COMMAND_MAX_TIMEOUT_MS = 600_000;
 export const DEFAULT_RUN_COMMAND_OUTPUT_BYTES = 32 * 1024;
@@ -117,6 +119,8 @@ export const RunCommandParamsSchema = Type.Object({
   timeout_seconds: Type.Optional(Type.Integer({ minimum: 1 })),
   // 决策 365：在后台运行，立即返回作业号
   background: Type.Optional(Type.Boolean()),
+  // 决策 409：后台作业在会话结束后保留（会话结束时不等、不停）；只与 background 同用
+  keep_after_session: Type.Optional(Type.Boolean()),
 });
 export type RunCommandParams = Static<typeof RunCommandParamsSchema>;
 
@@ -171,8 +175,8 @@ export interface ExecEvidence {
   backgroundJobs?: Array<{ id: string; command: string }>;
   // 决策 411：timeout_seconds 超过上限，按上限执行（秒）
   timeoutClamped?: { requestedSeconds: number; appliedSeconds: number };
-  // 决策 365：以后台作业启动（其余字段为启动时的占位：没有退出码与输出）
-  background?: { jobId: string; output: string };
+  // 决策 365：以后台作业启动（其余字段为启动时的占位：没有退出码与输出）；决策 409：keep 为会话结束后保留
+  background?: { jobId: string; output: string; keep?: true };
 }
 
 // 只读检查结果：实际执行的命令串与执行路径
@@ -267,7 +271,9 @@ export function runCommandTexts(input: {
         "结束时会通知你；用 job_output 查看状态与新增输出（可带 wait_seconds 等它结束），用 job_kill 停掉。" +
         `后台作业不受单次超时约束；本会话同时在跑的至多 ${input.backgroundJobs} 个，超出即拒绝。` +
         "后台作业与之后的命令同时运行，可能互相干扰（改同一批文件、占同一个端口），这期间的文件变化报告也会因此不精确。" +
-        "人按 Esc 中断当前一轮时后台作业照跑，会话结束时全部停止。";
+        "人按 Esc 中断当前一轮时后台作业照跑，会话结束时停止。" +
+        `起服务、守护进程，或判分、使用者在会话结束后还要用到的长时间进程，再加 ${KEEP_AFTER_SESSION_PARAM}: true：` +
+        "会话结束时不等它、不停它，进程留着继续跑，输出照样写进那个文件；会话里照常可用 job_output 查看、job_kill 停掉。";
   const shell = input.platform === "win32" ? "cmd.exe" : "/bin/sh -c";
   const toolShell = {
     yolo: `管道、重定向、&& 串联等需要 shell 的命令经 ${shell} 运行。`,
@@ -491,7 +497,8 @@ export function createRunCommandTool(
     toolCallId: string,
     timeoutSeconds: number | undefined,
     inspection: CommandInspection,
-    plan: HostExecPlan
+    plan: HostExecPlan,
+    keep: boolean
   ): Promise<PigeonToolResult<ExecEvidence>> => {
     const { command, alias } = inspection;
     const jobs = options.jobs;
@@ -504,7 +511,14 @@ export function createRunCommandTool(
       );
     }
     const periodChanges = await periodObserver(host);
-    const job = await jobs.start({ command, plan, env, toolCallId, periodChanges });
+    const job = await jobs.start({
+      command,
+      plan,
+      env,
+      toolCallId,
+      periodChanges,
+      ...(keep ? { keep: true } : {}),
+    });
     const evidence: ExecEvidence = {
       command,
       ...(alias !== undefined ? { alias } : {}),
@@ -519,14 +533,18 @@ export function createRunCommandTool(
       output: "",
       truncated: false,
       fileChanges: { added: [], removed: [], modified: [], truncated: false },
-      background: { jobId: job.id, output: job.outputUri },
+      background: {
+        jobId: job.id,
+        output: job.outputUri,
+        ...(keep ? { keep: true as const } : {}),
+      },
     };
     return {
       content: [
         {
           type: "text",
           text: [
-            `已在后台启动作业 ${job.id}：$ ${command}${alias !== undefined ? `（短名 ${alias}）` : ""}`,
+            `已在后台启动作业 ${job.id}${keep ? "（会话结束后保留）" : ""}：$ ${command}${alias !== undefined ? `（短名 ${alias}）` : ""}`,
             jobOutputText(job),
             "用 job_output 查看状态与新增输出（可带 wait_seconds 等它结束），用 job_kill 停掉；作业结束时会通知你。",
           ].join("\n"),
@@ -602,8 +620,19 @@ export function createRunCommandTool(
         throw new RunCommandError(tooLong);
       }
       const plan = spawnPlan(inspection, env, platform);
+      if (parsed.keep_after_session === true && parsed.background !== true) {
+        throw new RunCommandError(
+          `${KEEP_AFTER_SESSION_PARAM} 只用于后台作业：要同时给 background: true`
+        );
+      }
       if (parsed.background === true) {
-        return startBackground(toolCallId, parsed.timeout_seconds, inspection, plan);
+        return startBackground(
+          toolCallId,
+          parsed.timeout_seconds,
+          inspection,
+          plan,
+          parsed.keep_after_session === true
+        );
       }
       // 决策 356：截断时完整输出写进本会话落盘目录的下一个编号（没截断不建文件）；落盘目录不可用时照常执行、只是不落盘
       let slot: OutputSlot | undefined;
