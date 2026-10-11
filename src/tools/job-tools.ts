@@ -16,6 +16,7 @@ import {
   type SessionJobs,
   takeNewOutput,
 } from "./background-jobs.ts";
+import { commandLabel } from "./command-echo.ts";
 import type { PigeonAgentTool, PigeonToolResult } from "./wrap.ts";
 
 // 不带等待时长、作业又都没变化的连续查询到这么多次即拒绝
@@ -63,7 +64,7 @@ function jobText(job: BackgroundJob, outputBytes: number): string {
   const changes = job.state === "running" ? undefined : jobChangesText(job);
   return [
     `作业 ${job.id}：${jobStateText(job)}`,
-    `$ ${job.command}`,
+    `$ ${commandLabel(job.command)}`,
     takeNewOutput(job, outputBytes),
     jobOutputText(job),
     ...(changes !== undefined ? [changes] : []),
@@ -71,7 +72,9 @@ function jobText(job: BackgroundJob, outputBytes: number): string {
 }
 
 function listText(jobs: readonly BackgroundJob[]): string {
-  return jobs.map((job) => `${job.id}：${jobStateText(job)}　$ ${job.command}`).join("\n");
+  return jobs
+    .map((job) => `${job.id}：${jobStateText(job)}　$ ${commandLabel(job.command)}`)
+    .join("\n");
 }
 
 export function createJobOutputTool(

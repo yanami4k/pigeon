@@ -21,6 +21,7 @@ import {
   type HookRunData,
   type PruneData,
   type RepetitionData,
+  type RequestRetryData,
   type RunEndData,
   type RunStartData,
   SESSION_ENTRY_SCHEMAS,
@@ -126,7 +127,9 @@ export type ViewItem =
   // 决策 361：一次上下文裁剪
   | { kind: "prune"; entryId: string; timestamp: number; data: PruneData }
   // 决策 365：后台作业的启动与结束
-  | { kind: "background-job"; entryId: string; timestamp: number; data: BackgroundJobData };
+  | { kind: "background-job"; entryId: string; timestamp: number; data: BackgroundJobData }
+  // 决策 420：模型请求的一次失败重试
+  | { kind: "request-retry"; entryId: string; timestamp: number; data: RequestRetryData };
 
 // 一次工具调用：助手消息里的调用块与对应的工具结果消息（按工具调用号在同一 Run 内配对）
 export interface ViewToolCall {
@@ -331,6 +334,7 @@ const CUSTOM_KINDS = {
   [SessionEntryType.Repetition]: "repetition",
   [SessionEntryType.Prune]: "prune",
   [SessionEntryType.BackgroundJob]: "background-job",
+  [SessionEntryType.RequestRetry]: "request-retry",
 } as const;
 
 // 自定义条目 → 时间线条目；不是 Pigeon 的条目返回 undefined，数据不合 schema 记告警

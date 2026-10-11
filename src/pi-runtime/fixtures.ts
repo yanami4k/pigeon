@@ -285,3 +285,30 @@ function zeroUsage(): AssistantMessage["usage"] {
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
   };
 }
+
+// 假的 HTTP 层（决策 420 的重试测试用，经真的 pi-ai 线路）：按顺序交出排好的响应（Error 即连接失败），calls 为实际发出的次数
+export function scriptedFetch(script: ReadonlyArray<Response | Error>): {
+  fetch: typeof fetch;
+  calls: () => number;
+} {
+  let calls = 0;
+  const fetchFn = (async () => {
+    const next = script[calls];
+    calls += 1;
+    if (next === undefined) throw new Error("剧本用完");
+    if (next instanceof Error) throw next;
+    return next;
+  }) as typeof fetch;
+  return { fetch: fetchFn, calls: () => calls };
+}
+
+// 一次失败的模型请求响应；retry-after-ms 给 1 毫秒，免得测试等退避
+export function failedReply(status: number): Response {
+  return new Response(
+    JSON.stringify({ type: "error", error: { type: "api_error", message: "假" } }),
+    {
+      status,
+      headers: { "content-type": "application/json", "retry-after-ms": "1" },
+    }
+  );
+}

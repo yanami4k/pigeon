@@ -11,6 +11,7 @@ import {
   failureBadge,
   pruneLine,
   repetitionLine,
+  requestRetryLine,
   shortId,
   summarizeArgs,
 } from "../application/format.ts";
@@ -242,6 +243,8 @@ function renderRun(
       lines.push(`  ${repetitionLine(item.data)}`);
     } else if (item.kind === "prune") {
       lines.push(`  ${pruneLine(item.data)}`);
+    } else if (item.kind === "request-retry") {
+      lines.push(`  ${requestRetryLine(item.data)}`);
     }
   }
   const unfinished = unfinishedCheckpointMarks(run.items);

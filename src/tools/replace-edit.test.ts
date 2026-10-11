@@ -139,3 +139,113 @@ test("replace 编辑：审批预览 diff 与执行所得一致，预览零副作
     cleanup();
   }
 });
+
+// 决策 419：edits 一次多处，各处按改动前的原文定位，全部通过才一起写入
+test("replace 编辑多处：顺序不限、逐段回执与审批 diff；同一行上的两处合成一段", async () => {
+  const lines = ["l1", "l2", "l3", "l4", "l5", "l6", "l7", "l8", "l9"];
+  const { root, cleanup } = makeWorkspace({
+    "a.txt": `${lines.join("\n")}\n`,
+    "b.ts": "foo(a, b)\n",
+  });
+  try {
+    const tool = createReplaceEditTool(root);
+    const result = await tool.execute("tc-1", {
+      path: "a.txt",
+      edits: [
+        { old_string: "l8", new_string: "L8a\nL8b" },
+        { old_string: "l2\n", new_string: "" },
+      ],
+    });
+    assert.equal(
+      readFileSync(join(root, "a.txt"), "utf8"),
+      "l1\nl3\nl4\nl5\nl6\nl7\nL8a\nL8b\nl9\n"
+    );
+    const text = textOf(result);
+    assert.ok(
+      text.startsWith(
+        "已在 a.txt 应用 2 处替换（+2 −2 行），共 2 段\n第 1 段；删去处在新文件第 2 行之前"
+      ),
+      text
+    );
+    assert.ok(
+      text.includes("第 2 段；新文件第 7–8 行：\n5| l6\n6| l7\n7| L8a\n8| L8b\n9| l9"),
+      text
+    );
+    assert.equal((result.details.diff.match(/^@@ /gm) ?? []).length, 2);
+
+    const same = await tool.execute("tc-2", {
+      path: "b.ts",
+      edits: [
+        { old_string: " b)", new_string: " y)" },
+        { old_string: "(a,", new_string: "(x," },
+      ],
+    });
+    assert.equal(readFileSync(join(root, "b.ts"), "utf8"), "foo(x, y)\n");
+    assert.ok(textOf(same).startsWith("已在 b.ts 应用 2 处替换（+1 −1 行）；新文件第 1–1 行"));
+  } finally {
+    cleanup();
+  }
+});
+
+test("replace 编辑多处：任一处不通过、交叠或两种写法混用，整组不写并指明 edits 的第几项", async () => {
+  const original = "x = 1\ny = 2\nz = 3\n";
+  const { root, cleanup } = makeWorkspace({ "a.ts": original });
+  try {
+    const tool = createReplaceEditTool(root);
+    const rejects = (edits: { old_string: string; new_string: string }[], pattern: RegExp) =>
+      assert.rejects(() => tool.execute("tc", { path: "a.ts", edits }), pattern);
+    // 第一处本身没问题、第二处不通过：整组不写
+    await rejects(
+      [
+        { old_string: "x = 1", new_string: "q = 1" },
+        { old_string: "q = 1", new_string: "r" },
+      ],
+      / edits\[1\] 未找到 old_string：.*按改动前的原文定位/
+    );
+    await rejects(
+      [
+        { old_string: "y = 2", new_string: "Y" },
+        { old_string: " = ", new_string: "==" },
+      ],
+      / edits\[1\] old_string 不唯一：在 a\.ts 中出现 3 次/
+    );
+    await rejects(
+      [
+        { old_string: "y = 2", new_string: "Y" },
+        { old_string: "z = 3", new_string: "z = 3" },
+      ],
+      / edits\[1\] 编辑没有产生任何实际变化/
+    );
+    await rejects(
+      [
+        { old_string: "y = 2", new_string: "b" },
+        { old_string: "x = 1\ny", new_string: "a" },
+      ],
+      / edits\[0\] 与 edits\[1\] 的 old_string 在原文里交叠/
+    );
+    await rejects(
+      [
+        { old_string: "z = 3", new_string: "Z" },
+        { old_string: "z = 3", new_string: "W" },
+      ],
+      /交叠/
+    );
+    await assert.rejects(
+      () =>
+        tool.execute("tc", {
+          path: "a.ts",
+          old_string: "x = 1",
+          new_string: "X",
+          edits: [{ old_string: "y = 2", new_string: "Y" }],
+        }),
+      /二选一/
+    );
+    await assert.rejects(
+      () => tool.execute("tc", { path: "a.ts" }),
+      /缺少 old_string 或 new_string/
+    );
+    assert.equal(readFileSync(join(root, "a.ts"), "utf8"), original);
+  } finally {
+    cleanup();
+  }
+});

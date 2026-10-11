@@ -11,6 +11,7 @@ import {
   failureBadge,
   pruneLine,
   repetitionLine,
+  requestRetryLine,
   shortId,
   summarizeArgs,
 } from "../application/format.ts";
@@ -53,6 +54,7 @@ const ITEM_TYPE: Record<ViewItem["kind"], string> = {
   repetition: "pigeon.repetition",
   prune: "pigeon.prune",
   "background-job": "pigeon.background-job",
+  "request-retry": "pigeon.request-retry",
 };
 
 // 单条条目的关键字段摘要（各类型的要点，通俗措辞）
@@ -165,6 +167,8 @@ function itemDetail(item: ViewItem): string {
       return repetitionLine(item.data);
     case "prune":
       return pruneLine(item.data);
+    case "request-retry":
+      return requestRetryLine(item.data);
     case "background-job": {
       // 决策 365：后台作业的启动与结束；决策 409：会话结束时保留
       const data = item.data;

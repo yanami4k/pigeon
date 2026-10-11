@@ -56,6 +56,11 @@ import {
   type StreamFn,
 } from "../pi-runtime/index.ts";
 import { limitOutputTokens } from "../pi-runtime/output-limit.ts";
+import {
+  requestRetryEntry,
+  retriesObservable,
+  withRequestRetries,
+} from "../pi-runtime/request-retry.ts";
 import { fixTemperature } from "../pi-runtime/sampling.ts";
 import { INJECTION_SNAPSHOT_VERSION, type ToolPolicy } from "../pi-runtime/snapshot.ts";
 import {
@@ -105,6 +110,7 @@ import {
   emptySettingsSnapshot,
   memoryLimitsOf,
   modelInfoSectionOf,
+  modelRequestMaxRetriesOf,
   readFileLimitsOf,
   repetitionGuardOf,
   runCommandOutputLimitsOf,
@@ -1175,6 +1181,16 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
         await deps.beforeCompaction?.(info);
       }
     : deps.beforeCompaction;
+  // 决策 420：模型请求的失败重试——主请求、压缩摘要与网页提炼都传设置里的重试次数（缺省 4）；接入模块声明的线路接受自带 fetch
+  // 时，每次重试记一条进会话记录
+  const requestStreamFn = withRequestRetries(deps.streamFn, {
+    maxRetries: modelRequestMaxRetriesOf(settings),
+    ...(retriesObservable(access?.declared?.api)
+      ? {
+          onRetry: (retry) => sessionStore.append(requestRetryEntry(retry, adapter.currentRunId())),
+        }
+      : {}),
+  });
   // 占位模型对象（真实模型元数据在模型接入插件里）：压缩摘要请求与网页提炼请求共用
   const placeholderModel = {
     id: deps.modelId,
@@ -1193,8 +1209,8 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
     config: compactionConfig,
     streamFn:
       deps.temperature !== undefined
-        ? fixTemperature(deps.streamFn, deps.temperature)
-        : deps.streamFn,
+        ? fixTemperature(requestStreamFn, deps.temperature)
+        : requestStreamFn,
     model: placeholderModel,
     ...(hooksBeforeCompaction !== undefined ? { beforeCompaction: hooksBeforeCompaction } : {}),
   });
@@ -1206,7 +1222,7 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
           createWebFetchTool({
             limits: webTools.fetch,
             distill: createModelDistiller({
-              streamFn: deps.streamFn,
+              streamFn: requestStreamFn,
               model: placeholderModel,
               maxTokens: webTools.distillMaxTokens,
             }),
@@ -1249,8 +1265,8 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
     // 决策 063、347：配置了单轮输出上限才在装配层包装 streamFn 传入，上游与 provider 插件不改
     streamFn: withOutputLimit(
       appliedTemperature !== undefined
-        ? fixTemperature(deps.streamFn, appliedTemperature)
-        : deps.streamFn,
+        ? fixTemperature(requestStreamFn, appliedTemperature)
+        : requestStreamFn,
       maxOutputTokens
     ),
     tools: [

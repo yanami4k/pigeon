@@ -29,6 +29,7 @@ import {
 } from "node:fs";
 import path from "node:path";
 import { VIRTUAL_PATH_HINT } from "../state/paths.ts";
+import { commandLabel } from "./command-echo.ts";
 import type { CommandOutputStore, OutputSlot } from "./command-output.ts";
 import { killLocalOrphan, type OrphanCleanup } from "./process-identity.ts";
 import type {
@@ -780,7 +781,7 @@ export function elapsedText(ms: number): string {
 
 function listRunning(jobs: readonly BackgroundJob[]): string {
   const now = Date.now();
-  return `在跑的作业：${jobs.map((job) => `${job.id}（${job.command}，已 ${elapsedText(now - job.startedAt)}）`).join("；")}。`;
+  return `在跑的作业：${jobs.map((job) => `${job.id}（${commandLabel(job.command)}，已 ${elapsedText(now - job.startedAt)}）`).join("；")}。`;
 }
 
 // 一个作业的状态一句

@@ -33,6 +33,8 @@ export const ModelInfoDeclarationSchema = Type.Object({
   id: Type.Optional(Type.String({ minLength: 1 })),
   // 接口地址：按主机名判定实际服务方
   baseUrl: Type.Optional(Type.String()),
+  // pi-ai 的请求线路（模型对象的同名字段）：决策 420 据此判断能否经自带 fetch 记下每次重试
+  api: Type.Optional(Type.String({ minLength: 1 })),
   servedBy: Type.Optional(Type.String({ minLength: 1 })),
   cost: Type.Optional(
     Type.Object({
