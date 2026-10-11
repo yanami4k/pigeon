@@ -97,7 +97,7 @@ test("不能看图：图片只给元信息；其他二进制（开头有 NUL、�
   const gbk = Buffer.from(Array(200).fill([0xc4, 0xe3, 0xba, 0xc3]).flat());
   const files = {
     "a.png": png(3, 2),
-    "x.bin": Buffer.from([0x7b, 0x00, 0x01, 0xfe, 0x22, 0x10, 0x00, 0x41]),
+    "x.bin": Buffer.from([0x7b, 0x00, 0x01, 0x02, 0x22, 0x10, 0x00, 0x41]),
     "doc.pdf": `%PDF-1.7\n${"stream text ".repeat(50)}`,
     "gbk.txt": gbk,
   };

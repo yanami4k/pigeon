@@ -485,6 +485,9 @@ test("图片超过预算时不论时机从最旧的起清掉带图的结果，�
   );
   assert.match(record?.items[0]?.placeholder ?? "", /p0\.png.*10×10/);
   assert.deepEqual(imagesOf(view), ["img4", "img5"]);
+  // 最新一张单独就超过预算的一半也留着
+  const tight = new ContextPruner(settings({ maxImageBytes: 100 })).beforeRequest(messages);
+  assert.deepEqual(imagesOf(tight.messages), ["img5"]);
 });
 
 test("同一张图片再读一次，前一次读取即成过时读取（图片按整个文件算）", () => {
