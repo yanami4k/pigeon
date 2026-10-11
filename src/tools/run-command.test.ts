@@ -9,10 +9,12 @@ import { join } from "node:path";
 import { test } from "vitest";
 import {
   createRunCommandTool,
+  DEFAULT_RUN_COMMAND_TIMEOUT_MS,
   parseCommandLine,
   RunCommandError,
   RunCommandTimeoutError,
   ShellSyntaxError,
+  timeoutShortenedText,
 } from "./run-command.ts";
 
 const NODE = `"${process.execPath}"`;
@@ -152,6 +154,51 @@ test("决策 411：timeout_seconds 超过上限按上限执行，结果里注明
         error.message.includes("命令超时（1 秒）") &&
         error.message.includes("夹到上限")
     );
+  });
+});
+
+test("决策 418：超时超过剩余时间（扣余量）按剩余时间执行并注明；与 411 叠加取更小者、只注明起作用的一种", async () => {
+  await withRoot(async (root) => {
+    const quick = `${NODE} -e "1"`;
+    // 剩余 31.5 秒：扣掉 30 秒余量后按 1 秒执行（给的与缺省的超时都缩短）
+    const tight = createRunCommandTool({ workspaceRoot: root, budgetRemainingMs: () => 31_500 });
+    const given = await tight.execute("tc-b1", { command: quick, timeout_seconds: 30 });
+    assert.deepEqual(given.details.timeoutShortened, { fromMs: 30_000, appliedSeconds: 1 });
+    const text = given.content[0];
+    assert.ok(
+      text?.type === "text" &&
+        text.text.includes(timeoutShortenedText(given.details.timeoutShortened))
+    );
+    // 不给 timeout_seconds 时缺省的超时同样缩短，到时按缩短后的终止
+    const fallback = timeoutShortenedText({
+      fromMs: DEFAULT_RUN_COMMAND_TIMEOUT_MS,
+      appliedSeconds: 1,
+    });
+    await assert.rejects(
+      tight.execute("tc-b3", { command: `${NODE} -e "setTimeout(() => {}, 20000)"` }),
+      (error: unknown) =>
+        error instanceof RunCommandTimeoutError &&
+        error.message.includes("命令超时（1 秒）") &&
+        error.message.includes(fallback)
+    );
+    // 上限 2 秒、剩余可用 1 秒：取剩余时间，不报夹到上限
+    const both = createRunCommandTool({
+      workspaceRoot: root,
+      maxTimeoutMs: 2000,
+      budgetRemainingMs: () => 31_500,
+    });
+    const budgetWins = await both.execute("tc-b4", { command: quick, timeout_seconds: 30 });
+    assert.equal(budgetWins.details.timeoutClamped, undefined);
+    assert.equal(budgetWins.details.timeoutShortened?.appliedSeconds, 1);
+    // 剩余充裕：只按 411 夹到上限；超时不超过剩余时间的不缩短
+    const roomy = createRunCommandTool({
+      workspaceRoot: root,
+      maxTimeoutMs: 2000,
+      budgetRemainingMs: () => 100_000,
+    });
+    const capWins = await roomy.execute("tc-b5", { command: quick, timeout_seconds: 30 });
+    assert.deepEqual(capWins.details.timeoutClamped, { requestedSeconds: 30, appliedSeconds: 2 });
+    assert.equal(capWins.details.timeoutShortened, undefined);
   });
 });
 

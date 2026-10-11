@@ -4,6 +4,7 @@
 // 会话记录与续跑前缀因此逐字节一致。压缩之后重发完整块（压缩抹掉了原来那份）；续跑时与会话记录里最后一份比对，只追加变了的节。
 // 比对用的是各节原文（转义前）的哈希：每次发出（与模型自己写的记忆记成已发时）都把各节的哈希记进会话记录（pigeon.status 条目），
 // 续跑与分叉从记录取，不靠从消息正文反推。
+// 决策 418：正文随时在变的节（时间预算）另给比对键，以键代替正文比对——键没变不单独追加，别的节有变化时随之带上当前正文。
 // 防注入：节内正文先做检测视图——去掉 Cf 类字符（零宽字符等）、逐字 NFKC 归一（全角＜等）、解开 < 的实体（&lt;、&#60;、&#x3c;）——
 // 视图里出现 <pigeon- 或 </pigeon-（不分大小写、允许空白）时，转义原文里对应的开头：尖括号转成 &lt;，实体形态的把 & 转成 &amp;。
 // 其余原样保留（代码里的 Array<T>、a < b 不受影响）。
@@ -26,13 +27,19 @@ export const STATUS_SECTIONS = [
   "记忆",
   "git 状态",
   "日期",
+  // 决策 418：设了墙钟预算才有（见 wall-clock-status.ts）
+  "时间预算",
+  "时间提醒",
 ] as const;
 export type StatusSectionName = (typeof STATUS_SECTIONS)[number];
 
 // 一份状态：节名 → 正文（未转义）；功能没开的节不在
 export type StatusState = ReadonlyMap<StatusSectionName, string>;
-// 发出过的一份：节名 → 正文的哈希
+// 发出过的一份：节名 → 正文的哈希（给了比对键的节为键的哈希）
 export type StatusHashes = ReadonlyMap<StatusSectionName, string>;
+// 决策 418：比对键——正文里有随时变化的细节（已用与剩余时间）的节，以键代替正文比对：自己只在键变了时追加；
+// 别的节有变化要追加时随之带上当前正文
+export type StatusKeys = ReadonlyMap<StatusSectionName, string>;
 
 const FIRST_INTRO = `开工状态（Pigeon 自动附上）。之后有变化时以 <${STATUS_UPDATE_TAG}> 追加，整段取代此前的同名一节。`;
 const SUPERSEDE_INTRO = "以下整段取代此前的全部开工状态。";
@@ -51,6 +58,8 @@ const REMOVED_TEXTS: Readonly<Record<StatusSectionName, string>> = {
   记忆: "现在没有推送的记忆。",
   "git 状态": "现在没有 git 状态。",
   日期: "现在没有日期信息。",
+  时间预算: "现在没有墙钟预算。",
+  时间提醒: "此前的时间提醒已不适用。",
 };
 
 // 系统提示里的权威层级说明（决策 363）
@@ -148,20 +157,21 @@ export function renderStatusUpdate(changes: ReadonlyArray<[StatusSectionName, st
   ].join("\n");
 }
 
-export function hashStatus(state: StatusState): StatusHashes {
-  return new Map([...state].map(([name, text]) => [name, sha256Hex(text)]));
+export function hashStatus(state: StatusState, keys?: StatusKeys): StatusHashes {
+  return new Map([...state].map(([name, text]) => [name, sha256Hex(keys?.get(name) ?? text)]));
 }
 
-// 与发出过的一份的差别：新出现或正文变了的节给新正文，没了的节给"现在没有……"；按节的先后排
+// 与发出过的一份的差别：新出现或正文变了（给了键的比键）的节给新正文，没了的节给"现在没有……"；按节的先后排
 export function diffStatus(
   previous: StatusHashes,
-  next: StatusState
+  next: StatusState,
+  keys?: StatusKeys
 ): Array<[StatusSectionName, string]> {
   return STATUS_SECTIONS.flatMap((name): Array<[StatusSectionName, string]> => {
     const before = previous.get(name);
     const after = next.get(name);
     if (after !== undefined) {
-      return before === sha256Hex(after) ? [] : [[name, after]];
+      return before === sha256Hex(keys?.get(name) ?? after) ? [] : [[name, after]];
     }
     return before !== undefined ? [[name, REMOVED_TEXTS[name]]] : [];
   });
@@ -239,25 +249,33 @@ export class StatusTracker {
     return this.#sent;
   }
 
-  // 给出要追加的消息正文；没有要说的为 undefined
-  next(current: StatusState, compacted: boolean): string | undefined {
+  // 给出要追加的消息正文；没有要说的为 undefined。keys 见 StatusKeys：给了键的节键没变也随别的变化带上
+  next(current: StatusState, compacted: boolean, keys?: StatusKeys): string | undefined {
     const previous = this.#sent;
     const full = previous === undefined || compacted || this.#pending?.full === true;
     if (full) {
-      this.#pending = { hashes: hashStatus(current), full: true };
+      this.#pending = { hashes: hashStatus(current, keys), full: true };
       return renderStatusBlock(
         current,
         previous !== undefined,
         previous === undefined && this.#legacyNote
       );
     }
-    const changes = diffStatus(previous, current);
+    const changes = diffStatus(previous, current, keys);
     if (changes.length === 0) {
       this.#pending = undefined;
       return undefined;
     }
-    this.#pending = { hashes: hashStatus(current), full: false };
-    return renderStatusUpdate(changes);
+    this.#pending = { hashes: hashStatus(current, keys), full: false };
+    const changed = new Set(changes.map(([name]) => name));
+    const riders = [...(keys?.keys() ?? [])].flatMap((name): Array<[StatusSectionName, string]> => {
+      const text = current.get(name);
+      return text !== undefined && !changed.has(name) ? [[name, text]] : [];
+    });
+    const order = (name: StatusSectionName) => STATUS_SECTIONS.indexOf(name);
+    return renderStatusUpdate(
+      [...changes, ...riders].sort((left, right) => order(left[0]) - order(right[0]))
+    );
   }
 
   // next 给出的那条消息进了会话记录：记成已发，返回这一份（交调用方写进会话记录）；没有待记的为 undefined
