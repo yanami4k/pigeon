@@ -23,7 +23,12 @@ import {
   ContextCompactor,
   resolveCompactionConfig,
 } from "./compaction.ts";
-import { createFakeStreamFn, type FakeReply, type FakeStreamFn } from "./fixtures.ts";
+import {
+  createFakeStreamFn,
+  type FakeReply,
+  type FakeStreamFn,
+  isSummaryRequest as isSummaryContext,
+} from "./fixtures.ts";
 import type { AgentTool } from "./governance.ts";
 import type { AgentMessage } from "./index.ts";
 import { openSessionStoreWriter, type SessionStoreWriter } from "./session-store.ts";
@@ -198,9 +203,7 @@ function harness(
 }
 
 function isSummaryRequest(call: FakeStreamFn["calls"][number]): boolean {
-  return (
-    call.context.systemPrompt?.startsWith("You are a context summarization assistant.") === true
-  );
+  return isSummaryContext(call.context);
 }
 
 function requestText(call: FakeStreamFn["calls"][number] | undefined): string {

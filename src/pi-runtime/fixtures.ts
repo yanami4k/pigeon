@@ -10,11 +10,13 @@ import {
   type AssistantMessage,
   type AssistantMessageEventStream,
   type Context,
+  contentText,
   createAssistantMessageEventStream,
   type Model,
   type SimpleStreamOptions,
   type ToolCall,
 } from "@earendil-works/pi-ai";
+import { SUMMARY_INSTRUCTION_HEAD } from "./compaction.ts";
 
 // 逐 chunk 门闩：pump 在发每个分片前 wait()，测试用 release()/open() 精确控制流的推进时机，
 // 从而在“流式进行中”这个确定的时间点执行 interrupt。
@@ -106,6 +108,22 @@ export interface FakeStreamCall {
 }
 
 export type FakeStreamFn = StreamFn & { readonly calls: FakeStreamCall[] };
+
+// 压缩摘要请求的识别（决策 424）：独立式以上游的摘要系统提示开头；接续式沿用原会话，最后一条是以摘要指令开头的用户消息
+export const STANDALONE_SUMMARY_HEAD = "You are a context summarization assistant.";
+
+export function isStandaloneSummary(context: Context): boolean {
+  return (context.systemPrompt ?? "").startsWith(STANDALONE_SUMMARY_HEAD);
+}
+
+export function isContinuationSummary(context: Context): boolean {
+  const last = context.messages.at(-1);
+  return last?.role === "user" && contentText(last.content).startsWith(SUMMARY_INSTRUCTION_HEAD);
+}
+
+export function isSummaryRequest(context: Context): boolean {
+  return isStandaloneSummary(context) || isContinuationSummary(context);
+}
 
 export function createFakeStreamFn(behavior: FakeStreamBehavior): FakeStreamFn {
   if (behavior.replies.length === 0) {
