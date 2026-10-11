@@ -65,6 +65,16 @@ const run = RunStartedPayloadSchema.properties;
 // 本次运行的上下文压缩配置（188、218）：模型窗口、预留、压缩后保留的最近消息量、触发点（上下文 token 数大于它即压缩）
 export const CompactionConfigSchema = Type.Object({
   contextWindow: Type.Integer({ minimum: 1 }),
+  // 决策 422：窗口的来源——运行参数显式给出、设置、接入模块声明、pi-ai 目录、缺省；加这一项之前的记录没有它
+  contextWindowSource: Type.Optional(
+    Type.Union([
+      Type.Literal("explicit"),
+      Type.Literal("settings"),
+      Type.Literal("declared"),
+      Type.Literal("catalog"),
+      Type.Literal("default"),
+    ])
+  ),
   reserveTokens: Type.Integer({ minimum: 1 }),
   keepRecentTokens: Type.Integer({ minimum: 1 }),
   thresholdTokens: Type.Integer({ minimum: 1 }),

@@ -1,4 +1,4 @@
-// 上下文压缩的装配（决策 188、203、218、192、207）：Pigeon 的运行面缺省开启压缩（产品缺省：1M 窗口减预留），
+// 上下文压缩的装配（决策 188、203、218、192、207）：Pigeon 的运行面缺省开启压缩（触发点为模型窗口减预留，取不到窗口用缺省 1M），
 // 阈值与保留量可配置并写进 Run 开始条目；摘要请求经主请求同一个模型接入，
 // 关思考、温度同主请求的设置、输出上限按上游规则；压缩前回调经装配根接上。
 import assert from "node:assert/strict";
@@ -28,7 +28,7 @@ function runStarts(sessions: string, sessionId: string): RunStartData[] {
     .map((entry) => entry.data as RunStartData);
 }
 
-test("缺省开启：Run 开始条目记下产品缺省的压缩配置（1M 窗口、预留 16384、保留 20000、触发点 983616）", async () => {
+test("缺省开启：模型信息没有窗口时，Run 开始条目记下缺省的压缩配置（1M 窗口、预留 16384、保留 20000、触发点 983616）", async () => {
   const root = mkdtempSync(join(tmpdir(), "pigeon-compaction-default-"));
   try {
     const result = await runHeadless({
@@ -44,6 +44,7 @@ test("缺省开启：Run 开始条目记下产品缺省的压缩配置（1M 窗�
     const [start] = runStarts(join(root, ".pigeon", "state", "sessions"), result.sessionId);
     assert.deepEqual(start?.compaction, {
       contextWindow: 1_000_000,
+      contextWindowSource: "default",
       reserveTokens: 16_384,
       keepRecentTokens: 20_000,
       thresholdTokens: 983_616,
@@ -102,6 +103,7 @@ test("调低触发点：一次 Run 内轮间压缩；摘要请求经同一个模
     const [start] = runStarts(join(root, ".pigeon", "state", "sessions"), result.sessionId);
     assert.deepEqual(start?.compaction, {
       contextWindow: 1_000_000,
+      contextWindowSource: "default",
       reserveTokens: 16_384,
       keepRecentTokens: 20,
       thresholdTokens: 1000,

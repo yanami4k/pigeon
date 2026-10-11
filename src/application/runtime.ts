@@ -5,15 +5,15 @@
 // 会话存储（决策 176 / 210）：<governanceRoot>/.pigeon/state/sessions/<工作目录编码>/ 下的 pi 会话文件（M5.5 S1 治理根缺省
 // 同工作区根），交给 Adapter 写消息与 Run 起止，授权经落盘口写入；续跑复用同一 sessionId 打开同一文件续写；
 // 释放运行面时关闭
-// 上下文压缩（决策 188、218）：运行面一律开启，缺省为产品缺省（1M 窗口减预留，实际几乎不触发），阈值与保留量可配置；
-// 摘要请求与主请求同一个模型接入
+// 上下文压缩（决策 188、218、422）：运行面一律开启，触发点缺省为模型窗口减预留，阈值与保留量可配置；窗口取运行参数显式给的，
+// 没给取本次模型信息里的窗口，都没有才用缺省；摘要请求与主请求同一个模型接入
 // 人写的说明（决策 330、363）：读 AGENTS.md（用户级与仓库根到工作目录逐层）作开工状态块的「项目说明」一节，合计上限 32 KiB。
 // 推送记忆（决策 191、331、332、363）：开着时读两层学到的记忆作开工状态块的「记忆」一节；
 // 只有有人对话的入口另给写入配置，注册 update_memory、推送段带"被纠正时记下"的说明。复盘（收尾、压缩前、补做）随决策 331 删除
 // 联网工具（决策 287–291）：webTools 在场即注册 web_search（read 档，免审批）与 web_fetch（network 档，按网站审批）；提炼器用
 // 本会话同一个模型接入。各入口按 291 与 265 的先例决定给不给
 // 模型信息（决策 362）：接入模块可具名导出 modelInfo，加载时随 StreamFn 登记；装配时按设置 > 声明 > pi-ai 目录 > 未知逐项取值，
-// 写进每个 Run 的开始条目并放在运行面上供查询（state/model-info.ts 的 modelProfile）。不改裁剪、压缩或输出上限的行为
+// 写进每个 Run 的开始条目并放在运行面上供查询（state/model-info.ts 的 modelProfile）；压缩所用的窗口取自它（决策 422）
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -330,7 +330,7 @@ export interface RuntimeDeps {
   sessionSearch?: boolean;
   // 决策 382：使用者开关关掉时的原因（写进开局记录的 skippedTools）；跑批按条件关掉时不给（照旧不记）
   sessionSearchOffReason?: string;
-  // 决策 188、218：上下文压缩的配置（模型窗口、预留、保留量、触发点）；缺省为产品缺省
+  // 决策 188、218：上下文压缩的配置（模型窗口、预留、保留量、触发点）；没给的项取缺省，窗口没给时取模型信息（决策 422）
   compaction?: CompactionConfigInput;
   // 压缩前回调；缺省不挂
   beforeCompaction?: BeforeCompaction;
@@ -497,6 +497,8 @@ export interface RuntimeBundle {
   frozenPrompt: FrozenSessionPrompt;
   // 决策 362：本运行面所用的模型信息（逐项带来源）与缓存规则
   modelInfo: ResolvedModelInfo;
+  // 决策 188、422：装配时显式给的压缩配置（worker 按它继承，窗口按 worker 自己的模型信息取）；没给时缺省
+  compaction?: CompactionConfigInput;
   // 决策 367：本运行面实际生效的撞上限续跑与流式重复检测设定（worker 按它继承）
   truncationContinuation: TruncationContinuationSettings;
   repetitionGuard: RepetitionGuardSettings;
@@ -530,8 +532,6 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
   ) {
     throw new Error(`采样温度需要 0 到 2 之间的数：${deps.temperature}`);
   }
-  // 压缩配置畸形在打开会话文件之前响亮失败
-  const compactionConfig = resolveCompactionConfig(deps.compaction);
   const learned = deps.learnedMemory;
   const governanceRoot = deps.governanceRoot ?? deps.workspaceRoot;
   const workspaceHost = deps.workspaceHost ?? createLocalWorkspaceHost(deps.workspaceRoot);
@@ -559,6 +559,8 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
     ...(access?.catalog !== undefined ? { catalog: access.catalog } : {}),
     ...(modelSection !== undefined ? { section: modelSection } : {}),
   });
+  // 决策 422：压缩所用的窗口取自模型信息（运行参数显式给的优先）；配置畸形在打开会话文件之前响亮失败
+  const compactionConfig = resolveCompactionConfig(deps.compaction, modelInfo.contextWindow);
   // 决策 390：本运行面的推理档位——启动参数 > 设置 > 按模型信息的缺省（支持推理的 high，其余 off）
   const thinkingLevel = resolveThinkingLevel({
     requested: deps.thinkingLevel,
@@ -1535,6 +1537,7 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
     jobCloseoutMs: deps.jobCloseoutMs ?? jobLimits.closeoutSeconds * 1000,
     bindJobEvents,
     modelInfo,
+    ...(deps.compaction !== undefined ? { compaction: { ...deps.compaction } } : {}),
     truncationContinuation: continuation,
     repetitionGuard: repetition,
     status: statusTracker,

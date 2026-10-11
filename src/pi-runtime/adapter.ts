@@ -91,7 +91,6 @@ import { isStatusMessage, STATUS_MARKER, withoutStatusMarker } from "../state/st
 import type { ToolErrorKind, ToolExecution } from "../state/tool-execution.ts";
 import { classifyToolError } from "../tools/error-kind.ts";
 import {
-  type CompactionConfig,
   type CompactionOutcome,
   type CompactionStore,
   type CompactionTrigger,
@@ -899,11 +898,6 @@ export class PiRuntimeAdapter {
       tokens: this.#sentTokens(compactor, this.#agent.state.messages),
       contextWindow: compactor.config.contextWindow,
     };
-  }
-
-  // 本运行面的压缩配置（188、218）：派出的 worker 按同一配置跑；没有配置压缩时为 undefined
-  compactionConfig(): CompactionConfig | undefined {
-    return this.#compactor !== undefined ? { ...this.#compactor.config } : undefined;
   }
 
   // 手动压缩（189 的 /compact [重点]）：重点作为摘要的附加说明。只在没有进行中的 Run 时可用；

@@ -1,4 +1,4 @@
-// 压缩服务（决策 188、189、218、192、207）：配置缺省与校验、阈值判定、上下文 token 估算（压缩后的旧 usage 不算）、
+// 压缩服务（决策 188、189、218、192、207、422）：配置缺省与校验（窗口取运行参数、模型元数据或缺省）、阈值判定、上下文 token 估算（压缩后的旧 usage 不算）、
 // 摘要请求经给定的模型接入、待摘要段为空不调模型、压缩前回调先于摘要请求且失败不阻断。
 import assert from "node:assert/strict";
 import {
@@ -114,10 +114,11 @@ function longConversation(): AgentMessage[] {
 const noop = () => {};
 
 describe("压缩配置", () => {
-  test("缺省：窗口为产品缺省 1M、预留 16384、保留 20000，触发点为窗口减预留", () => {
+  test("缺省：窗口为缺省 1M、预留 16384、保留 20000，触发点为窗口减预留", () => {
     assert.equal(DEFAULT_CONTEXT_WINDOW, 1_000_000);
     assert.deepEqual(resolveCompactionConfig(), {
       contextWindow: 1_000_000,
+      contextWindowSource: "default",
       reserveTokens: 16_384,
       keepRecentTokens: 20_000,
       thresholdTokens: 983_616,
@@ -127,6 +128,7 @@ describe("压缩配置", () => {
   test("可配置：给定触发点与保留量即用给定的；非正整数、窗口不大于预留、触发点不小于窗口都报错", () => {
     assert.deepEqual(resolveCompactionConfig({ thresholdTokens: 30_000, keepRecentTokens: 5000 }), {
       contextWindow: 1_000_000,
+      contextWindowSource: "default",
       reserveTokens: 16_384,
       keepRecentTokens: 5000,
       thresholdTokens: 30_000,
@@ -138,6 +140,28 @@ describe("压缩配置", () => {
       /须大于预留量/
     );
     assert.throws(() => resolveCompactionConfig({ thresholdTokens: 1_000_000 }), /须小于模型窗口/);
+  });
+
+  test("窗口（决策 422）：模型元数据给了即用它，触发点随之为它减预留；显式给的优先；取不到用缺省", () => {
+    const declared = { source: "declared", value: 200_000 } as const;
+    assert.deepEqual(resolveCompactionConfig({}, declared), {
+      contextWindow: 200_000,
+      contextWindowSource: "declared",
+      reserveTokens: 16_384,
+      keepRecentTokens: 20_000,
+      thresholdTokens: 183_616,
+    });
+    const explicit = resolveCompactionConfig({ contextWindow: 300_000 }, declared);
+    assert.deepEqual([explicit.contextWindow, explicit.contextWindowSource], [300_000, "explicit"]);
+    const unknown = resolveCompactionConfig({}, { source: "unknown" });
+    assert.deepEqual(
+      [unknown.contextWindow, unknown.contextWindowSource],
+      [DEFAULT_CONTEXT_WINDOW, "default"]
+    );
+    assert.throws(
+      () => resolveCompactionConfig({ thresholdTokens: 200_000 }, declared),
+      /须小于模型窗口（200000，来源 declared）/
+    );
   });
 });
 

@@ -1,7 +1,9 @@
 // 上下文压缩（决策 188、189、218）：复用 pi-agent-core 0.84.4 公开的压缩函数（prepareCompaction、compact、
 // buildSessionContext、shouldCompact、estimateTokens、calculateContextTokens），不经 AgentHarness（其 compact 是桩）。
-// - 触发：上下文 token 数大于触发点即压缩；触发点缺省为模型窗口减预留（218：产品缺省，DeepSeek 1M 窗口下约 98 万，
-//   实际几乎不触发），可配置调低（集成冒烟用）。保留最近约 keepRecentTokens 的消息原样，其余由模型写成摘要。
+// - 触发：上下文 token 数大于触发点即压缩；触发点缺省为模型窗口减预留（218：产品缺省），可配置调低（集成冒烟用）。
+//   保留最近约 keepRecentTokens 的消息原样，其余由模型写成摘要。
+// - 窗口（决策 422）：运行参数显式给的 > 本次所用模型的元数据（state/model-info.ts 的 contextWindow：设置、接入模块声明、
+//   pi-ai 目录）> 缺省；来源随配置写进 Run 开始条目。
 // - 摘要请求：经调用方给的模型接入（与主请求同一个 streamFn：同一网关、同一计量与花费上限）；Models 适配只实现
 //   completeSimple。不请求推理（关思考），输出上限按上游规则取 0.8 倍预留与模型输出上限的较小者。
 // - 记录：压缩条目写进会话文件（原始消息保留，179）；替换后的上下文由 buildSessionContext 从会话树还原（上游口径）。
@@ -22,15 +24,20 @@ import {
   shouldCompact,
 } from "@earendil-works/pi-agent-core";
 import type { Api, AssistantMessage, Model, Models } from "@earendil-works/pi-ai";
+import type { ModelInfoSource, Sourced } from "../state/model-info.ts";
 import { DEEPSEEK_CONTEXT_WINDOW } from "./deepseek-model.ts";
 
-// 模型窗口的产品缺省：产品缺省模型 DeepSeek 的官方窗口（1M）
+// 模型窗口的缺省：运行参数没给、模型元数据也取不到时用（数值同产品缺省模型 DeepSeek 的官方窗口 1M）
 export const DEFAULT_CONTEXT_WINDOW = DEEPSEEK_CONTEXT_WINDOW;
+
+// 窗口的来源（决策 422）：运行参数显式给出、模型元数据的一层（设置、接入模块声明、pi-ai 目录）、缺省
+export type ContextWindowSource = "explicit" | ModelInfoSource | "default";
 
 // 本次运行用的压缩配置（写进 Run 开始条目）
 export interface CompactionConfig {
   // 模型窗口
   contextWindow: number;
+  contextWindowSource: ContextWindowSource;
   // 预留（摘要提示与输出）；缺省 16384
   reserveTokens: number;
   // 压缩后原样保留的最近消息量；缺省 20000
@@ -39,7 +46,8 @@ export interface CompactionConfig {
   thresholdTokens: number;
 }
 
-export type CompactionConfigInput = Partial<CompactionConfig>;
+// 运行参数可显式给的项（窗口的来源由解析时定）
+export type CompactionConfigInput = Partial<Omit<CompactionConfig, "contextWindowSource">>;
 
 function positiveInteger(name: string, value: number): number {
   if (!Number.isInteger(value) || value < 1) {
@@ -48,9 +56,18 @@ function positiveInteger(name: string, value: number): number {
   return value;
 }
 
-// 缺省值补齐并校验：窗口须大于预留，触发点给出时须小于窗口
-export function resolveCompactionConfig(input: CompactionConfigInput = {}): CompactionConfig {
-  const contextWindow = positiveInteger("模型窗口", input.contextWindow ?? DEFAULT_CONTEXT_WINDOW);
+// 缺省值补齐并校验：窗口须大于预留，触发点给出时须小于窗口。modelWindow 为本次所用模型元数据里的窗口（带来源）
+export function resolveCompactionConfig(
+  input: CompactionConfigInput = {},
+  modelWindow?: Sourced<number>
+): CompactionConfig {
+  const [window, contextWindowSource]: [number, ContextWindowSource] =
+    input.contextWindow !== undefined
+      ? [input.contextWindow, "explicit"]
+      : modelWindow !== undefined && modelWindow.source !== "unknown"
+        ? [modelWindow.value, modelWindow.source]
+        : [DEFAULT_CONTEXT_WINDOW, "default"];
+  const contextWindow = positiveInteger("模型窗口", window);
   const reserveTokens = positiveInteger(
     "预留量",
     input.reserveTokens ?? DEFAULT_COMPACTION_SETTINGS.reserveTokens
@@ -60,16 +77,20 @@ export function resolveCompactionConfig(input: CompactionConfigInput = {}): Comp
     input.keepRecentTokens ?? DEFAULT_COMPACTION_SETTINGS.keepRecentTokens
   );
   if (contextWindow <= reserveTokens) {
-    throw new Error(`上下文压缩的模型窗口（${contextWindow}）须大于预留量（${reserveTokens}）`);
+    throw new Error(
+      `上下文压缩的模型窗口（${contextWindow}，来源 ${contextWindowSource}）须大于预留量（${reserveTokens}）`
+    );
   }
   const thresholdTokens = positiveInteger(
     "触发点",
     input.thresholdTokens ?? contextWindow - reserveTokens
   );
   if (thresholdTokens >= contextWindow) {
-    throw new Error(`上下文压缩的触发点（${thresholdTokens}）须小于模型窗口（${contextWindow}）`);
+    throw new Error(
+      `上下文压缩的触发点（${thresholdTokens}）须小于模型窗口（${contextWindow}，来源 ${contextWindowSource}）`
+    );
   }
-  return { contextWindow, reserveTokens, keepRecentTokens, thresholdTokens };
+  return { contextWindow, contextWindowSource, reserveTokens, keepRecentTokens, thresholdTokens };
 }
 
 function settingsOf(config: CompactionConfig): CompactionSettings {

@@ -451,6 +451,7 @@ test("Run 开始条目记下本次的压缩配置（窗口、预留、保留量�
     ) as unknown as { data: RunStartData };
     assert.deepEqual(start.data.compaction, {
       contextWindow: 1_000_000,
+      contextWindowSource: "default",
       reserveTokens: 16_384,
       keepRecentTokens: 4000,
       thresholdTokens: 30_000,

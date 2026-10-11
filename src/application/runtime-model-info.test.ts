@@ -1,6 +1,6 @@
 // 模型信息通路的装配（决策 362）：接入模块可具名导出 modelInfo，加载时取出（不合规即报错，不认识的顶层键告警）；pi-ai 目录
 // 加载失败按未知处理并告警；运行面按设置 > 声明 > 目录逐项取值，写进 Run 开始条目（每一项带来源）。自带的 DeepSeek 接入
-// 声明官方人民币价，模型对象的价格仍为 0。
+// 声明官方人民币价，模型对象的价格仍为 0。压缩所用的窗口取自模型信息（决策 422）。
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -126,6 +126,14 @@ test("Run 开始条目记下本次的模型信息与每一项的来源（设置�
       reasoning: { source: "unknown" },
       input: { source: "declared", value: ["text", "image"] },
       cacheRule: { servedBy: "acme", servedByFrom: "provider", overridden: false },
+    });
+    // 决策 422：压缩所用的窗口取自模型信息，触发点为它减预留
+    assert.deepEqual(start?.data?.compaction, {
+      contextWindow: 500_000,
+      contextWindowSource: "declared",
+      reserveTokens: 16_384,
+      keepRecentTokens: 20_000,
+      thresholdTokens: 483_616,
     });
     const tools = (fake.calls[0]?.context.tools ?? []) as unknown as Array<{
       name: string;
