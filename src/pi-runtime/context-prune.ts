@@ -13,6 +13,10 @@
 // 逐字节一致（决策 373 之前付费时机裁掉的较大旧结果照样重放）。裁掉的命令输出还没落盘的先补落盘（空输出不落盘），补不成的不裁；
 // 占位给出虚拟路径，带文件变化的保留文件变化清单。裁掉的读取在上下文里再没有同一文件的读写结果时不再算读过。
 // 打转检测看的是上游 turn_end 事件里的原文，不受裁剪影响。
+// 图片（决策 414）：带图的工具结果同样是候选（读图按整个文件算，之后再读同一文件即过时；较大的旧结果按估算的 token 算）。
+// 另设图片预算：没裁的工具结果里的图片（base64）合计超过 maxImageBytes 时，不论时机、不受保护轮与价格比约束，从最旧的起
+// 清掉带图的结果，直到合计不超过预算的一半（最新一个带图的结果不清）——历史里的图每次请求都重发，超过服务方的请求体上限
+// 请求就发不出去。
 import { createHash } from "node:crypto";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { estimateTokens } from "@earendil-works/pi-agent-core";
@@ -186,10 +190,11 @@ export class ContextPruner {
 
   #prune(
     messages: readonly AgentMessage[],
-    trigger: PruneTrigger,
+    requested: PruneTrigger,
     usageSeq: number,
     write: (record: PruneRecord) => void
   ): PruneRecord | undefined {
+    let trigger = requested;
     const view = this.view(messages);
     const sizes = view.map((message) => estimateTokens(message));
     const total = sizes.reduce((sum, size) => sum + size, 0);
@@ -218,6 +223,10 @@ export class ContextPruner {
       if (failed.size === 0) break;
       candidates = candidates.filter((candidate) => !failed.has(candidate.toolCallId));
     }
+    // 决策 414：图片预算（按这次已选的之外还没裁的图片算）
+    const images = imageCandidates(messages, sizes, this.#placeholders, chosen, this.settings);
+    if (chosen.length === 0 && images.length > 0) trigger = "images";
+    chosen = [...chosen, ...images].sort((a, b) => a.index - b.index);
     if (chosen.length === 0) return undefined;
     const items: PruneItem[] = chosen.map((candidate) => ({
       toolCallId: candidate.toolCallId,
@@ -243,7 +252,8 @@ export class ContextPruner {
       horizonTurns: this.settings.horizonTurns,
       prunedTokens,
       rewriteTokens,
-      estimatedCost: !paid ? 0 : (this.settings.priceRatio - 1) * rewriteTokens,
+      estimatedCost:
+        !paid && trigger !== "images" ? 0 : (this.settings.priceRatio - 1) * rewriteTokens,
       estimatedSaving: this.settings.horizonTurns * prunedTokens,
       tokensBefore: total,
       tokensAfter: after,
@@ -348,16 +358,7 @@ function findCandidates(
   settings: ContextPruneSettings,
   large: boolean
 ): Candidate[] {
-  // 工具调用号 → 第几条助手消息与调用参数
-  const calls = new Map<string, { turn: number; args: Record<string, unknown> }>();
-  let turns = 0;
-  for (const message of messages) {
-    if (message.role !== "assistant") continue;
-    for (const block of message.content) {
-      if (block.type === "toolCall") calls.set(block.id, { turn: turns, args: block.arguments });
-    }
-    turns += 1;
-  }
+  const { calls, turns } = callsOf(messages);
   const firstProtected = turns - settings.protectTurns;
   const candidates: Candidate[] = [];
   messages.forEach((message, index) => {
@@ -393,6 +394,70 @@ function findCandidates(
     if (saved > 0) candidates.push({ ...candidate, saved });
   });
   return candidates;
+}
+
+// 工具调用号 → 第几条助手消息与调用参数；另给助手消息的条数
+function callsOf(messages: readonly AgentMessage[]): {
+  calls: Map<string, { turn: number; args: Record<string, unknown> }>;
+  turns: number;
+} {
+  const calls = new Map<string, { turn: number; args: Record<string, unknown> }>();
+  let turns = 0;
+  for (const message of messages) {
+    if (message.role !== "assistant") continue;
+    for (const block of message.content) {
+      if (block.type === "toolCall") calls.set(block.id, { turn: turns, args: block.arguments });
+    }
+    turns += 1;
+  }
+  return { calls, turns };
+}
+
+// 决策 414：图片预算的候选——没裁、这次也没选的工具结果里的图片合计超过预算时，从最旧的起直到合计不超过预算的一半，
+// 最新一个带图的结果不算
+function imageCandidates(
+  messages: readonly AgentMessage[],
+  sizes: readonly number[],
+  pruned: ReadonlyMap<string, string>,
+  chosen: readonly Candidate[],
+  settings: ContextPruneSettings
+): Candidate[] {
+  const taken = new Set(chosen.map((candidate) => candidate.toolCallId));
+  const holders: Array<{ index: number; result: ToolResultMessage; bytes: number }> = [];
+  let live = 0;
+  messages.forEach((message, index) => {
+    if (message.role !== "toolResult") return;
+    if (pruned.has(message.toolCallId) || taken.has(message.toolCallId)) return;
+    const bytes = imageBytesOf(message);
+    if (bytes === 0) return;
+    holders.push({ index, result: message, bytes });
+    live += bytes;
+  });
+  if (live <= settings.maxImageBytes) return [];
+  const { calls } = callsOf(messages);
+  const out: Candidate[] = [];
+  for (const holder of holders.slice(0, -1)) {
+    if (live <= settings.maxImageBytes / 2) break;
+    out.push({
+      index: holder.index,
+      toolCallId: holder.result.toolCallId,
+      toolName: holder.result.toolName,
+      reason: "image",
+      tokens: sizes[holder.index] ?? 0,
+      saved: 0,
+      result: holder.result,
+      args: calls.get(holder.result.toolCallId)?.args ?? {},
+    });
+    live -= holder.bytes;
+  }
+  return out;
+}
+
+// 结果里图片块的 base64 字节数合计
+function imageBytesOf(result: ToolResultMessage): number {
+  let bytes = 0;
+  for (const block of result.content) if (block.type === "image") bytes += block.data.length;
+  return bytes;
 }
 
 // 命令输出裁掉之后找得回：已落盘，或没截断（整段在 details 里，可补落盘）；截断了而全文没落盘的找不回
@@ -517,7 +582,9 @@ export function placeholderOf(
       ? "之后又读过或整体覆写过"
       : candidate.reason === "empty"
         ? "没有结果"
-        : "较大的旧结果";
+        : candidate.reason === "image"
+          ? "上下文里的图片超过预算"
+          : "较大的旧结果";
   const head = `[已裁剪] 这里原是 ${candidate.toolName} 的结果（${what}；约 ${candidate.tokens} token；${why}），为节省上下文已移出。找回：${recoveryOf(candidate, output)}`;
   return `${head}${fileChangesOf(candidate)}`;
 }
@@ -527,6 +594,14 @@ function describeCall(candidate: Pick<Candidate, "toolName" | "result" | "args">
   const details = candidate.result.details as Details;
   switch (candidate.toolName) {
     case "read_file": {
+      // 决策 414：图片与其他二进制按整个文件读，写明类型与尺寸
+      if (details?.kind === "image" || details?.kind === "binary") {
+        const what = details.kind === "image" ? "图片" : "二进制文件";
+        const dims =
+          typeof details.width === "number" ? `，${details.width}×${String(details.height)}` : "";
+        const type = details.mimeType ?? details.format;
+        return `读取${what} ${clip(String(args.path ?? ""))}（${type !== undefined ? String(type) : "类型未认出"}${dims}）`;
+      }
       const window = readWindowOf(candidate.result);
       const range = window !== undefined ? `，第 ${window.from}–${window.to} 行` : "";
       return `读取 ${clip(String(args.path ?? ""))}${range}`;
@@ -583,12 +658,15 @@ function resolvedPathOf(result: ToolResultMessage): string | undefined {
   return typeof path === "string" ? path : undefined;
 }
 
-// 读取的文件与行范围（含首尾）
+// 读取的文件与行范围（含首尾）；图片与其他二进制按整个文件读（决策 414），范围算作全部行
 function readWindowOf(
   result: ToolResultMessage
 ): { path: string; from: number; to: number } | undefined {
   const details = result.details as Details;
   const path = resolvedPathOf(result);
+  if (path !== undefined && (details?.kind === "image" || details?.kind === "binary")) {
+    return { path, from: 1, to: Number.POSITIVE_INFINITY };
+  }
   const from = details?.offset;
   const lines = details?.returnedLines;
   if (path === undefined || typeof from !== "number" || typeof lines !== "number") return undefined;

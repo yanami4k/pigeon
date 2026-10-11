@@ -46,6 +46,7 @@ const PRUNE_TRIGGERS: Record<PruneData["trigger"], string> = {
   "system-prompt": "系统提示变了",
   idle: "空闲超过缓存保留时长",
   paid: "按价格比",
+  images: "图片超过预算",
 };
 
 export function pruneLine(data: PruneData): string {

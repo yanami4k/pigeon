@@ -412,12 +412,20 @@ export const PruneDataSchema = Type.Object({
     Type.Literal("system-prompt"),
     Type.Literal("idle"),
     Type.Literal("paid"),
+    // 决策 414：图片超过预算
+    Type.Literal("images"),
   ]),
   items: Type.Array(
     Type.Object({
       toolCallId: Type.String({ minLength: 1 }),
       toolName: Type.String(),
-      reason: Type.Union([Type.Literal("stale"), Type.Literal("empty"), Type.Literal("large")]),
+      reason: Type.Union([
+        Type.Literal("stale"),
+        Type.Literal("empty"),
+        Type.Literal("large"),
+        // 决策 414：带图的结果，图片合计超过预算时从最旧的起清掉
+        Type.Literal("image"),
+      ]),
       tokens: Type.Integer({ minimum: 0 }),
       placeholder: Type.String({ minLength: 1 }),
     }),

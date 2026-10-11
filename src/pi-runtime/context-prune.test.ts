@@ -443,3 +443,60 @@ test("续跑照记录重放：从会话记录取回的裁剪应用到同样的�
   const prefix = JSON.stringify(resumed.view(longer).slice(0, messages.length));
   assert.equal(prefix, JSON.stringify(first.messages));
 });
+
+// 决策 414：读一张图片的一轮（base64 约 bytes 字节，10×10 的 PNG）
+function imageTurn(path: string, bytes: number, id: string): AgentMessage[] {
+  const details = {
+    resolvedPath: `/w/${path}`,
+    kind: "image",
+    bytes,
+    mimeType: "image/png",
+    width: 10,
+    height: 10,
+  };
+  const [call, result] = turn(
+    { name: "read_file", text: `[${path}] 图片`, args: { path }, details },
+    id
+  ) as [AgentMessage, AgentMessage & { content: object[] }];
+  const image = { type: "image", data: "A".repeat(bytes), mimeType: "image/png" };
+  return [call, { ...result, content: [...result.content, image] } as AgentMessage];
+}
+
+const imagesOf = (messages: readonly AgentMessage[]) =>
+  messages.flatMap((message) =>
+    message.role === "toolResult" && message.content.some((block) => block.type === "image")
+      ? [message.toolCallId]
+      : []
+  );
+
+test("图片超过预算时不论时机从最旧的起清掉带图的结果，清到预算的一半以下，最新一张不清；不超过不清", () => {
+  const messages = [
+    user("任务"),
+    ...Array.from({ length: 6 }, (_, i) => imageTurn(`p${i}.png`, 200, `img${i}`)).flat(),
+  ];
+  const within = new ContextPruner(settings({ maxImageBytes: 1_200 })).beforeRequest(messages);
+  assert.equal(within.record, undefined);
+  const pruner = new ContextPruner(settings({ maxImageBytes: 1_000 }));
+  const { messages: view, record } = pruner.beforeRequest(messages);
+  assert.equal(record?.trigger, "images");
+  assert.deepEqual(
+    record?.items.map((item) => [item.toolCallId, item.reason]),
+    ["img0", "img1", "img2", "img3"].map((id) => [id, "image"])
+  );
+  assert.match(record?.items[0]?.placeholder ?? "", /p0\.png.*10×10/);
+  assert.deepEqual(imagesOf(view), ["img4", "img5"]);
+});
+
+test("同一张图片再读一次，前一次读取即成过时读取（图片按整个文件算）", () => {
+  const messages = [
+    user("任务"),
+    ...imageTurn("a.png", 100, "old0"),
+    ...imageTurn("a.png", 100, "old1"),
+    ...conversation([], 5).slice(1),
+  ];
+  const pruner = new ContextPruner(settings({ priceRatio: 1, minBatchTokens: 0 }));
+  assert.deepEqual(
+    pruner.beforeRequest(messages).record?.items.map((item) => [item.toolCallId, item.reason]),
+    [["old0", "stale"]]
+  );
+});
