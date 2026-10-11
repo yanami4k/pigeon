@@ -63,7 +63,7 @@ export const DEFAULT_CONTEXT_PRUNE = {
   onCompaction: true,
   onIdle: true,
   staleReads: true,
-  // 每次请求都重发历史里的图片：取常见服务方请求体上限（约 20–50 MB）的一小部分，留足文字的余量，也不让每次上传过大
+  // 每次请求都重发历史里的图片：取常见服务方请求体上限（较小的几家在 20–48 MB）的一小部分，留足文字的余量，也不让每次上传过大
   maxImageBytes: 8 * 1024 * 1024,
 } as const;
 

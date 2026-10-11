@@ -32,7 +32,8 @@ import type { PigeonAgentTool, PigeonToolResult } from "./wrap.ts";
 const DEFAULT_READ_LIMIT = 2000;
 // 决策 414：交给模型的单张图片上限——长边像素与 base64 编码后的字节数（依据见审计 2026-10-11-read-file-images）
 export const IMAGE_MAX_EDGE = 2000;
-export const IMAGE_MAX_BASE64_BYTES = 5 * 1024 * 1024;
+export const IMAGE_MAX_BASE64_BYTES = 5_000_000;
+const IMAGE_MAX_MB = `${IMAGE_MAX_BASE64_BYTES / 1_000_000} MB`;
 
 // 域错误类（M4 S2 错误分类判据）：offset 越界 / 目标非文件等模型侧错误，
 // 与环境异常（fs ErrnoException）区分——error-kind.ts 按类归 domain
@@ -322,7 +323,7 @@ export function createReadFileTool(
 // 决策 414：模型能看图时工具说明另加的一句
 const IMAGE_SENTENCE =
   "图片（PNG、JPEG、GIF、WebP）以图片交回，可直接看图，不必为看图另写脚本或装库；" +
-  `长边超过 ${IMAGE_MAX_EDGE} 像素或编码后超过 ${IMAGE_MAX_BASE64_BYTES / 1024 / 1024} MiB 的不交出图片内容。` +
+  `长边超过 ${IMAGE_MAX_EDGE} 像素或编码后超过 ${IMAGE_MAX_MB} 的不交出图片内容。` +
   "其他二进制文件只给类型与大小。";
 
 // 图片与其他二进制：一行元信息；能交出的图片附图片内容
@@ -380,7 +381,7 @@ function imageWithheld(image: ImageInfo, bytes: number, imageInput: boolean): st
   const over: string[] = [];
   if (Math.max(width, height) > IMAGE_MAX_EDGE) over.push(`长边超过 ${IMAGE_MAX_EDGE} 像素`);
   if (Math.ceil(bytes / 3) * 4 > IMAGE_MAX_BASE64_BYTES) {
-    over.push(`编码后超过 ${IMAGE_MAX_BASE64_BYTES / 1024 / 1024} MiB`);
+    over.push(`编码后超过 ${IMAGE_MAX_MB}`);
   }
   if (over.length === 0) return undefined;
   return (
