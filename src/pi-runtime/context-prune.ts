@@ -17,6 +17,8 @@
 // 另设图片预算：没裁的工具结果里的图片（base64）合计超过 maxImageBytes 时，不论时机、不受保护轮与价格比约束，从最旧的起
 // 清掉带图的结果，直到合计不超过预算的一半（最新一个带图的结果与最近一轮的结果不清，模型还没看过）——历史里的图每次请求
 // 都重发，超过服务方的请求体上限请求就发不出去。
+// 拒收的图（决策 417）：请求被服务方以 400 拒收、且请求里有上次成功回复之后新加的图片时，由运行面调用 rejectNewImages 把这些
+// 带图的结果换成占位（原有文字照留，图片换成一行说明），同样先写会话记录再生效，续跑照记录重放，图不会回来。不受总开关约束。
 import { createHash } from "node:crypto";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { estimateTokens } from "@earendil-works/pi-agent-core";
@@ -59,6 +61,14 @@ interface SavedOutput {
 
 const SEARCH_TOOLS = new Set(["grep", "glob", "search_sessions", "web_search"]);
 const FILE_TOOLS = new Set(["read_file", "write_file", "edit_file"]);
+// 免费时机（改写不多花钱），其余时机按价格比估算代价
+const FREE_TRIGGERS: ReadonlySet<PruneTrigger> = new Set([
+  "compaction",
+  "model",
+  "tools",
+  "system-prompt",
+  "idle",
+]);
 // 估算占位大小时代替还没落盘的虚拟路径（与真路径长度相当）
 const URI_STAND_IN = "pigeon://outputs/sess_00000000000000000000000000/000";
 const CLIP_CHARS = 160;
@@ -228,6 +238,59 @@ export class ContextPruner {
     if (chosen.length === 0 && images.length > 0) trigger = "images";
     chosen = [...chosen, ...images].sort((a, b) => a.index - b.index);
     if (chosen.length === 0) return undefined;
+    return this.#commit(messages, sizes, total, chosen, trigger, outputs, usageSeq, write);
+  }
+
+  // 决策 417：上次成功回复之后新加的带图结果（请求被拒收时要换掉的那些）是否存在
+  hasNewImages(messages: readonly AgentMessage[]): boolean {
+    return newImageResults(messages, this.#placeholders).length > 0;
+  }
+
+  // 决策 417：把上次成功回复之后新加的带图结果换成拒收占位（先写会话记录再生效）；没有这样的结果返回 undefined
+  rejectNewImages(
+    messages: readonly AgentMessage[],
+    write: (record: PruneRecord) => void
+  ): PruneRecord | undefined {
+    const view = this.view(messages);
+    const sizes = view.map((message) => estimateTokens(message));
+    const total = sizes.reduce((sum, size) => sum + size, 0);
+    const { calls } = callsOf(messages);
+    const chosen: Candidate[] = newImageResults(messages, this.#placeholders).map(
+      ({ index, result }) => ({
+        index,
+        toolCallId: result.toolCallId,
+        toolName: result.toolName,
+        reason: "rejected",
+        tokens: sizes[index] ?? 0,
+        saved: 0,
+        result,
+        args: calls.get(result.toolCallId)?.args ?? {},
+      })
+    );
+    if (chosen.length === 0) return undefined;
+    return this.#commit(
+      messages,
+      sizes,
+      total,
+      chosen,
+      "rejected",
+      new Map(),
+      this.#observe(messages),
+      write
+    );
+  }
+
+  // 一次裁剪落定：算出各项占位与记录，先交 write 写进会话记录、再生效
+  #commit(
+    messages: readonly AgentMessage[],
+    sizes: readonly number[],
+    total: number,
+    chosen: readonly Candidate[],
+    trigger: PruneTrigger,
+    outputs: ReadonlyMap<string, SavedOutput | undefined>,
+    usageSeq: number,
+    write: (record: PruneRecord) => void
+  ): PruneRecord {
     const items: PruneItem[] = chosen.map((candidate) => ({
       toolCallId: candidate.toolCallId,
       toolName: candidate.toolName,
@@ -242,7 +305,7 @@ export class ContextPruner {
       0
     );
     const prunedTokens = Math.max(0, total - after);
-    const first = chosen.reduce((min, candidate) => Math.min(min, candidate.index), view.length);
+    const first = chosen.reduce((min, candidate) => Math.min(min, candidate.index), sizes.length);
     const rewriteTokens = Math.max(0, after - prefixTokens(sizes, first));
     const prunedAt = this.#now();
     const record: PruneRecord = {
@@ -252,8 +315,9 @@ export class ContextPruner {
       horizonTurns: this.settings.horizonTurns,
       prunedTokens,
       rewriteTokens,
-      estimatedCost:
-        !paid && trigger !== "images" ? 0 : (this.settings.priceRatio - 1) * rewriteTokens,
+      estimatedCost: FREE_TRIGGERS.has(trigger)
+        ? 0
+        : (this.settings.priceRatio - 1) * rewriteTokens,
       estimatedSaving: this.settings.horizonTurns * prunedTokens,
       tokensBefore: total,
       tokensAfter: after,
@@ -454,6 +518,32 @@ function imageCandidates(
   return out;
 }
 
+// 决策 417：上次成功回复（不是出错或中止收尾的助手消息）之后、还没换成占位的带图工具结果
+function newImageResults(
+  messages: readonly AgentMessage[],
+  pruned: ReadonlyMap<string, string>
+): Array<{ index: number; result: ToolResultMessage }> {
+  let start = 0;
+  for (let index = messages.length - 1; index >= 0; index--) {
+    const message = messages[index];
+    if (
+      message?.role === "assistant" &&
+      message.stopReason !== "error" &&
+      message.stopReason !== "aborted"
+    ) {
+      start = index + 1;
+      break;
+    }
+  }
+  const out: Array<{ index: number; result: ToolResultMessage }> = [];
+  for (let index = start; index < messages.length; index++) {
+    const message = messages[index];
+    if (message?.role !== "toolResult" || pruned.has(message.toolCallId)) continue;
+    if (imageBytesOf(message) > 0) out.push({ index, result: message });
+  }
+  return out;
+}
+
 // 结果里图片块的 base64 字节数合计
 function imageBytesOf(result: ToolResultMessage): number {
   let bytes = 0;
@@ -586,8 +676,20 @@ export function placeholderOf(
         : candidate.reason === "image"
           ? "上下文里的图片超过预算"
           : "较大的旧结果";
+  if (candidate.reason === "rejected") return rejectedPlaceholder(candidate);
   const head = `[已裁剪] 这里原是 ${candidate.toolName} 的结果（${what}；约 ${candidate.tokens} token；${why}），为节省上下文已移出。找回：${recoveryOf(candidate, output)}`;
   return `${head}${fileChangesOf(candidate)}`;
+}
+
+// 决策 417：拒收的图——原有文字照留，图片换成一行说明
+function rejectedPlaceholder(candidate: Pick<Candidate, "toolName" | "result" | "args">): string {
+  const texts = candidate.result.content.flatMap((block) =>
+    block.type === "text" ? [block.text] : []
+  );
+  const note =
+    `[图片未被服务方接受：${describeCall(candidate)}。图片已移出上下文、换成这段文字；` +
+    "重新读取多半仍会被拒，可改用命令行工具查看]";
+  return [...texts, note].join("\n");
 }
 
 function describeCall(candidate: Pick<Candidate, "toolName" | "result" | "args">): string {

@@ -414,6 +414,8 @@ export const PruneDataSchema = Type.Object({
     Type.Literal("paid"),
     // 决策 414：图片超过预算
     Type.Literal("images"),
+    // 决策 417：请求被服务方拒收，换掉新加的图后重试
+    Type.Literal("rejected"),
   ]),
   items: Type.Array(
     Type.Object({
@@ -425,6 +427,8 @@ export const PruneDataSchema = Type.Object({
         Type.Literal("large"),
         // 决策 414：带图的结果，图片合计超过预算时从最旧的起清掉
         Type.Literal("image"),
+        // 决策 417：带图的结果，所在请求被服务方拒收
+        Type.Literal("rejected"),
       ]),
       tokens: Type.Integer({ minimum: 0 }),
       placeholder: Type.String({ minLength: 1 }),
