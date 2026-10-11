@@ -151,6 +151,27 @@ export const RunEndDataSchema = Type.Object({
   errorMessage: Type.Optional(Type.String()),
   messageCount: Type.Integer({ minimum: 0 }),
   endedAt: Type.Integer({ minimum: 0 }),
+  // 决策 422：模型请求因上下文超长出错后的压缩没有压成（不重试，按原错误收尾）——失败的阶段与错误文本，或跳过的原因
+  overflowCompaction: Type.Optional(
+    Type.Union([
+      Type.Object({
+        kind: Type.Literal("failed"),
+        stage: Type.Union([
+          Type.Literal("prepare"),
+          Type.Literal("summary"),
+          Type.Literal("store"),
+        ]),
+        error: Type.String(),
+      }),
+      Type.Object({
+        kind: Type.Literal("skipped"),
+        reason: Type.Union([
+          Type.Literal("nothing-to-summarize"),
+          Type.Literal("store-unavailable"),
+        ]),
+      }),
+    ])
+  ),
 });
 export type RunEndData = Static<typeof RunEndDataSchema>;
 

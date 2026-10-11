@@ -1,18 +1,20 @@
 // 运行面的上下文压缩（决策 188、189、192、207、218）：两个触发挂点——一次 Run 内轮与轮之间、一次 Run 开始之前
 // （交互中的下一条输入、回炉轮、续跑），加手动 /compact；摘要消息经上游 convertToLlm 发给模型；Run 结束后按会话树
-// 重新还原一次；压缩前回调在两个挂点都被调用；Run 开始条目记下本次的压缩配置。
+// 重新还原一次；压缩前回调在两个挂点都被调用；Run 开始条目记下本次的压缩配置。模型请求因上下文超长出错时先压缩再重试一次
+// （决策 422）。
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Type } from "typebox";
 import { test } from "vitest";
+import { compactionNoticeText } from "../application/compaction-text.ts";
 import { createToolGovernance } from "../application/governance.ts";
 import { acquireSessionFileLock } from "../persistence/session-lock.ts";
 import { locateSessionFile } from "../persistence/session-reader.ts";
 import { loadStoreSessionFile } from "../persistence/session-view.ts";
 import { newSessionId } from "../state/ids.ts";
-import { type RunStartData, SessionEntryType } from "../state/session-entries.ts";
+import { type RunEndData, type RunStartData, SessionEntryType } from "../state/session-entries.ts";
 import { ToolRegistry } from "../tools/registry.ts";
 import { type CompactionNotice, PiRuntimeAdapter } from "./adapter.ts";
 import {
@@ -98,6 +100,8 @@ interface HarnessFaults {
   failSummary?: boolean;
   // 压缩条目写不进会话文件
   failCompactionWrite?: boolean;
+  // 摘要请求另用这组回复（不占主请求的回复序列）
+  summaries?: FakeReply[];
 }
 
 function harness(
@@ -116,6 +120,8 @@ function harness(
     lock: acquireSessionFileLock,
   });
   const streamFn = createFakeStreamFn({ replies });
+  const summaryFn =
+    faults.summaries !== undefined ? createFakeStreamFn({ replies: faults.summaries }) : streamFn;
   const before: BeforeCompactionInfo[] = [];
   const ref: { adapter?: PiRuntimeAdapter } = {};
   const compactor = new ContextCompactor({
@@ -123,7 +129,7 @@ function harness(
     streamFn:
       faults.failSummary === true
         ? () => Promise.reject(new Error("网关拒绝：花费上限"))
-        : streamFn,
+        : summaryFn,
     model: {
       id: "fake-model-1",
       name: "fake-model-1",
@@ -543,4 +549,86 @@ test("压缩条目写不进会话文件：提示一行未完成，仍计入会�
   } finally {
     await h.cleanup();
   }
+});
+
+// 决策 422：上游识别函数认得的超长报错（各家 SDK 的写法：状态码开头）；一般的 400 文案不算
+const OVERFLOW = "400 Input length (265330) exceeds model's maximum context length (262144).";
+const FIRST: FakeReply = { text: LONG_REPLY, contextTokens: 10 };
+const TOO_LONG: FakeReply = { text: "", streamError: OVERFLOW };
+
+// 第一问正常答完，第二问的请求超长出错；摘要请求另用一组回复
+async function secondAsk(replies: FakeReply[], faults: HarnessFaults = {}) {
+  const h = harness([FIRST, ...replies], undefined, undefined, {
+    summaries: [{ text: "## Goal\n第一问" }],
+    ...faults,
+  });
+  await h.adapter.run(LONG_TASK);
+  return { h, result: await h.adapter.run("第二问") };
+}
+
+test("超长出错（决策 422）：先压缩（压缩前回调、压缩条目、提示），再以压缩后的上下文重试一次即成功；出错消息不再发给模型、照留在会话文件里", async () => {
+  const { h, result } = await secondAsk([TOO_LONG, { text: "答", contextTokens: 300 }]);
+  try {
+    assert.equal(result.status, "completed");
+    const retry = h.streamFn.calls[2];
+    assert.ok(JSON.stringify(retry?.context.messages[0]).includes(COMPACTION_PREFIX));
+    assert.ok(requestText(retry).includes("第二问"));
+    assert.equal(requestText(retry).includes("maximum context length"), false);
+    assert.deepEqual(
+      [...h.before, ...h.notices].map((item) => item.trigger),
+      ["overflow", "overflow"]
+    );
+    await h.store.flush();
+    const main = JSON.stringify(mainBranch(h.sessions, h.sessionId));
+    assert.equal(main.split('"type":"compaction"').length - 1, 1);
+    assert.ok(main.includes("maximum context length"));
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("超长出错：重试的那次仍超长即按原错误收尾，不再压缩；之后来过正常回复再超长，算新的一次", async () => {
+  const again = await secondAsk([TOO_LONG]);
+  await again.h.cleanup();
+  assert.equal(again.result.status, "failed");
+  assert.equal(again.result.errorMessage, OVERFLOW);
+  assert.equal(again.h.streamFn.calls.length, 3);
+  assert.equal(again.h.before.length, 1);
+  const echo: FakeReply = { text: "", toolCalls: [{ name: "echo", args: { text: "ok" } }] };
+  const later = await secondAsk([TOO_LONG, echo, TOO_LONG, { text: "完成" }]);
+  await later.h.cleanup();
+  assert.equal(later.result.status, "completed");
+  assert.equal(later.h.before.length, 2);
+});
+
+test("超长出错而压缩没压成（摘要请求失败）：不重试，按原错误收尾，Run 收尾条目记下没压成的阶段与原因", async () => {
+  const { h, result } = await secondAsk([TOO_LONG], { failSummary: true });
+  try {
+    assert.equal(result.status, "failed");
+    assert.equal(result.errorMessage, OVERFLOW);
+    assert.equal(h.streamFn.calls.length, 2);
+    const [problem] = h.problems;
+    assert.ok(problem?.kind === "incomplete" && problem.trigger === "overflow");
+    assert.match(compactionNoticeText(problem), /网关拒绝.*按原错误收尾/);
+    await h.store.flush();
+    const end = mainBranch(h.sessions, h.sessionId).findLast(
+      (entry) => (entry as { customType?: string }).customType === SessionEntryType.RunEnd
+    ) as unknown as { data: RunEndData };
+    assert.deepEqual([end.data.ending, end.data.errorMessage], ["error", OVERFLOW]);
+    assert.ok(end.data.overflowCompaction?.kind === "failed");
+    assert.equal(end.data.overflowCompaction.stage, "summary");
+    assert.match(end.data.overflowCompaction.error, /网关拒绝/);
+  } finally {
+    await h.cleanup();
+  }
+});
+
+test("一般的 400（不是超长的报错文案）不压缩、不重试", async () => {
+  const { h, result } = await secondAsk([
+    { text: "", streamError: "400 messages: text content blocks must be non-empty" },
+  ]);
+  await h.cleanup();
+  assert.equal(result.status, "failed");
+  assert.equal(h.streamFn.calls.length, 2);
+  assert.deepEqual(h.before, []);
 });

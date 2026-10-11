@@ -1164,7 +1164,7 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
   // 不套单轮输出上限包装——它会盖掉上游给摘要定的输出上限（0.8 倍预留与模型输出上限的较小者）。
   // 模型对象只是占位身份（真实模型元数据在模型接入插件里），带上输出上限与窗口供上游定摘要请求的选项
   // 决策 323 / 324：PreCompact 钩子——压缩之前通知（只通知、不能拦：拦下压缩会使下一次请求超长出错）。
-  // matcher 匹配触发位置：turn / run-start 记 auto，手动压缩记 manual（331：压缩前复盘已删除，回调只剩调用方的）
+  // matcher 匹配触发位置：turn / run-start / overflow（决策 422）记 auto，手动压缩记 manual（331：压缩前复盘已删除，回调只剩调用方的）
   const hooksBeforeCompaction: BeforeCompaction | undefined = sessionHooks
     .list()
     .some((hook) => hook.event === "PreCompact")
@@ -1490,7 +1490,7 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
       jobs.noteForegroundChanges([relative]);
     }
   });
-  // 决策 323：PostCompact 钩子——压缩完成后通知（无决策能力；触发位置 turn / run-start 记 auto、manual 记 manual）
+  // 决策 323：PostCompact 钩子——压缩完成后通知（无决策能力；触发位置 turn / run-start / overflow 记 auto、manual 记 manual）
   if (sessionHooks.list().some((hook) => hook.event === "PostCompact")) {
     adapter.subscribeCompaction((notice) => {
       if (notice.kind === "compacted") {

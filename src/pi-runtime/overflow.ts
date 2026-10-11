@@ -1,8 +1,10 @@
 // 上下文超长的识别直接用上游的判定（pi-ai 的 isContextOverflow：按各 provider 的报错文案，先排除限额类）；
-// 这里只把"一段错误文案"包成上游要的错误态 assistant 消息，不另造正则。不传上下文窗口：只认报错文案，
-// 不做静默超长的推断（那要按 usage 比窗口，调用方拿不到可靠的窗口值）。
+// 这里不另造正则。不传上下文窗口：只认出错收尾的报错文案，不做静默超长的推断（那是按 usage 比窗口判正常收尾的回复，
+// 不是请求出错）。
+import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { type AssistantMessage, isContextOverflow } from "@earendil-works/pi-ai";
 
+// 一段错误文案：包成上游要的错误态 assistant 消息再交给上游判定
 export function isContextOverflowError(errorMessage: string): boolean {
   const message: AssistantMessage = {
     role: "assistant",
@@ -23,4 +25,11 @@ export function isContextOverflowError(errorMessage: string): boolean {
     timestamp: 0,
   };
   return isContextOverflow(message);
+}
+
+// 决策 422：一条消息是否为"模型请求因上下文超长出错"——出错收尾的助手消息，交给上游判定
+export function isContextOverflowReply(message: AgentMessage): boolean {
+  return (
+    message.role === "assistant" && message.stopReason === "error" && isContextOverflow(message)
+  );
 }

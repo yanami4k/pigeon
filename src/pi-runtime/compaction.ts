@@ -203,8 +203,8 @@ export interface CompactionStore {
   appendCompaction(result: CompactResult): Promise<readonly Entry[] | undefined>;
 }
 
-// 触发位置：一次 Run 内轮与轮之间、一次 Run 开始之前、手动 /compact
-export type CompactionTrigger = "turn" | "run-start" | "manual";
+// 触发位置：一次 Run 内轮与轮之间、一次 Run 开始之前、模型请求因上下文超长出错之后（决策 422）、手动 /compact
+export type CompactionTrigger = "turn" | "run-start" | "overflow" | "manual";
 
 export interface BeforeCompactionInfo {
   trigger: CompactionTrigger;
