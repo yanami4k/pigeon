@@ -22,6 +22,7 @@ import {
   DEFAULT_RUN_COMMAND_OUTPUT_TAIL_BYTES,
 } from "../state/tools-config.ts";
 import { type BackgroundJob, jobOutputText, type SessionJobs } from "./background-jobs.ts";
+import { commandEcho, commandLabel } from "./command-echo.ts";
 import {
   type CommandOutputStore,
   composeOutput,
@@ -611,7 +612,7 @@ export function createRunCommandTool(
         {
           type: "text",
           text: [
-            `已在后台启动作业 ${job.id}${keep ? "（会话结束后保留）" : ""}：$ ${command}${alias !== undefined ? `（短名 ${alias}）` : ""}`,
+            `已在后台启动作业 ${job.id}${keep ? "（会话结束后保留）" : ""}：$ ${echoOf(command, alias)}${alias !== undefined ? `（短名 ${alias}）` : ""}`,
             jobOutputText(job),
             "用 job_output 查看状态与新增输出（可带 wait_seconds 等它结束），用 job_kill 停掉；作业结束时会通知你。",
           ].join("\n"),
@@ -675,11 +676,11 @@ export function createRunCommandTool(
         );
       }
       if (inspection.mode === "invalid") {
-        throw new RunCommandError(inspection.error ?? `无法执行：${command}`);
+        throw new RunCommandError(inspection.error ?? `无法执行：${echoOf(command, alias)}`);
       }
       if (inspection.mode === "shell" && !authorized) {
         throw new RunCommandError(
-          `需要经 shell 运行（${inspection.shellReason}），未经人确认 shell，拒绝执行：${command}`
+          `需要经 shell 运行（${inspection.shellReason}），未经人确认 shell，拒绝执行：${echoOf(command, alias)}`
         );
       }
       const tooLong = commandTooLong(command, platform, inspection.mode);
@@ -813,7 +814,7 @@ export function createRunCommandTool(
         );
       }
       if (signal?.aborted === true) {
-        throw new Error(`命令被中止：${command}`);
+        throw new Error(`命令被中止：${echoOf(command, alias)}`);
       }
       return {
         content: [{ type: "text", text: resultText(evidence, headBytes) }],
@@ -943,11 +944,16 @@ export function planMcpLaunch(input: {
   };
 }
 
+// 决策 421：结果里只回显命令开头（完整命令在模型自己的调用参数里）；用了短名时模型只发了短名，展开后的完整命令照旧整段给出
+function echoOf(command: string, alias: string | undefined): string {
+  return alias !== undefined ? command : commandEcho(command);
+}
+
 function resultText(evidence: ExecEvidence, headBytes: number): string {
   const changes = evidence.fileChanges;
   const route = evidence.shell ? "（经 shell）" : evidence.launcher ? "（经 cmd.exe 启动器）" : "";
   const lines = [
-    `$ ${evidence.command}${evidence.alias !== undefined ? `（短名 ${evidence.alias}）` : ""}${route}`,
+    `$ ${echoOf(evidence.command, evidence.alias)}${evidence.alias !== undefined ? `（短名 ${evidence.alias}）` : ""}${route}`,
     `退出码：${evidence.exitCode ?? "无"}${evidence.signal !== undefined ? `（信号 ${evidence.signal}）` : ""}`,
     ...(evidence.timeoutClamped !== undefined ? [timeoutClampedText(evidence.timeoutClamped)] : []),
     ...(evidence.memoryLimitExceeded !== undefined
@@ -956,7 +962,7 @@ function resultText(evidence: ExecEvidence, headBytes: number): string {
     // 决策 365：内存超限时注明期间在跑的后台作业（内存可能是它们占的）
     ...(evidence.memoryLimitExceeded !== undefined && evidence.backgroundJobs !== undefined
       ? [
-          `期间在跑的后台作业：${evidence.backgroundJobs.map((job) => `${job.id}（${job.command}）`).join("、")}，内存也可能是它们占用的`,
+          `期间在跑的后台作业：${evidence.backgroundJobs.map((job) => `${job.id}（${commandLabel(job.command)}）`).join("、")}，内存也可能是它们占用的`,
         ]
       : []),
   ];

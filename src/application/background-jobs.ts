@@ -33,6 +33,7 @@ import {
   outputTail,
   type SessionJobs,
 } from "../tools/background-jobs.ts";
+import { commandLabel } from "../tools/command-echo.ts";
 import { escapeStatusText } from "./status-block.ts";
 import type { DrainTarget, NoticeTarget } from "./worker-notices.ts";
 
@@ -68,7 +69,7 @@ function noticeSection(job: BackgroundJob): string {
   const changes = jobChangesText(job);
   const tail = outputTail(job, NOTICE_TAIL_BYTES);
   return [
-    `作业 ${job.id} ${jobStateText(job)}：$ ${job.command}`,
+    `作业 ${job.id} ${jobStateText(job)}：$ ${commandLabel(job.command)}`,
     jobOutputText(job),
     ...(changes !== undefined ? [changes] : []),
     ...(tail !== "" ? [`输出末尾：\n${tail}`] : []),
@@ -154,7 +155,9 @@ export class JobNotices {
 // 收尾开始时还有作业在跑：先交给模型的一条（只交一次）
 export function stillRunningText(jobs: readonly BackgroundJob[], now = Date.now()): string {
   const list = jobs
-    .map((job) => `${job.id}（${job.command}，已跑 ${elapsedText(now - job.startedAt)}）`)
+    .map(
+      (job) => `${job.id}（${commandLabel(job.command)}，已跑 ${elapsedText(now - job.startedAt)}）`
+    )
     .join("、");
   return `本次运行即将收尾，${jobs.length} 个后台作业仍在跑：${list}；需要它们的结果就用 job_output 等，不需要的用 job_kill 停掉`;
 }
@@ -235,7 +238,7 @@ export function previousJobsOf(
 
 export function lostJobsText(lost: PreviousJobs["lost"]): string {
   return (
-    `上一个进程启动的后台作业已随它结束而丢失（没有结束记录）：${lost.map((job) => `${job.jobId}（${job.command}）`).join("、")}。` +
+    `上一个进程启动的后台作业已随它结束而丢失（没有结束记录）：${lost.map((job) => `${job.jobId}（${commandLabel(job.command)}）`).join("、")}。` +
     "残留的进程已按记录清理或会在下次启动时清理；需要的话重新启动"
   );
 }
