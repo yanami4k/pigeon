@@ -7,6 +7,11 @@
 // 决策 356：pigeon://outputs/<会话号>/<编号> 是落盘的命令输出，在路径判定之前识别，直接从会话落盘目录流式读、只留需要的
 // 那段行，不经执行端。
 // 决策 358：成功读取（含分段）后在读取记录里记下整个文件字节的哈希，write_file 据此判断"读过且读后未变"；失败的读取不记。
+// 决策 414：按文件头认出图片（PNG、JPEG、GIF、WebP）与其他二进制（判定见 file-kind.ts），整个文件一次交回、不分行：
+// 模型能看图（imageInput，取自模型信息）且图片在上限以内时交出图片内容，附一行路径、类型、像素尺寸与字节数；其余只给这些
+// 元信息与可用的命令行工具，不把解码出的乱码放进上下文。这类读取同样记进读取记录（读后改写的保护照旧）。
+// 决策 416、417：要交出的图片先过关口（image-gate.ts）：完整解码一遍，超出单张上限的在进程内缩小；认不出尺寸、解不开、缩不下
+// 或图像库载入失败时只给元信息。
 import { type Static, Type } from "typebox";
 import { Value } from "typebox/value";
 import {
@@ -16,7 +21,10 @@ import {
 } from "../state/tools-config.ts";
 import { type CommandOutputStore, isOutputsUri, OutputPathError } from "./command-output.ts";
 import type { EditMode } from "./edit-mode.ts";
+import { type BinaryInfo, detectBinary, detectImage, type ImageInfo } from "./file-kind.ts";
 import { lineTag, snapshotTag, splitContent } from "./hashline.ts";
+import { gateImage, IMAGE_MAX_EDGE, IMAGE_MAX_MB, resizedNote } from "./image-gate.ts";
+import { type ImagePreparer, photonPreparer } from "./image-resize.ts";
 import { asWorkspaceHost } from "./local-host.ts";
 import { WorkspacePathError } from "./paths.ts";
 import type { ReadTarget } from "./read-paths.ts";
@@ -53,6 +61,22 @@ export interface ReadFileDetails {
   byteLimited?: boolean;
 }
 
+// 决策 414：整个文件一次交回的读取（图片与其他二进制）
+export interface ReadFileWholeDetails {
+  resolvedPath: string;
+  kind: "image" | "binary";
+  bytes: number;
+  // 图片：类型与像素尺寸（读不出尺寸时缺省）；交出了图片内容才有 imageSent
+  mimeType?: string;
+  width?: number;
+  height?: number;
+  imageSent?: true;
+  // 决策 416：缩小后交出的那份
+  resized?: { mimeType: string; width: number; height: number; bytes: number };
+  // 二进制：认得的格式
+  format?: string;
+}
+
 // 决策 355：工作区以外的读取怎样放行——放手模式自动放行（allowed）、非放手模式经人批准（approval）、
 // 没有审批通道即拒（refused，缺省）。只决定工具说明的说法；实际放行由治理层按调用授予（authorizeOutsideRead），
 // 没有授权一律拒读
@@ -68,6 +92,10 @@ export interface ReadFileToolOptions {
   outputs?: CommandOutputStore;
   // 决策 358：本会话的读取记录
   reads?: FileReadTracker;
+  // 决策 414：模型能看图（模型信息的 input 含 image）时图片以图片内容交回；缺省不能
+  imageInput?: boolean;
+  // 决策 416、417：交出前的核验与缩放；缺省用 photon
+  prepareImage?: ImagePreparer;
 }
 
 // 读到的内容：总行数、按行号取行，与读取成功后的收尾
@@ -77,6 +105,15 @@ interface Loaded {
   totalLines: number;
   line(number: number): string;
   done(): void;
+}
+
+// 决策 414：认出是图片或其他二进制的文件，整个交回
+interface WholeFile {
+  whole: true;
+  resolvedPath: string;
+  bytes: Buffer;
+  image?: ImageInfo;
+  binary?: BinaryInfo;
 }
 
 // 工作区以外的文件未获授权：路径围栏错误的一种
@@ -100,7 +137,8 @@ const OUTSIDE_SENTENCES: Readonly<Record<OutsideReadMode, string>> = {
 export function createReadFileTool(
   workspace: string | WorkspaceHost,
   options: ReadFileToolOptions = {}
-): PigeonAgentTool<typeof ReadFileParamsSchema, ReadFileDetails> & OutsideReadTool {
+): PigeonAgentTool<typeof ReadFileParamsSchema, ReadFileDetails | ReadFileWholeDetails> &
+  OutsideReadTool {
   const host = asWorkspaceHost(workspace);
   const replaceMode = options.editMode === "replace";
   const outsideReads = options.outsideReads ?? "refused";
@@ -121,7 +159,7 @@ export function createReadFileTool(
     offset: number,
     limit: number,
     approved: boolean
-  ): Promise<Loaded> => {
+  ): Promise<Loaded | WholeFile> => {
     if (isOutputsUri(inputPath)) {
       if (options.outputs === undefined) {
         throw new OutputPathError(`本会话没有落盘的命令输出：${inputPath}`);
@@ -150,6 +188,17 @@ export function createReadFileTool(
       host.readBytes !== undefined
         ? await host.readBytes(resolvedPath)
         : Buffer.from(await host.readText(resolvedPath), "utf8");
+    const image = detectImage(bytes);
+    const binary = image === undefined ? detectBinary(bytes) : undefined;
+    if (image !== undefined || binary !== undefined) {
+      return {
+        whole: true,
+        resolvedPath,
+        bytes,
+        ...(image !== undefined ? { image } : {}),
+        ...(binary !== undefined ? { binary } : {}),
+      };
+    }
     const raw = bytes.toString("utf8");
     const { lines } = splitContent(raw);
     return {
@@ -169,7 +218,9 @@ export function createReadFileTool(
           "edit_file 的 old_string 取自内容部分，不要带行号前缀；文件被截断时按提示的 offset 继续读取。"
         : `${lead}输出每行带锚点前缀 N#TAG（N 为行号，TAG 为内容哈希），` +
           "头部 [PATH#TAG] 是全文件快照。edit_file 编辑时必须使用本工具给出的锚点与快照；" +
-          "文件被截断时按提示的 offset 继续读取。") + OUTSIDE_SENTENCES[outsideReads],
+          "文件被截断时按提示的 offset 继续读取。") +
+      (options.imageInput === true ? IMAGE_SENTENCE : "") +
+      OUTSIDE_SENTENCES[outsideReads],
     parameters: ReadFileParamsSchema,
     executionMode: "parallel",
     async inspectOutsideRead(params) {
@@ -187,12 +238,24 @@ export function createReadFileTool(
     authorizeOutsideRead(toolCallId) {
       outsideApproved.add(toolCallId);
     },
-    async execute(toolCallId, params): Promise<PigeonToolResult<ReadFileDetails>> {
+    async execute(
+      toolCallId,
+      params
+    ): Promise<PigeonToolResult<ReadFileDetails | ReadFileWholeDetails>> {
       const approved = outsideApproved.delete(toolCallId);
       const args = Value.Parse(ReadFileParamsSchema, params);
       const offset = args.offset ?? 1;
       const limit = args.limit ?? DEFAULT_READ_LIMIT;
       const loaded = await load(args.path, offset, limit, approved);
+      if ("whole" in loaded) {
+        options.reads?.record(loaded.resolvedPath, loaded.bytes);
+        return wholeFileResult(
+          args.path,
+          loaded,
+          options.imageInput === true,
+          options.prepareImage ?? photonPreparer
+        );
+      }
       const { resolvedPath, snapshot, totalLines } = loaded;
       if (totalLines === 0) {
         loaded.done();
@@ -264,6 +327,95 @@ export function createReadFileTool(
       };
     },
   };
+}
+
+// 决策 414：模型能看图时工具说明另加的一句
+const IMAGE_SENTENCE =
+  "图片（PNG、JPEG、GIF、WebP）以图片交回，可直接看图，不必为看图另写脚本或装库；" +
+  `长边超过 ${IMAGE_MAX_EDGE} 像素或编码后超过 ${IMAGE_MAX_MB} 的先自动缩小再交出。` +
+  "其他二进制文件只给类型与大小。";
+
+// 图片与其他二进制：一行元信息；能交出的图片附图片内容（决策 417：先过关口——完整解码一遍，超出单张上限的先缩小）
+async function wholeFileResult(
+  path: string,
+  file: WholeFile,
+  imageInput: boolean,
+  prepare: ImagePreparer
+): Promise<PigeonToolResult<ReadFileWholeDetails>> {
+  const size = `${file.bytes.length} 字节`;
+  const { image } = file;
+  if (image === undefined) {
+    const details: ReadFileWholeDetails = {
+      resolvedPath: file.resolvedPath,
+      kind: "binary",
+      bytes: file.bytes.length,
+      ...(file.binary?.format !== undefined ? { format: file.binary.format } : {}),
+    };
+    return { content: [{ type: "text", text: binaryText(path, size, file.binary) }], details };
+  }
+  const { width, height } = image;
+  const dims = width !== undefined && height !== undefined ? ` ${width}×${height}` : "";
+  const head = `[${path}] 图片 ${image.format}${dims}，${size}`;
+  const details: ReadFileWholeDetails = {
+    resolvedPath: file.resolvedPath,
+    kind: "image",
+    bytes: file.bytes.length,
+    mimeType: image.mimeType,
+    ...(width !== undefined && height !== undefined ? { width, height } : {}),
+  };
+  if (!imageInput) {
+    return { content: [{ type: "text", text: `${head}。${NO_VISION_TEXT}` }], details };
+  }
+  const gated = await gateImage(file.bytes, prepare);
+  if ("withheld" in gated) {
+    return {
+      content: [
+        { type: "text", text: `${head}。${gated.withheld}，未交出图片内容；${WITHHELD_HINT}` },
+      ],
+      details,
+    };
+  }
+  const sent = gated.image;
+  return {
+    content: [
+      { type: "text", text: sent.resized ? `${head}；${resizedNote(gated.info, sent)}` : head },
+      { type: "image", data: sent.data.toString("base64"), mimeType: sent.mimeType },
+    ],
+    details: {
+      ...details,
+      imageSent: true,
+      ...(sent.resized
+        ? {
+            resized: {
+              mimeType: sent.mimeType,
+              width: sent.width,
+              height: sent.height,
+              bytes: sent.data.length,
+            },
+          }
+        : {}),
+    },
+  };
+}
+
+const NO_VISION_TEXT =
+  "当前模型不能看图，未交出图片内容；需要图片里的信息时可用命令行工具处理" +
+  "（如 file、identify 看属性，tesseract 识别文字，python 的图像库分析像素）。";
+const WITHHELD_HINT =
+  "可用命令行工具查看或处理（如 file、identify 看属性，ImageMagick 或 python 的图像库修复、缩小）。";
+
+function binaryText(path: string, size: string, binary: BinaryInfo | undefined): string {
+  if (binary?.reason === "encoding") {
+    const share = Math.round((binary.invalidShare ?? 0) * 100);
+    return (
+      `[${path}] 不是 UTF-8 文本（开头部分约 ${share}% 是非法字节序列），${size}，未显示内容。` +
+      "若是其他编码的文本，可用 iconv 转成 UTF-8 后再读（如 iconv -f GBK -t UTF-8 文件）；其余可用 file、xxd 等命令行工具查看。"
+    );
+  }
+  return (
+    `[${path}] 二进制文件（${binary?.format ?? "类型未认出"}），${size}，未显示内容；` +
+    "可用命令行工具查看（如 file 看类型、xxd 文件 | head 看开头字节、strings 取可读字符串）。"
+  );
 }
 
 // 超长行只显示前 maxChars 个字符（不切断代理对），注明原长与看其余部分的办法

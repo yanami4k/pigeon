@@ -31,6 +31,8 @@ export const ContextPruneSectionSchema = Type.Object(
     onIdle: Type.Optional(Type.Boolean()),
     // 过时读取（被后来的读取覆盖或被整体覆写）的清理
     staleReads: Type.Optional(Type.Boolean()),
+    // 决策 414：上下文里没裁的图片（base64）合计至多这么多字节，超过即从最旧的起清掉带图的工具结果
+    maxImageBytes: Type.Optional(Type.Integer({ minimum: 1 })),
   },
   { additionalProperties: false }
 );
@@ -49,6 +51,7 @@ export interface ContextPruneSettings {
   onCompaction: boolean;
   onIdle: boolean;
   staleReads: boolean;
+  maxImageBytes: number;
 }
 
 export const DEFAULT_CONTEXT_PRUNE = {
@@ -60,6 +63,8 @@ export const DEFAULT_CONTEXT_PRUNE = {
   onCompaction: true,
   onIdle: true,
   staleReads: true,
+  // 每次请求都重发历史里的图片：取常见服务方请求体上限（较小的几家在 20–48 MB）的一小部分，留足文字的余量，也不让每次上传过大
+  maxImageBytes: 8 * 1024 * 1024,
 } as const;
 
 export function contextPruneSettings(
@@ -77,6 +82,7 @@ export function contextPruneSettings(
     onCompaction: section?.onCompaction ?? DEFAULT_CONTEXT_PRUNE.onCompaction,
     onIdle: section?.onIdle ?? DEFAULT_CONTEXT_PRUNE.onIdle,
     staleReads: section?.staleReads ?? DEFAULT_CONTEXT_PRUNE.staleReads,
+    maxImageBytes: section?.maxImageBytes ?? DEFAULT_CONTEXT_PRUNE.maxImageBytes,
   };
 }
 

@@ -4,9 +4,11 @@
 //   contextWindow 为官方 1M；maxTokens 为官方单次输出上限 393,216（决策 347，改决策 203 的 16384）；Pigeon 未配置输出上限时
 //   即按它发，由 provider 按剩余上下文收窄；
 //   cost 全为 0：花费按官方人民币价目与高峰时段另计（state/model-pricing.ts），不在这里另算一份；
-//   compat.allowEmptySignature 为真：签名为空的历史思考仍以 thinking 块回传（pi-ai 缺省会改作普通文字）。
+//   compat.allowEmptySignature 为真：签名为空的历史思考仍以 thinking 块回传（pi-ai 缺省会改作普通文字）；
+//   input 按型号定（决策 414）：服务商文档写明能看图的型号为 ["text", "image"]，其余只收文字——pi-ai 发请求前按它把图片
+//   换成占位文字，声明里的 input 与模型对象取同一份，read_file 据此决定是否交出图片。
 // 模型信息的声明（决策 362）：deepseekModelInfo 带官方人民币非高峰价（取自 model-pricing.ts；高峰加价由计费另算，不影响命中与
-// 未命中的价格比），与模型对象同一组身份、窗口、输出上限与是否支持推理（决策 390：据此缺省开思考）；接入模块经具名导出
+// 未命中的价格比），与模型对象同一组身份、窗口、输出上限、是否支持推理（决策 390：据此缺省开思考）与输入类型；接入模块经具名导出
 // modelInfo 交给 Pigeon。
 import type { streamSimple } from "@earendil-works/pi-ai/api/anthropic-messages";
 import type { ModelInfoDeclaration } from "../state/model-info.ts";
@@ -18,6 +20,12 @@ export const DEEPSEEK_MODEL_ID = "deepseek-flash";
 export const DEEPSEEK_PROVIDER = "deepseek";
 export const DEEPSEEK_CONTEXT_WINDOW = 1_000_000;
 export const DEEPSEEK_MAX_TOKENS = 393_216;
+// 能看图的型号（官方文档：deepseek-flash 接受 JPEG、PNG、GIF、WebP；deepseek-v4-pro 不支持）
+const DEEPSEEK_VISION_MODELS: ReadonlySet<string> = new Set(["deepseek-flash"]);
+
+export function deepseekInput(modelId: string): Array<"text" | "image"> {
+  return DEEPSEEK_VISION_MODELS.has(modelId) ? ["text", "image"] : ["text"];
+}
 
 export type DeepSeekModel = Parameters<typeof streamSimple>[0];
 
@@ -32,7 +40,7 @@ export function deepseekModel(
     provider: DEEPSEEK_PROVIDER,
     baseUrl,
     reasoning: true,
-    input: ["text"],
+    input: deepseekInput(modelId),
     // 价格在 deepseekModelInfo 里，不放进模型对象：pi-ai 按 model.cost 算每条回复的 usage.cost，现有计费、状态栏与脚本预算
     // 靠"DeepSeek 回复的 usage.cost 为 0"改按人民币价目与高峰时段计，放进来会改变这一判断
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
@@ -60,5 +68,6 @@ export function deepseekModelInfo(): ModelInfoDeclaration {
     contextWindow: DEEPSEEK_CONTEXT_WINDOW,
     maxTokens: DEEPSEEK_MAX_TOKENS,
     reasoning: true,
+    input: deepseekInput(DEEPSEEK_MODEL_ID),
   };
 }

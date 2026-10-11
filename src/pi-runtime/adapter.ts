@@ -37,6 +37,10 @@
 //    快照器在此等未完成的快照拍完；等待方自己保证有上限，抛异常只进 listenerErrors、不挡工具执行。没有登记时行为不变。
 // 15. 开工状态块与状态变化通道（决策 363）：挂了状态通道时，Run 开始之前与一批工具结果之后各问一次，状态消息作用户消息
 //    放在本次输入之前或该批工具结果之后（轮间压缩之后再交，压缩过即重发完整块）；没挂时行为不变。
+// 16. 被拒收的图片（决策 417）：请求以 HTTP 400 出错（按错误文本开头的状态码判，不看服务方的文案）、且请求里有上次成功回复之后
+//    新加的带图工具结果时，暂扣收尾（同空回复重试），经裁剪器把这些结果换成拒收占位——先写会话记录再生效，续跑、分叉与轮间
+//    压缩后的还原照记录重放，图不会回来——再从 Agent 的消息去掉那条出错消息（会话文件照实留着）接着运行一次；一个 Run 只重试
+//    一次，仍失败照原错误收尾。思考块等其余消息不动。没有裁剪器时不重试。
 import {
   type AfterToolCallContext,
   type AfterToolCallResult,
@@ -128,6 +132,12 @@ export interface RunResult {
   // 空回复异常结束（决策 170 ②）：重试一次仍是空回复（或空回复时已来了中止请求、没能重试）。此时 status 为 failed。
   // 运行面恒给出；结构替身可缺省（缺省即否）
   emptyReply?: boolean;
+}
+
+// 出错消息的 HTTP 状态码：pi-ai 记下的错误文本以"状态码 + 空格"开头（各家 SDK 的写法），取不到为 undefined
+export function httpStatusOf(errorMessage: string | undefined): number | undefined {
+  const match = /^(\d{3}) /.exec(errorMessage ?? "");
+  return match !== null ? Number(match[1]) : undefined;
 }
 
 // 空回复重试仍空时的错误文本（Run 结果与收尾条目共用）
@@ -314,6 +324,8 @@ export class PiRuntimeAdapter {
   #hookStopReason: string | undefined;
   // 空回复重试（决策 170 ②）：本 Run 是否已重试过；等待重试时暂扣的那次 agent_end（重试那次的 agent_end 才是本 Run 的收尾）
   #emptyReplyRetried = false;
+  // 拒收图片重试（决策 417）：本 Run 是否已重试过
+  #rejectedImagesRetried = false;
   #deferredRunEnd: AgentEvent | undefined;
   // 撞上限续跑（决策 367）：配置；本 Run 已续跑次数与连续次数（一条回复没触发续跑即清零）；
   // 被重复检测掐断的回复将占的条目序号（续跑记录据此区分截断的来由）
@@ -521,6 +533,7 @@ export class PiRuntimeAdapter {
     this.#interruptRequested = false;
     this.#hookStopReason = undefined;
     this.#emptyReplyRetried = false;
+    this.#rejectedImagesRetried = false;
     this.#deferredRunEnd = undefined;
     this.#continuations = 0;
     this.#consecutiveContinuations = 0;
@@ -600,11 +613,57 @@ export class PiRuntimeAdapter {
       const last = this.#agent.state.messages.at(-1);
       if (last?.role === "assistant" && isEmptyReply(last)) {
         await this.#retryEmptyReply();
+      } else if (last?.role === "assistant" && last.stopReason === "error") {
+        if (!(await this.#retryRejectedImages())) {
+          this.#recordAndForward(deferred);
+          return;
+        }
       } else {
         await this.#continueTruncated();
       }
       await this.#agent.waitForIdle();
     }
+  }
+
+  // 拒收图片重试（决策 417）：新加的带图结果换成拒收占位（写进会话记录后才生效），去掉出错消息再接着运行一次。
+  // 占位没能落定（记录写不成）时不重试，返回 false
+  async #retryRejectedImages(): Promise<boolean> {
+    this.#rejectedImagesRetried = true;
+    const messages = this.#agent.state.messages.slice(0, -1);
+    let record: PruneRecord | undefined;
+    try {
+      record = this.#prune?.rejectNewImages(messages, (pending) => this.#writePrune(pending));
+    } catch (error) {
+      this.#listenerErrors.push(error);
+      return false;
+    }
+    if (record === undefined) {
+      return false;
+    }
+    this.#agent.state.messages = messages;
+    await this.#agent.continue();
+    return true;
+  }
+
+  // 这次 agent_end 要不要暂扣、等拒收图片重试：本 Run 还没重试过、没来过中止请求、钩子没要求停止、有裁剪器，对话以 HTTP 400
+  // 的出错消息收尾，且上次成功回复之后有新加的带图结果
+  #shouldRetryRejectedImages(): boolean {
+    if (
+      this.#rejectedImagesRetried ||
+      this.#interruptRequested ||
+      this.#hookStopReason !== undefined ||
+      this.#prune === undefined
+    ) {
+      return false;
+    }
+    const messages = this.#agent.state.messages;
+    const last = messages.at(-1);
+    return (
+      last?.role === "assistant" &&
+      last.stopReason === "error" &&
+      httpStatusOf(last.errorMessage) === 400 &&
+      this.#prune.hasNewImages(messages)
+    );
   }
 
   // 空回复重试（决策 170 ②）：从 Agent 状态去掉这条空消息（会话文件照实留着它）再接着运行一次
@@ -1455,7 +1514,9 @@ export class PiRuntimeAdapter {
       // 空回复要重试或撞上限要续跑时暂扣这次 agent_end：一个 Run 只发一次 run.ended（订阅方据它验证、收会话树），由最后那次的发出
       if (
         event.type === "agent_end" &&
-        (this.#shouldRetryEmptyReply() || this.#shouldContinueTruncated())
+        (this.#shouldRetryEmptyReply() ||
+          this.#shouldRetryRejectedImages() ||
+          this.#shouldContinueTruncated())
       ) {
         this.#deferredRunEnd = event;
         return;

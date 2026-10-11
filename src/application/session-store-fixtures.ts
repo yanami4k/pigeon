@@ -95,6 +95,8 @@ export interface FixtureSession {
     isError?: boolean;
     // 工具结果消息的 details（运行面在 pigeon 键下挂错误归类与审批闸决定）
     details?: Record<string, unknown>;
+    // 文本之后的图片块（决策 414）
+    images?: Array<{ data: string; mimeType: string }>;
   }): void;
   // 一轮工具调用：助手发起一次调用 →（可选）代码快照 → 工具结果；返回工具调用号
   toolTurn(input: {
@@ -226,7 +228,10 @@ export function createFixtureSession(options: FixtureSessionOptions): FixtureSes
         role: "toolResult",
         toolCallId: input.toolCallId,
         toolName: input.toolName,
-        content: [{ type: "text", text: input.text }],
+        content: [
+          { type: "text", text: input.text },
+          ...(input.images ?? []).map((image) => ({ type: "image", ...image })),
+        ],
         isError: input.isError ?? false,
         ...(input.details !== undefined ? { details: input.details } : {}),
       }),

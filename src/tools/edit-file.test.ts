@@ -11,7 +11,7 @@ import {
 } from "./edit-file.ts";
 import { lineTag, snapshotTag } from "./hashline.ts";
 import { WorkspacePathError } from "./paths.ts";
-import { createReadFileTool } from "./read-file.ts";
+import { createReadFileTool, type ReadFileDetails } from "./read-file.ts";
 import type { PigeonToolResult } from "./wrap.ts";
 
 function makeWorkspace(files: Record<string, string>): { root: string; cleanup: () => void } {
@@ -32,7 +32,7 @@ test("锚点命中编辑：read 给锚点与快照，edit 消费同一套标签�
   try {
     const reader = createReadFileTool(root);
     const readResult = await reader.execute("tc-1", { path: "a.ts" });
-    const snapshot = readResult.details.snapshot;
+    const snapshot = (readResult.details as ReadFileDetails).snapshot;
 
     const editor = createEditFileTool(root);
     const result = await editor.execute("tc-2", {
