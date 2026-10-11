@@ -3,8 +3,9 @@
 //   direct   —— 命令串按引号规则切成参数数组后直接 spawn，不经 shell；
 //   launcher —— Windows 下程序解析到 .cmd / .bat（npm、npx、node_modules/.bin 的垫片）时，参数逐个匹配保守字符集
 //               （字母、数字与 _ . - / : = @），全部通过才经 cmd.exe /d /s /c 作启动器运行；字符集不因任何模式放宽；
-//   shell    —— 需要 shell 语义的命令（管道、重定向、串联、命令替换，或 .cmd / .bat 带字符集外参数）以 shell 运行，
-//               且只在人确认后：审批面板对精确命令串的批准、带 shell 标记的会话 grant 或固化规则、yolo（004 批发授权）。
+//   shell    —— 需要 shell 语义的命令（管道、重定向、串联、命令替换、引号外的换行即多行命令，或 .cmd / .bat 带字符集外
+//               参数）以 shell 运行，且只在人确认后：审批面板对精确命令串的批准、带 shell 标记的会话 grant 或固化规则、
+//               yolo（004 批发授权）。
 //               确认由治理层以 authorizeShell 按调用授予、一次一用；未获授权即拒绝并指出原因（含越界的参数）。
 // 以 shell 运行的命令串与审批面板显示的字节一致，不做改写。工作目录固定为工作区根（worker 即其工作树）；环境变量只透传
 // 白名单；墙钟超时终止；输出按字节截断并标记。审批语义不在本工具：exec 档永不自动放行、[a] 收窄为精确命令串，均由
@@ -129,8 +130,18 @@ export class RunCommandError extends Error {
   readonly pigeonToolErrorKind = "domain";
 }
 
-// 命令串含 shell 语法（切分器据此判定"需 shell"）
-export class ShellSyntaxError extends RunCommandError {}
+// 命令串含 shell 语法（切分器据此判定"需 shell"）；reason 为需 shell 的原因（供只读检查与审批面板）
+export class ShellSyntaxError extends RunCommandError {
+  readonly reason: string;
+  constructor(reason: string, command: string) {
+    super(`命令${reason}（${command}），需要经 shell 运行`);
+    this.reason = reason;
+  }
+}
+
+// 需 shell 的两类原因：符号类 shell 语法；决策 413：引号外的换行（多行命令，与 ; 同等）
+const SHELL_SYNTAX_REASON = "含管道、重定向、命令串联或命令替换";
+const MULTILINE_REASON = "含引号外的换行（多行命令）";
 
 // 超时终止——环境类
 export class RunCommandTimeoutError extends Error {
@@ -279,10 +290,18 @@ export function runCommandTexts(input: {
     `命令要等输出全部关闭才算结束：命令里${input.platform === "win32" ? "用 start /b" : "用 &"}放到后台、又没把输出重定向走的进程` +
     `会一直占着输出，命令要等到超时才结束，连同那个进程一起被终止。${heldOutputAdvice(input.platform, input.backgroundJobs !== undefined)}`;
   const shell = input.platform === "win32" ? "cmd.exe" : "/bin/sh -c";
+  // 决策 413：多行命令经 /bin/sh -c 逐行执行。cmd.exe /c 只执行第一行，Windows 上不写这一项
+  const multiline = input.platform !== "win32";
+  const shellKinds = multiline
+    ? "管道、重定向、&& 串联、多行命令（逐行执行）"
+    : "管道、重定向、&& 串联";
+  const shellContains = multiline
+    ? "含管道、重定向、&& 串联或多行的命令"
+    : "含管道、重定向或 && 串联的命令";
   const toolShell = {
-    yolo: `管道、重定向、&& 串联等需要 shell 的命令经 ${shell} 运行。`,
-    prompt: `管道、重定向、&& 串联等需要 shell 的命令只在人确认后经 ${shell} 运行，尽量拆成单条命令。`,
-    none: `管道、重定向、&& 串联等需要 shell 的命令须有放权规则允许才经 ${shell} 运行。`,
+    yolo: `${shellKinds}等需要 shell 的命令经 ${shell} 运行。`,
+    prompt: `${shellKinds}等需要 shell 的命令只在人确认后经 ${shell} 运行，尽量拆成单条命令。`,
+    none: `${shellKinds}等需要 shell 的命令须有放权规则允许才经 ${shell} 运行。`,
   }[input.approval];
   const toolApproval = {
     yolo: "本会话的命令自动批准。",
@@ -301,8 +320,8 @@ export function runCommandTexts(input: {
   }[input.approval];
   return {
     registry: `在工作区根运行一条命令（普通命令直接执行，需要 shell 语义的经 ${shell} 执行）`,
-    prompt: `用 run_command 运行命令：普通命令直接执行，含管道、重定向或 && 串联的命令经 ${shell} 执行。`,
-    approval: `run_command：${promptApproval}；含管道、重定向或 && 串联的命令${promptShell}。`,
+    prompt: `用 run_command 运行命令：普通命令直接执行，${shellContains}经 ${shell} 执行。`,
+    approval: `run_command：${promptApproval}；${shellContains}${promptShell}。`,
     tool:
       `在工作区根运行一条命令。普通命令不经 shell 直接执行；${toolShell}${toolApproval}` +
       `可用设置 commands 一节登记的短名。结果带退出码、输出与执行前后的文件变化（不含 Pigeon 自己的治理目录 ${PIGEON_DIR}）。` +
@@ -321,12 +340,16 @@ export function heldOutputAdvice(platform: NodeJS.Platform, backgroundJobs: bool
 }
 
 // 命令串 → 参数数组：空白切分；单引号内原样；双引号内只认 \" 与 \\ 两种转义；
-// 不带引号的 shell 语法（| ; & < > ` 与 $(）抛 ShellSyntaxError
+// 不带引号的 shell 语法（| ; & < > ` 与 $(）抛 ShellSyntaxError。决策 413：引号外的换行（\n，\r\n 的 \r 照旧算空白）
+// 前后都有命令内容时同样抛 ShellSyntaxError（多行命令整条交给 shell）；首尾的空白与换行只是分隔，不因此需 shell；
+// 引号内的换行是参数的一部分
 export function parseCommandLine(command: string): string[] {
   const argv: string[] = [];
   let current = "";
   let inToken = false;
   let quote: '"' | "'" | null = null;
+  // 已有命令内容之后遇到引号外的换行；其后再出现内容即为多行命令
+  let lineBreak = false;
   for (let index = 0; index < command.length; index += 1) {
     const ch = command.charAt(index);
     const next = command.charAt(index + 1);
@@ -349,12 +372,10 @@ export function parseCommandLine(command: string): string[] {
       }
       continue;
     }
-    if (ch === '"' || ch === "'") {
-      quote = ch;
-      inToken = true;
-      continue;
-    }
     if (/\s/.test(ch)) {
+      if (ch === "\n" && (inToken || argv.length > 0)) {
+        lineBreak = true;
+      }
       if (inToken) {
         argv.push(current);
         current = "";
@@ -362,10 +383,16 @@ export function parseCommandLine(command: string): string[] {
       }
       continue;
     }
+    if (lineBreak) {
+      throw new ShellSyntaxError(MULTILINE_REASON, command);
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      inToken = true;
+      continue;
+    }
     if (SHELL_CHARS.has(ch) || (ch === "$" && next === "(")) {
-      throw new ShellSyntaxError(
-        `命令含管道、重定向、命令串联或命令替换（${command}），需要经 shell 运行`
-      );
+      throw new ShellSyntaxError(SHELL_SYNTAX_REASON, command);
     }
     current += ch;
     inToken = true;
@@ -442,12 +469,7 @@ export function createRunCommandTool(
       argv = parseCommandLine(command);
     } catch (error) {
       if (error instanceof ShellSyntaxError) {
-        return {
-          ...base,
-          mode: "shell",
-          needsShell: true,
-          shellReason: "含管道、重定向、命令串联或命令替换",
-        };
+        return { ...base, mode: "shell", needsShell: true, shellReason: error.reason };
       }
       return {
         ...base,

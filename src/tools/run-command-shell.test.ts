@@ -88,6 +88,28 @@ test("shell 语法判定需 shell：未确认拒绝，确认后以 shell 运行�
   });
 });
 
+// 决策 413：多行命令整条交给 shell；Windows 的 cmd.exe /c 只执行第一行，逐行执行只在 /bin/sh 上核对
+test("决策 413：多行命令判定需 shell，首尾多出的换行不算；/bin/sh 上逐行执行", async (t) => {
+  await withRoot(async (root) => {
+    const tool = createRunCommandTool({ workspaceRoot: root });
+    const line = (text: string) => `${NODE} -e "process.stdout.write('${text}')"`;
+    const command = `${line("x")}\n${line("y")}`;
+    const inspection = tool.inspectCommand({ command });
+    assert.equal(inspection.mode, "shell");
+    assert.equal(inspection.needsShell, true);
+    assert.equal(tool.inspectCommand({ command: `\n${line("x")}\r\n` }).mode, "direct");
+    if (onWindows) {
+      t.skip("Windows 上没有 /bin/sh");
+      return;
+    }
+    tool.authorizeShell("tc-m");
+    const evidence = (await tool.execute("tc-m", { command })).details;
+    assert.equal(evidence.shell, true);
+    // 拼成一条时第二行成了第一条 node 的多余参数，只输出 x
+    assert.equal(evidence.output, "xy");
+  });
+});
+
 test("普通命令直接 spawn，不需 shell，执行证据两个标记都为否", async () => {
   await withRoot(async (root) => {
     const tool = createRunCommandTool({ workspaceRoot: root });

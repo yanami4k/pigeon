@@ -28,6 +28,8 @@ test("容器执行端（linux）且自动批准：需要 shell 的命令经 /bin
   for (const text of [texts.approval, texts.tool]) {
     assertIncludesAll(text, ["/bin/sh -c", "命令自动批准"]);
   }
+  // 决策 413：多行命令经 /bin/sh -c
+  for (const text of [texts.prompt, texts.approval, texts.tool]) assertIncludesAll(text, ["多行"]);
   // 三种情形共用的工具说明尾句（commands 短名、文件变化不含治理目录）只在这里核对一次
   assertIncludesAll(texts.tool, ["commands 一节", ".pigeon"]);
   for (const text of Object.values(texts)) {
