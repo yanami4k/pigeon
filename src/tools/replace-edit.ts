@@ -4,8 +4,10 @@
 //   ② 匹配前文件内容与参数都按 LF 规整，写回保留原文件的 BOM、行尾风格与末尾换行（复用 hashline.ts 的 split/join）；
 //   ③ 不带快照参数：原文匹配本身就是按内容寻址；
 //   ④ 预检在内存完成、零写副作用，审批预览 diff、内容证据探针与执行共享同一段预检；
-//   ⑤ 成功回执："已在 X 应用 1 处替换（+a −b 行）"，并写明这处改动在新文件里的行区间，附上下各两行带行号的内容
+//   ⑤ 成功回执："已在 X 应用 N 处替换（+a −b 行）"，并写明改动在新文件里的行区间，附上下各两行带行号的内容
 //      （决策 366；改动行多时只列头尾各三行），不回传 diff 或锚点。
+//   ⑥ 决策 419：edits 给出一组 {old_string, new_string}（与顶层的 old_string、new_string 二选一）。每处都按改动前的
+//      原文定位、照①校验，各处在原文里不得交叠；全部通过才一起写入，任一处不通过整组不写，报错写明是 edits 的第几项。
 // 工具名沿用 edit_file，写档、串行执行、工作区路径围栏与 hashline 版一致。同一次回复里连发的几个编辑按顺序执行（353）。
 // 决策 358：成功写入后按写成的内容更新本会话的读取记录。
 // 决策 407：放权时（options.outsideWrites）接受工作区以外的路径，说明随之交代。
@@ -39,13 +41,21 @@ export class ReplaceEditError extends Error {
   readonly pigeonToolErrorKind = "domain";
 }
 
-export const ReplaceEditParamsSchema = Type.Object({
-  path: Type.String({ minLength: 1 }),
-  // 文件里要替换的原文，须逐字一致且恰好出现一次
+const ReplacePairSchema = Type.Object({
   old_string: Type.String({ minLength: 1 }),
   new_string: Type.String(),
 });
+
+export const ReplaceEditParamsSchema = Type.Object({
+  path: Type.String({ minLength: 1 }),
+  // 单处修改：文件里要替换的原文，须逐字一致且恰好出现一次
+  old_string: Type.Optional(Type.String({ minLength: 1 })),
+  new_string: Type.Optional(Type.String()),
+  // 多处修改（决策 419）：各处都按改动前的原文定位
+  edits: Type.Optional(Type.Array(ReplacePairSchema, { minItems: 1 })),
+});
 export type ReplaceEditParams = Static<typeof ReplaceEditParamsSchema>;
+type ReplacePair = Static<typeof ReplacePairSchema>;
 
 export interface ReplaceEditDetails {
   resolvedPath: string;
@@ -64,8 +74,10 @@ export function replaceEditDescription(outsideWrites: boolean): string {
     "必须先用 read_file 读取；" +
     "old_string 须与文件原文逐字一致（含缩进与空白，不带行号前缀），且在文件里恰好出现一次，" +
     "出现多次时加上前后文使其唯一；old_string 与 new_string 相同会被拒绝。" +
-    "对同一文件或几个文件的多处修改，可以在同一次回复里连发几个 edit_file，会按顺序执行。" +
-    "回执给出这处改动在新文件里的行区间与上下各两行。"
+    "同一文件的多处修改放进一次调用：用 edits 给出一组 {old_string, new_string}（此时不填顶层的 old_string 与 new_string），" +
+    "每处都按改动前的原文定位、各自须唯一且互不交叠，全部通过才一起写入，任一处不通过整组不写。" +
+    "几个文件的修改可以在同一次回复里连发几个 edit_file，会按顺序执行。" +
+    "回执给出改动在新文件里的行区间与上下各两行。"
   );
 }
 
@@ -90,7 +102,7 @@ export function createReplaceEditTool(
         Value.Parse(ReplaceEditParamsSchema, params),
         pathOptions
       );
-      return buildEditDiff(plan.args.path, plan.oldLines, [plan.applied]);
+      return buildEditDiff(plan.args.path, plan.oldLines, plan.applied);
     },
     async execute(_toolCallId, params, signal): Promise<PigeonToolResult<ReplaceEditDetails>> {
       const args = Value.Parse(ReplaceEditParamsSchema, params);
@@ -103,22 +115,22 @@ export function createReplaceEditTool(
         signal,
       });
       reads?.record(plan.resolvedPath, Buffer.from(plan.newRaw, "utf8"));
-      const addedLines = plan.applied.added.length;
-      const removedLines = plan.applied.removed.length;
+      const addedLines = plan.applied.reduce((total, span) => total + span.added.length, 0);
+      const removedLines = plan.applied.reduce((total, span) => total + span.removed.length, 0);
       return {
         content: [
           {
             type: "text",
             text:
-              `已在 ${args.path} 应用 1 处替换（+${addedLines} −${removedLines} 行）` +
-              changeContext(splitContent(plan.newRaw).lines, plan.applied.startLine, addedLines),
+              `已在 ${args.path} 应用 ${plan.count} 处替换（+${addedLines} −${removedLines} 行）` +
+              receiptSpans(splitContent(plan.newRaw).lines, plan.applied),
           },
         ],
         details: {
           resolvedPath: plan.resolvedPath,
           beforeSnapshot: plan.beforeSnapshot,
           afterSnapshot: snapshotTag(plan.newRaw),
-          diff: buildEditDiff(args.path, plan.oldLines, [plan.applied]),
+          diff: buildEditDiff(args.path, plan.oldLines, plan.applied),
           addedLines,
           removedLines,
         },
@@ -127,12 +139,13 @@ export function createReplaceEditTool(
   };
 }
 
-// 读 + 围栏 + 唯一匹配预检 + 内存落地（零写副作用）
+// 读 + 围栏 + 唯一匹配预检 + 内存落地（零写副作用）；多处时全部定位、查过交叠才拼出新内容，任一处不通过即抛错
 async function planReplace(
   host: WorkspaceHost,
   args: ReplaceEditParams,
   pathOptions: WritePathOptions
 ) {
+  const { pairs, batch } = pairsOf(args);
   // 决策 334：要写的文件本身是符号链接即拒写
   assertWritePathText(args.path);
   const resolvedPath = await host.resolveForWrite(args.path, pathOptions);
@@ -143,49 +156,169 @@ async function planReplace(
   const split = splitContent(raw);
   const text =
     split.lines.join("\n") + (split.trailingNewline && split.lines.length > 0 ? "\n" : "");
-  const oldString = args.old_string.replaceAll("\r\n", "\n");
-  const newString = args.new_string.replaceAll("\r\n", "\n");
-  if (oldString === newString) {
-    throw new ReplaceEditError(`${EDIT_NO_CHANGE_PREFIX}：old_string 与 new_string 相同`);
+  const located = pairs.map((pair, index) => locate(text, pair, args.path, batch ? index : -1));
+  // 各处都在原文里定位；按位置排序后相邻两处不交叠即全部不交叠（排序稳定，同起点时序号小的在前）
+  const ordered = [...located].sort((a, b) => a.start - b.start);
+  for (let k = 1; k < ordered.length; k += 1) {
+    const before = ordered[k - 1] as LocatedSpan;
+    const after = ordered[k] as LocatedSpan;
+    if (after.start < before.end) {
+      const [first, second] = [before.index, after.index].sort((a, b) => a - b);
+      throw new ReplaceEditError(
+        `edits[${first}] 与 edits[${second}] 的 old_string 在原文里交叠：各处都按改动前的原文定位，请合并成一处`
+      );
+    }
   }
-  const positions: number[] = [];
-  for (
-    let index = text.indexOf(oldString);
-    index !== -1;
-    index = text.indexOf(oldString, index + 1)
-  ) {
-    positions.push(index);
+  const replaced = spliceSpans(text, 0, text.length, ordered);
+  // 各处单看都有变化，合起来仍可能与原文相同（例如一处删掉的正是另一处补上的）
+  if (replaced === text) {
+    throw new ReplaceEditError(`${EDIT_NO_CHANGE_PREFIX}：几处替换合起来与原文相同`);
   }
-  const first = positions[0];
-  if (first === undefined) {
-    throw new ReplaceEditError(
-      `${REPLACE_NOT_FOUND_PREFIX}：请重新 read_file 核对原文，含缩进与空白，不要带行号前缀`
-    );
-  }
-  if (positions.length > 1) {
-    const startLines = positions.map((position) => lineNumberAt(text, position));
-    throw new ReplaceEditError(
-      `${REPLACE_NOT_UNIQUE_PREFIX}：在 ${args.path} 中出现 ${positions.length} 次（起始行 ${startLines.join("、")}），` +
-        "请加上下文使其唯一"
-    );
-  }
-  const replaced = text.slice(0, first) + newString + text.slice(first + oldString.length);
-  const endsWithNewline = replaced.endsWith("\n");
-  const newLines =
-    replaced === "" ? [] : (endsWithNewline ? replaced.slice(0, -1) : replaced).split("\n");
+  const newLines = linesOf(replaced);
   const newRaw = joinContent(newLines, {
     bom: split.bom,
     eol: split.eol,
-    trailingNewline: endsWithNewline && newLines.length > 0,
+    trailingNewline: replaced.endsWith("\n") && newLines.length > 0,
   });
+  const groups = lineGroups(text, split.lines.length, ordered);
   return {
     args,
     resolvedPath,
     beforeSnapshot: snapshotTag(raw),
     oldLines: split.lines,
     newRaw,
-    applied: changedSpan(split.lines, newLines),
+    count: pairs.length,
+    // 只有一段改动时同单处：整个文件去掉公共前后缀；几段时逐段在各自的行区间里算
+    applied:
+      groups.length === 1
+        ? [changedSpan(split.lines, newLines)]
+        : groups.map((group) => groupSpan(text, split.lines, group)),
   };
+}
+
+// 单处（顶层 old_string、new_string）与多处（edits）二选一；单处即只有一项的一组，报错文案照旧不带序号
+function pairsOf(args: ReplaceEditParams): { pairs: readonly ReplacePair[]; batch: boolean } {
+  if (args.edits !== undefined) {
+    if (args.old_string !== undefined || args.new_string !== undefined) {
+      throw new ReplaceEditError("edits 与顶层的 old_string、new_string 只能二选一");
+    }
+    return { pairs: args.edits, batch: true };
+  }
+  if (args.old_string === undefined || args.new_string === undefined) {
+    throw new ReplaceEditError(
+      "缺少 old_string 或 new_string：单处修改两项都要给，同一文件的多处修改用 edits"
+    );
+  }
+  return { pairs: [{ old_string: args.old_string, new_string: args.new_string }], batch: false };
+}
+
+// 一处替换在原文（LF 规整后）里的位置 [start, end) 与换上的文字；index 为 edits 里的序号（单处为 -1，报错不带序号）
+interface LocatedSpan {
+  index: number;
+  start: number;
+  end: number;
+  newString: string;
+}
+
+function locate(text: string, pair: ReplacePair, path: string, index: number): LocatedSpan {
+  const label = index >= 0 ? `edits[${index}] ` : "";
+  const oldString = pair.old_string.replaceAll("\r\n", "\n");
+  const newString = pair.new_string.replaceAll("\r\n", "\n");
+  if (oldString === newString) {
+    throw new ReplaceEditError(`${label}${EDIT_NO_CHANGE_PREFIX}：old_string 与 new_string 相同`);
+  }
+  const positions: number[] = [];
+  for (
+    let found = text.indexOf(oldString);
+    found !== -1;
+    found = text.indexOf(oldString, found + 1)
+  ) {
+    positions.push(found);
+  }
+  const first = positions[0];
+  if (first === undefined) {
+    throw new ReplaceEditError(
+      `${label}${REPLACE_NOT_FOUND_PREFIX}：请重新 read_file 核对原文，含缩进与空白，不要带行号前缀` +
+        (index >= 0 ? "；各处都按改动前的原文定位，不能引用别处改出的文字" : "")
+    );
+  }
+  if (positions.length > 1) {
+    const startLines = positions.map((position) => lineNumberAt(text, position));
+    throw new ReplaceEditError(
+      `${label}${REPLACE_NOT_UNIQUE_PREFIX}：在 ${path} 中出现 ${positions.length} 次（起始行 ${startLines.join("、")}），` +
+        "请加上下文使其唯一"
+    );
+  }
+  return { index, start: first, end: first + oldString.length, newString };
+}
+
+// text 的 [from, to) 一段按 spans（已按位置排好、互不交叠、都落在这一段里）换掉后的文字
+function spliceSpans(text: string, from: number, to: number, spans: readonly LocatedSpan[]) {
+  let out = "";
+  let cursor = from;
+  for (const span of spans) {
+    out += text.slice(cursor, span.start) + span.newString;
+    cursor = span.end;
+  }
+  return out + text.slice(cursor, to);
+}
+
+// LF 文本切成行数组：末尾换行不算多出一行，空文本没有行
+function linesOf(text: string): string[] {
+  return text === "" ? [] : (text.endsWith("\n") ? text.slice(0, -1) : text).split("\n");
+}
+
+// 原文的行下标（0 起）闭区间与落在其中的几处替换
+interface LineGroup {
+  first: number;
+  last: number;
+  spans: LocatedSpan[];
+}
+
+// 按行归段：一处替换占起点所在行到终点所在行（终点恰在换行之后时连下一行也算上，替换可能把它并上来）；
+// 行区间相交的几处归为一段。spans 已按位置排好且互不交叠
+function lineGroups(text: string, lineCount: number, spans: readonly LocatedSpan[]): LineGroup[] {
+  const lineAt = (position: number): number =>
+    Math.min(lineNumberAt(text, position), lineCount) - 1;
+  const groups: LineGroup[] = [];
+  for (const span of spans) {
+    const first = lineAt(span.start);
+    const last = lineAt(span.end);
+    const current = groups[groups.length - 1];
+    if (current !== undefined && first <= current.last) {
+      current.last = Math.max(current.last, last);
+      current.spans.push(span);
+    } else {
+      groups.push({ first, last, spans: [span] });
+    }
+  }
+  return groups;
+}
+
+// 一段改动在原文行区间里换前换后去掉公共前后缀，坐标换回整个原文
+function groupSpan(text: string, oldLines: readonly string[], group: LineGroup): AppliedEdit {
+  const lineStart = (line: number): number =>
+    line >= oldLines.length
+      ? text.length
+      : oldLines.slice(0, line).reduce((total, content) => total + content.length + 1, 0);
+  const region = spliceSpans(text, lineStart(group.first), lineStart(group.last + 1), group.spans);
+  const span = changedSpan(oldLines.slice(group.first, group.last + 1), linesOf(region));
+  return { ...span, startLine: span.startLine + group.first, endLine: span.endLine + group.first };
+}
+
+// 回执里的改动处：一段时同单处；几段时逐段写明，各段起始行按前面各段的增删换算到新文件
+function receiptSpans(newLines: readonly string[], applied: readonly AppliedEdit[]): string {
+  if (applied.length === 1) {
+    const only = applied[0] as AppliedEdit;
+    return changeContext(newLines, only.startLine, only.added.length);
+  }
+  let shift = 0;
+  const parts = applied.map((span, index) => {
+    const start = span.startLine + shift;
+    shift += span.added.length - span.removed.length;
+    return `\n第 ${index + 1} 段${changeContext(newLines, start, span.added.length)}`;
+  });
+  return `，共 ${applied.length} 段${parts.join("")}`;
 }
 
 function lineNumberAt(text: string, position: number): number {

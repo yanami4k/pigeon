@@ -90,7 +90,8 @@ export function createEditFileTool(
       "必须先用 read_file 读取：edits 按 N#TAG 锚点寻址" +
       "（read 输出的行前缀），snapshot 填 read 输出的 [PATH#TAG] 中的快照标签。" +
       "操作：replace（换 anchor 到 endAnchor 的行）/ insertAfter（anchor 后插入）/ delete（删行）。" +
-      "多处编辑全部预检通过才落盘；文件读后已变化（快照过期）会被拒绝，需重新 read_file。",
+      "同一文件的多处修改放进一次调用的 edits 里（各处锚点都按同一次读取给出、互不重叠），" +
+      "全部预检通过才一起落盘，任一处不通过整组不写；文件读后已变化（快照过期）会被拒绝，需重新 read_file。",
     parameters: EditFileParamsSchema,
     // 写工具强制串行执行器（对齐上游 executionMode 语义 + M3 决策 2）
     executionMode: "sequential",

@@ -91,6 +91,7 @@ test("编辑模式缺省为 replace：不传编辑模式时装配出 replace 版
   // 本文件的运行一律 yolo：说明是放权时的那份（决策 407：交代可写工作区以外）
   assert.equal(edit?.description, replaceEditDescription(true));
   assert.deepEqual(Object.keys(edit?.parameters.properties ?? {}).sort(), [
+    "edits",
     "new_string",
     "old_string",
     "path",
