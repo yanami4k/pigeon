@@ -2,7 +2,7 @@
 // 价格全为 0 的一层当作没给；缓存规则按实际服务方查（设置 > 声明 > 接口主机名 > provider 标签）；查询给出三价（带币种）。
 import assert from "node:assert/strict";
 import { test } from "vitest";
-import { type CatalogLookup, modelProfile, resolveModelInfo } from "./model-info.ts";
+import { acceptsImages, type CatalogLookup, modelProfile, resolveModelInfo } from "./model-info.ts";
 import { validateSettingsLayer } from "./settings.ts";
 
 const USD = { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75, currency: "USD" };
@@ -12,6 +12,7 @@ const catalog: CatalogLookup = () => ({
   contextWindow: 200_000,
   maxTokens: 64_000,
   reasoning: true,
+  input: ["text", "image"],
 });
 
 test("逐项取值：设置 > 声明 > 目录 > 未知，每项各自取最高的一层", () => {
@@ -25,11 +26,21 @@ test("逐项取值：设置 > 声明 > 目录 > 未知，每项各自取最高�
   assert.deepEqual(info.contextWindow, { source: "settings", value: 300_000 });
   assert.deepEqual(info.maxTokens, { source: "catalog", value: 64_000 });
   assert.deepEqual(info.reasoning, { source: "catalog", value: true });
+  // 决策 414：输入类型同样逐项取，含 image 即能看图；取不到按不能
+  assert.equal(acceptsImages(info), true);
   const bare = resolveModelInfo({ launch: { provider: "custom", id: "custom" } });
   assert.deepEqual(
-    [bare.cost, bare.contextWindow, bare.maxTokens, bare.reasoning],
-    [{ source: "unknown" }, { source: "unknown" }, { source: "unknown" }, { source: "unknown" }]
+    [bare.cost, bare.contextWindow, bare.maxTokens, bare.reasoning, bare.input],
+    Array(5).fill({ source: "unknown" })
   );
+  assert.equal(acceptsImages(bare), false);
+  const textOnly = resolveModelInfo({
+    launch: { provider: "acme", id: "m1" },
+    declared: { input: ["text"] },
+    catalog,
+  });
+  assert.deepEqual(textOnly.input, { source: "declared", value: ["text"] });
+  assert.equal(acceptsImages(textOnly), false);
 });
 
 test("价格整体取：设置的价格连同币种盖掉声明的；声明不写币种按 USD；前两层给全时不查目录", () => {
@@ -39,7 +50,13 @@ test("价格整体取：设置的价格连同币种盖掉声明的；声明不�
     return catalog(...args);
   };
   const { currency: _omit, ...declaredCost } = USD;
-  const declared = { cost: declaredCost, contextWindow: 1, maxTokens: 1, reasoning: false };
+  const declared = {
+    cost: declaredCost,
+    contextWindow: 1,
+    maxTokens: 1,
+    reasoning: false,
+    input: ["text" as const],
+  };
   const overridden = resolveModelInfo({
     launch: { provider: "acme", id: "m1" },
     declared,

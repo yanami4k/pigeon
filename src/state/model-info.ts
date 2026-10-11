@@ -1,5 +1,6 @@
 // 模型信息（决策 362）：价格、上下文窗口、单次输出上限逐项取值——设置里手填的 > 接入模块声明的 > pi-ai 自带目录 > 未知。
 // 是否支持推理（reasoning，决策 390：决定缺省的推理档位）同样逐项取，只有声明与目录两层（设置里不覆盖它，要改档位直接设档位）。
+// 输入类型（input，决策 414：含 image 即能看图，read_file 据此交出图片）同 reasoning，只有声明与目录两层，取不到按只收文字。
 // 每一项单独取（价格来自目录、窗口来自声明也可以）；价格的四个数与币种算一项，整体取自同一来源（不同币种的数不能拼在一起）。
 // 身份（provider 与模型名）：接入模块声明了就用声明的，否则用启动参数的标签（--provider、--model）；设置与目录都按这个身份查。
 // 价格全为 0 的一层视为没给价格（pi-ai 自定义模型的写法），继续往下层取。
@@ -20,6 +21,8 @@ import {
 const Closed = { additionalProperties: false } as const;
 const Price = () => Type.Number({ minimum: 0 });
 const CurrencySchema = Type.String({ pattern: "^[A-Z]{3}$" });
+const InputSchema = () => Type.Array(Type.Union([Type.Literal("text"), Type.Literal("image")]));
+export type ModelInput = ReadonlyArray<"text" | "image">;
 // 声明与目录不写币种时的币种（pi-ai 目录的价格是美元）
 export const DEFAULT_CURRENCY = "USD";
 
@@ -44,6 +47,8 @@ export const ModelInfoDeclarationSchema = Type.Object({
   maxTokens: Type.Optional(Type.Integer({ minimum: 1 })),
   // 是否支持推理（pi-ai 模型对象的同名字段）
   reasoning: Type.Optional(Type.Boolean()),
+  // 决策 414：接受的输入类型（pi-ai 模型对象的同名字段）
+  input: Type.Optional(InputSchema()),
 });
 export type ModelInfoDeclaration = Static<typeof ModelInfoDeclarationSchema>;
 
@@ -151,6 +156,7 @@ export interface ModelInfoValues {
   contextWindow?: number;
   maxTokens?: number;
   reasoning?: boolean;
+  input?: ModelInput;
 }
 
 // pi-ai 自带目录的查询：按 provider 与模型名，查不到为 undefined
@@ -182,6 +188,7 @@ export interface ResolvedModelInfo {
   contextWindow: Sourced<number>;
   maxTokens: Sourced<number>;
   reasoning: Sourced<boolean>;
+  input: Sourced<ModelInput>;
   cache: ResolvedCacheRule;
 }
 
@@ -207,9 +214,10 @@ export function resolveModelInfo(inputs: ModelInfoInputs): ResolvedModelInfo {
     ...(declared?.contextWindow !== undefined ? { contextWindow: declared.contextWindow } : {}),
     ...(declared?.maxTokens !== undefined ? { maxTokens: declared.maxTokens } : {}),
     ...(declared?.reasoning !== undefined ? { reasoning: declared.reasoning } : {}),
+    ...(declared?.input !== undefined ? { input: declared.input } : {}),
   });
   // 目录只在前两层没给全时才查
-  const needsCatalog = (["cost", "contextWindow", "maxTokens", "reasoning"] as const).some(
+  const needsCatalog = (["cost", "contextWindow", "maxTokens", "reasoning", "input"] as const).some(
     (key) => fromSettings?.[key] === undefined && fromDeclared?.[key] === undefined
   );
   const fromCatalog = needsCatalog ? given(inputs.catalog?.(provider, id)) : undefined;
@@ -235,8 +243,14 @@ export function resolveModelInfo(inputs: ModelInfoInputs): ResolvedModelInfo {
     contextWindow: pick("contextWindow"),
     maxTokens: pick("maxTokens"),
     reasoning: pick("reasoning"),
+    input: pick("input"),
     cache: resolveCacheRule(provider, id, declared, entry?.cache),
   };
+}
+
+// 决策 414：模型能看图（输入类型含 image）；取不到按不能
+export function acceptsImages(info: ResolvedModelInfo): boolean {
+  return info.input.source !== "unknown" && info.input.value.includes("image");
 }
 
 // 一层给出的值：价格全为 0 视为没给价格
@@ -328,6 +342,8 @@ export const RunModelInfoSchema = Type.Object({
   maxTokens: SourcedSchema(Type.Integer({ minimum: 1 })),
   // 决策 390：是否支持推理（缺省推理档位据此定）；加这一项之前的记录没有它
   reasoning: Type.Optional(SourcedSchema(Type.Boolean())),
+  // 决策 414：接受的输入类型（能否看图据此定）；加这一项之前的记录没有它
+  input: Type.Optional(SourcedSchema(InputSchema())),
   cacheRule: Type.Object({
     servedBy: Type.String({ minLength: 1 }),
     servedByFrom: Type.Union([
@@ -351,6 +367,10 @@ export function runModelInfoRecord(info: ResolvedModelInfo): RunModelInfo {
     contextWindow: { ...info.contextWindow },
     maxTokens: { ...info.maxTokens },
     reasoning: { ...info.reasoning },
+    input:
+      info.input.source === "unknown"
+        ? { source: "unknown" }
+        : { source: info.input.source, value: [...info.input.value] },
     cacheRule: {
       servedBy: info.cache.servedBy,
       servedByFrom: info.cache.servedByFrom,

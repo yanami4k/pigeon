@@ -36,7 +36,7 @@ test("日常 DeepSeek 接入：缺 DEEPSEEK_API_KEY 即响亮报错；空值同�
   assert.throws(() => createDeepSeekStreamFn({ DEEPSEEK_API_KEY: "" }), /缺少 DEEPSEEK_API_KEY/);
 });
 
-test("日常 DeepSeek 接入：忽略 CLI 的占位模型，发出与网关同一份模型对象（deepseek-flash、anthropic-messages、reasoning 为真、1M 窗口、输出上限 393,216）；key 取自环境变量", async () => {
+test("日常 DeepSeek 接入：忽略 CLI 的占位模型，发出与网关同一份模型对象（deepseek-flash、anthropic-messages、reasoning 为真、收文字与图片、1M 窗口、输出上限 393,216）；key 取自环境变量", async () => {
   const { calls, stream } = fakeStream();
   const fn = createDeepSeekStreamFn({ DEEPSEEK_API_KEY: "sk-daily" }, stream);
   await fn(placeholder, context, {});
@@ -49,7 +49,7 @@ test("日常 DeepSeek 接入：忽略 CLI 的占位模型，发出与网关同�
     provider: "deepseek",
     baseUrl: DEEPSEEK_ANTHROPIC_BASE_URL,
     reasoning: true,
-    input: ["text"],
+    input: ["text", "image"],
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: 1_000_000,
     maxTokens: 393_216,

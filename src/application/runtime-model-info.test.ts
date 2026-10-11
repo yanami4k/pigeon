@@ -31,7 +31,7 @@ test("接入模块的 modelInfo：加载时随 StreamFn 取出；pi-ai 模型字
     const body = "export default async function streamFn() {}\n";
     writeFileSync(
       join(dir, "declared.mjs"),
-      `${body}export const modelInfo = { provider: "acme", id: "m1", name: "M1", api: "openai-completions", contextWindow: 1000, maxTokens: 10, cost: { input: 1, output: 2, cacheRead: 0.1, cacheWrite: 1.25, currency: "EUR" }, reasoning: false, contextLength: 1000 };\n`
+      `${body}export const modelInfo = { provider: "acme", id: "m1", name: "M1", api: "openai-completions", contextWindow: 1000, maxTokens: 10, cost: { input: 1, output: 2, cacheRead: 0.1, cacheWrite: 1.25, currency: "EUR" }, reasoning: false, input: ["text"], contextLength: 1000 };\n`
     );
     writeFileSync(join(dir, "plain.mjs"), body);
     writeFileSync(
@@ -64,6 +64,7 @@ test("pi-ai 目录查询：取价格（美元）、窗口、上限与是否支�
             contextWindow: 0,
             maxTokens: 64_000,
             reasoning: true,
+            input: ["text", "image"],
           }
         : undefined,
   }));
@@ -71,6 +72,7 @@ test("pi-ai 目录查询：取价格（美元）、窗口、上限与是否支�
     cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75, currency: "USD" },
     maxTokens: 64_000,
     reasoning: true,
+    input: ["text", "image"],
   });
   assert.equal(lookup?.("acme", "m2"), undefined);
   const failing = await loadCatalogLookup(warn, async () => {
@@ -82,10 +84,11 @@ test("pi-ai 目录查询：取价格（美元）、窗口、上限与是否支�
   assert.match(warnings[0] ?? "", /模块不在/);
 });
 
-test("Run 开始条目记下本次的模型信息与每一项的来源（设置盖过声明，没人给的记未知）", () =>
+test("Run 开始条目记下本次的模型信息与每一项的来源（设置盖过声明，没人给的记未知）；声明能看图时 read_file 的说明写明交回图片", () =>
   withRoot("pigeon-model-info-run-", async (root) => {
-    const streamFn = registerModelAccess(createFakeStreamFn({ replies: [{ text: "好" }] }), {
-      declared: { provider: "acme", id: "m1", contextWindow: 500_000 },
+    const fake = createFakeStreamFn({ replies: [{ text: "好" }] });
+    const streamFn = registerModelAccess(fake, {
+      declared: { provider: "acme", id: "m1", contextWindow: 500_000, input: ["text", "image"] },
     });
     const settings = emptySettingsSnapshot(root);
     const result = await runHeadless({
@@ -121,8 +124,14 @@ test("Run 开始条目记下本次的模型信息与每一项的来源（设置�
       contextWindow: { source: "declared", value: 500_000 },
       maxTokens: { source: "settings", value: 8192 },
       reasoning: { source: "unknown" },
+      input: { source: "declared", value: ["text", "image"] },
       cacheRule: { servedBy: "acme", servedByFrom: "provider", overridden: false },
     });
+    const tools = (fake.calls[0]?.context.tools ?? []) as unknown as Array<{
+      name: string;
+      description: string;
+    }>;
+    assert.match(tools.find((tool) => tool.name === "read_file")?.description ?? "", /图片.*PNG/);
   }));
 
 test("自带的 DeepSeek 接入：声明官方人民币非高峰价与服务方，模型对象价格仍为 0", () => {
@@ -137,5 +146,9 @@ test("自带的 DeepSeek 接入：声明官方人民币非高峰价与服务方�
   assert.equal(info.servedBy, "deepseek");
   // 决策 390：声明与模型对象一致地支持推理（缺省档位据此为 high）
   assert.equal(info.reasoning, deepseekModel().reasoning);
+  // 决策 414：deepseek-flash 能看图，声明与模型对象一致；不能看图的型号只收文字
+  assert.deepEqual(info.input, ["text", "image"]);
+  assert.deepEqual(deepseekModel().input, info.input);
+  assert.deepEqual(deepseekModel(undefined, "deepseek-v4-pro").input, ["text"]);
   assert.deepEqual(deepseekModel().cost, { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
 });

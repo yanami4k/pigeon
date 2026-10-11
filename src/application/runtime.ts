@@ -77,6 +77,7 @@ import type { HookEventName } from "../state/hooks.ts";
 import type { RunId, SessionId } from "../state/ids.ts";
 import type { MemoryLimits } from "../state/memory-config.ts";
 import {
+  acceptsImages,
   type ModelInfoDeclaration,
   modelProfile,
   type ResolvedModelInfo,
@@ -593,7 +594,13 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
   // 崩溃后下次启动：按记录清理上一进程留下的作业（后台进行，每个进程一次）
   void cleanupOrphanedJobsOnce(governanceRoot, deps.storeWarn, workspaceHost.dockerPrefix);
   const reads = new FileReadTracker();
-  const readOptions = { limits: readFileLimitsOf(settings), outputs: outputStore, reads };
+  // 决策 414：模型能看图（模型信息的输入类型含 image）时 read_file 交出图片
+  const readOptions = {
+    limits: readFileLimitsOf(settings),
+    outputs: outputStore,
+    reads,
+    imageInput: acceptsImages(modelInfo),
+  };
   // 决策 361：缓存感知的上下文裁剪——价格比与保留时长取本次的模型信息；裁掉的命令输出补落盘，裁掉的读取不再算读过
   const prune = new ContextPruner(
     contextPruneSettings(contextPruneSectionOf(settings), modelProfile(modelInfo)),
