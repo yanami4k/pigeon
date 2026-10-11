@@ -12,6 +12,7 @@ import {
   parseCommandLine,
   RunCommandError,
   RunCommandTimeoutError,
+  ShellSyntaxError,
 } from "./run-command.ts";
 
 const NODE = `"${process.execPath}"`;
@@ -48,6 +49,25 @@ test("命令串切分：空白分隔、单双引号、双引号内转义、Windo
   ]) {
     assert.throws(() => parseCommandLine(bad), RunCommandError, bad);
   }
+});
+
+test("决策 413：引号外的换行（LF 与 CRLF）判为 shell 语法；引号内的换行是参数的一部分；首尾的空白换行只是分隔", () => {
+  for (const multi of [
+    "pip install a\npip install b",
+    "pip install a\r\npip install b",
+    'x "a"\ny',
+  ]) {
+    assert.throws(() => parseCommandLine(multi), ShellSyntaxError, JSON.stringify(multi));
+  }
+  assert.deepEqual(parseCommandLine("git commit -m \"a\nb\" -m 'c\r\nd'"), [
+    "git",
+    "commit",
+    "-m",
+    "a\nb",
+    "-m",
+    "c\r\nd",
+  ]);
+  assert.deepEqual(parseCommandLine("\r\n  npm test \n\n"), ["npm", "test"]);
 });
 
 test("执行：参数数组直接 spawn，结果 details 记退出码、输出与哈希、文件增删改", async () => {
