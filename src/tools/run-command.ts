@@ -7,6 +7,7 @@
 //               参数）以 shell 运行，且只在人确认后：审批面板对精确命令串的批准、带 shell 标记的会话 grant 或固化规则、
 //               yolo（004 批发授权）。
 //               确认由治理层以 authorizeShell 按调用授予、一次一用；未获授权即拒绝并指出原因（含越界的参数）。
+//               本机 Windows 上经 cmd.exe 的命令含换行即无法执行（cmd.exe 只执行第一行，决策 415）。
 // 以 shell 运行的命令串与审批面板显示的字节一致，不做改写。工作目录固定为工作区根（worker 即其工作树）；环境变量只透传
 // 白名单；墙钟超时终止；输出按字节截断并标记。审批语义不在本工具：exec 档永不自动放行、[a] 收窄为精确命令串，均由
 // 治理层判定。执行证据（命令、实际进程参数、是否经启动器、是否经 shell、退出码、输出哈希与截断输出、执行前后工作树
@@ -142,6 +143,12 @@ export class ShellSyntaxError extends RunCommandError {
 // 需 shell 的两类原因：符号类 shell 语法；决策 413：引号外的换行（多行命令，与 ; 同等）
 const SHELL_SYNTAX_REASON = "含管道、重定向、命令串联或命令替换";
 const MULTILINE_REASON = "含引号外的换行（多行命令）";
+
+// 决策 415：本机 Windows 经 cmd.exe 运行的命令不能含换行——cmd.exe /c 只执行第一个换行之前的部分（引号内的换行也一样），
+// 其余各行不执行也不报错。这类命令在只读检查即判为无法执行，说明与报错共用写法建议
+const WINDOWS_MULTILINE_ADVICE =
+  "多条命令用 && 连成一行，或先用 write_file 写成脚本文件再运行该脚本";
+const WINDOWS_MULTILINE_ERROR = `命令含换行：在 Windows 上它要经 cmd.exe 运行，而 cmd.exe 只会执行第一行，已拒绝，未执行任何命令。${WINDOWS_MULTILINE_ADVICE}。`;
 
 // 超时终止——环境类
 export class RunCommandTimeoutError extends Error {
@@ -290,8 +297,11 @@ export function runCommandTexts(input: {
     `命令要等输出全部关闭才算结束：命令里${input.platform === "win32" ? "用 start /b" : "用 &"}放到后台、又没把输出重定向走的进程` +
     `会一直占着输出，命令要等到超时才结束，连同那个进程一起被终止。${heldOutputAdvice(input.platform, input.backgroundJobs !== undefined)}`;
   const shell = input.platform === "win32" ? "cmd.exe" : "/bin/sh -c";
-  // 决策 413：多行命令经 /bin/sh -c 逐行执行。cmd.exe /c 只执行第一行，Windows 上不写这一项
+  // 决策 413：多行命令经 /bin/sh -c 逐行执行；决策 415：cmd.exe /c 只执行第一行，Windows 上写明不支持与改法
   const multiline = input.platform !== "win32";
+  const windowsMultiline = multiline
+    ? ""
+    : `不支持多行命令（cmd.exe 只执行第一行，含换行的命令会被拒绝）：${WINDOWS_MULTILINE_ADVICE}。`;
   const shellKinds = multiline
     ? "管道、重定向、&& 串联、多行命令（逐行执行）"
     : "管道、重定向、&& 串联";
@@ -323,7 +333,7 @@ export function runCommandTexts(input: {
     prompt: `用 run_command 运行命令：普通命令直接执行，${shellContains}经 ${shell} 执行。`,
     approval: `run_command：${promptApproval}；${shellContains}${promptShell}。`,
     tool:
-      `在工作区根运行一条命令。普通命令不经 shell 直接执行；${toolShell}${toolApproval}` +
+      `在工作区根运行一条命令。普通命令不经 shell 直接执行；${toolShell}${windowsMultiline}${toolApproval}` +
       `可用设置 commands 一节登记的短名。结果带退出码、输出与执行前后的文件变化（不含 Pigeon 自己的治理目录 ${PIGEON_DIR}）。` +
       `输出过长时自动保留开头与结尾，中间注明省略的行数，并把全文存为 ${OUTPUTS_URI_PREFIX}<会话号>/<编号>，可用 read_file 按需读取，` +
       `不必自己用 tail、head 截取。${timeoutText}${backgroundText}${heldText}`,
@@ -461,7 +471,7 @@ export function createRunCommandTool(
     );
   };
 
-  const inspect = (input: string): CommandInspection => {
+  const classify = (input: string): CommandInspection => {
     const { command, alias } = resolve(input);
     const base = { input: input.trim(), command, ...(alias !== undefined ? { alias } : {}) };
     let argv: string[];
@@ -521,6 +531,28 @@ export function createRunCommandTool(
         offending !== undefined
           ? `参数「${offending}」含保守字符集（字母、数字与 _ . - / : = @）之外的字符`
           : `脚本路径含 cmd 特殊字符：${scriptPath}`,
+    };
+  };
+
+  // 决策 415：本机 Windows 上要经 cmd.exe（shell 路径）运行的命令，去掉首尾空白后含换行即无法执行（短名展开的命令串不修剪，
+  // 首尾的换行不算）。容器执行端的平台是 linux，即使宿主是 Windows 也不受此限
+  const inspect = (input: string): CommandInspection => {
+    const inspection = classify(input);
+    if (
+      platform !== "win32" ||
+      inspection.mode !== "shell" ||
+      !inspection.command.trim().includes("\n")
+    ) {
+      return inspection;
+    }
+    const { alias } = inspection;
+    return {
+      input: inspection.input,
+      command: inspection.command,
+      ...(alias !== undefined ? { alias } : {}),
+      mode: "invalid",
+      needsShell: false,
+      error: WINDOWS_MULTILINE_ERROR,
     };
   };
 

@@ -2,7 +2,7 @@
 // 任一参数越界即判定需 shell——未经人确认拒绝并指出参数；shell 语法同样判定需 shell，确认后以 shell 运行；
 // 成功结果的 details（执行证据）标明启动器与经 shell。
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { test } from "vitest";
@@ -88,22 +88,35 @@ test("shell 语法判定需 shell：未确认拒绝，确认后以 shell 运行�
   });
 });
 
-// 决策 413：多行命令整条交给 shell；Windows 的 cmd.exe /c 只执行第一行，逐行执行只在 /bin/sh 上核对
-test("决策 413：多行命令判定需 shell，首尾多出的换行不算；/bin/sh 上逐行执行", async (t) => {
+// 决策 413：多行命令在 /bin/sh 平台整条交给 shell、逐行执行（只在有 /bin/sh 的平台真执行）；
+// 决策 415：本机 Windows 经 cmd.exe 的命令含换行即无法执行（按平台注入判定，不起 cmd）
+test("决策 413、415：多行命令 /bin/sh 平台经 shell 逐行执行，本机 Windows 拒绝且不执行；首尾多出的换行不算", async (t) => {
   await withRoot(async (root) => {
-    const tool = createRunCommandTool({ workspaceRoot: root });
+    const posix = createRunCommandTool({ workspaceRoot: root, platform: "linux" });
+    const win = createRunCommandTool({ workspaceRoot: root, platform: "win32" });
     const line = (text: string) => `${NODE} -e "process.stdout.write('${text}')"`;
-    const command = `${line("x")}\n${line("y")}`;
-    const inspection = tool.inspectCommand({ command });
-    assert.equal(inspection.mode, "shell");
-    assert.equal(inspection.needsShell, true);
-    assert.equal(tool.inspectCommand({ command: `\n${line("x")}\r\n` }).mode, "direct");
+    const command = `${NODE} -e "require('fs').writeFileSync('ran', '')"\n${line("y")}`;
+    assert.equal(posix.inspectCommand({ command }).mode, "shell");
+    assert.equal(win.inspectCommand({ command }).mode, "invalid");
+    // 经 cmd.exe 的命令里引号内的换行同样被截断；不经 shell 的命令里引号内的换行照常是参数
+    assert.equal(win.inspectCommand({ command: `${line("x")} && echo "a\nb"` }).mode, "invalid");
+    assert.equal(win.inspectCommand({ command: `${NODE} -e "1\n2"` }).mode, "direct");
+    for (const tool of [posix, win]) {
+      assert.equal(tool.inspectCommand({ command: `\n${line("x")}\r\n` }).mode, "direct");
+    }
+    win.authorizeShell("tc-w");
+    await assert.rejects(
+      win.execute("tc-w", { command }),
+      (error: unknown) => error instanceof RunCommandError && /cmd\.exe.*&&/s.test(error.message)
+    );
+    assert.equal(existsSync(path.join(root, "ran")), false);
     if (onWindows) {
       t.skip("Windows 上没有 /bin/sh");
       return;
     }
-    tool.authorizeShell("tc-m");
-    const evidence = (await tool.execute("tc-m", { command })).details;
+    posix.authorizeShell("tc-m");
+    const evidence = (await posix.execute("tc-m", { command: `${line("x")}\n${line("y")}` }))
+      .details;
     assert.equal(evidence.shell, true);
     // 拼成一条时第二行成了第一条 node 的多余参数，只输出 x
     assert.equal(evidence.output, "xy");
