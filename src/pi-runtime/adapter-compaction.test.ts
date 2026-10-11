@@ -593,7 +593,9 @@ test("超长出错：重试的那次仍超长即按原错误收尾，不再压�
   assert.equal(again.result.status, "failed");
   assert.equal(again.result.errorMessage, OVERFLOW);
   assert.equal(again.h.streamFn.calls.length, 3);
+  // 不再尝试压缩：没有第二次压缩前回调，也没有"没压成"的提示
   assert.equal(again.h.before.length, 1);
+  assert.deepEqual(again.h.problems, []);
   const echo: FakeReply = { text: "", toolCalls: [{ name: "echo", args: { text: "ok" } }] };
   const later = await secondAsk([TOO_LONG, echo, TOO_LONG, { text: "完成" }]);
   await later.h.cleanup();
