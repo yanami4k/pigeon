@@ -1,24 +1,32 @@
-// 压缩服务（决策 188、189、218、192、207、422）：配置缺省与校验（窗口取运行参数、模型元数据或缺省）、阈值判定、上下文 token 估算（压缩后的旧 usage 不算）、
-// 摘要请求经给定的模型接入、待摘要段为空不调模型、压缩前回调先于摘要请求且失败不阻断。
+// 压缩服务（决策 188、189、218、192、207、422、424）：配置缺省与校验（窗口取运行参数、模型元数据或缺省）、阈值判定、上下文 token 估算（压缩后的旧 usage 不算）、
+// 摘要请求经给定的模型接入、待摘要段为空不调模型、压缩前回调先于摘要请求且失败不阻断；接续式与独立式两种摘要请求。
 import assert from "node:assert/strict";
 import {
   type AgentMessage,
   type CompactResult,
+  convertToLlm,
   createCompactionSummaryMessage,
   type Entry,
 } from "@earendil-works/pi-agent-core";
-import type { Api, Model } from "@earendil-works/pi-ai";
+import type { Api, AssistantMessage, Model } from "@earendil-works/pi-ai";
 import { describe, test } from "vitest";
 import {
   type CompactionStore,
   ContextCompactor,
+  type ConversationSource,
   contextTokens,
   DEFAULT_CONTEXT_WINDOW,
   exceedsThreshold,
   resolveCompactionConfig,
+  type SummaryRequestRecord,
   summaryModels,
 } from "./compaction.ts";
-import { createFakeStreamFn } from "./fixtures.ts";
+import {
+  createFakeStreamFn,
+  type FakeReply,
+  isContinuationSummary,
+  isStandaloneSummary,
+} from "./fixtures.ts";
 
 function user(text: string, timestamp = 1): AgentMessage {
   return { role: "user", content: [{ type: "text", text }], timestamp } as AgentMessage;
@@ -376,4 +384,141 @@ test("压缩条目写不进会话文件：返回失败（出在写入一步）",
   );
   assert.equal(outcome.kind, "failed");
   assert.equal(outcome.kind === "failed" ? outcome.stage : undefined, "store");
+});
+
+describe("摘要请求的两种发法（决策 424）", () => {
+  // 原会话：系统提示、工具与按主请求转换过的消息；选项带主请求的推理档位
+  function conversation(messages: AgentMessage[], tokens = 100): ConversationSource {
+    return {
+      tokens,
+      build: () => ({
+        model: summaryModel(),
+        context: { systemPrompt: "原会话的系统提示", messages: convertToLlm(messages), tools: [] },
+        options: { reasoning: "high" },
+      }),
+    };
+  }
+
+  async function compactWith(
+    messages: AgentMessage[],
+    replies: FakeReply[],
+    input: { trigger?: "turn" | "overflow"; conversation?: ConversationSource } = {}
+  ) {
+    const streamFn = createFakeStreamFn({ replies });
+    const store = memoryStore(messages);
+    const outcome = await new ContextCompactor({
+      config: resolveCompactionConfig({ thresholdTokens: 10, keepRecentTokens: 5 }),
+      streamFn,
+      model: summaryModel(),
+    }).run(store, {
+      trigger: input.trigger ?? "turn",
+      tokens: 100,
+      signal: new AbortController().signal,
+      onHookError: noop,
+      ...(input.conversation !== undefined ? { conversation: input.conversation } : {}),
+    });
+    const kinds = streamFn.calls.map((call) =>
+      isContinuationSummary(call.context)
+        ? "continuation"
+        : isStandaloneSummary(call.context)
+          ? "standalone"
+          : "?"
+    );
+    const result = store.appended[0];
+    const record = (result?.details as { summaryRequest?: SummaryRequestRecord } | undefined)
+      ?.summaryRequest;
+    return { streamFn, outcome, result, record, kinds };
+  }
+
+  test("接续式：会话原样在前、末尾一条摘要指令，选项同会话另带输出上限与 toolChoice none；切点、保留段与还原同独立式", async () => {
+    // 第一条回复改过 a.ts：读改文件清单两种发法相同
+    const messages = longConversation();
+    const edited = messages[1] as AssistantMessage;
+    messages[1] = {
+      ...edited,
+      content: [
+        ...edited.content,
+        { type: "toolCall", id: "t1", name: "edit", arguments: { path: "a.ts" } },
+      ],
+    };
+    const source = conversation(messages);
+    const continued = await compactWith(messages, [{ text: "## Goal\n接续式" }], {
+      conversation: source,
+    });
+    const call = continued.streamFn.calls[0];
+    const sent = source.build().context;
+    assert.deepEqual(continued.kinds, ["continuation"]);
+    assert.equal(call?.context.systemPrompt, sent.systemPrompt);
+    assert.equal(
+      JSON.stringify(call?.context.messages.slice(0, -1)),
+      JSON.stringify(sent.messages)
+    );
+    assert.deepEqual(
+      [call?.options?.reasoning, call?.options?.toolChoice, call?.options?.maxTokens],
+      ["high", "none", Math.floor(0.8 * 16_384)]
+    );
+    assert.deepEqual(continued.record, { mode: "continuation" });
+    assert.ok(continued.result?.summary.startsWith("## Goal\n接续式"));
+    assert.ok(continued.result?.summary.endsWith("<modified-files>\na.ts\n</modified-files>"));
+
+    const standalone = await compactWith(messages, [{ text: "## Goal\n独立式" }]);
+    assert.deepEqual(standalone.record, { mode: "standalone", reason: "no-conversation" });
+    assert.deepEqual(continued.result?.retainedTail, standalone.result?.retainedTail);
+    assert.equal(continued.result?.tokensBefore, standalone.result?.tokensBefore);
+    const lists = (result: CompactResult | undefined) => {
+      const { summaryRequest: _mode, ...rest } = (result?.details ?? {}) as Record<string, unknown>;
+      return rest;
+    };
+    assert.deepEqual(lists(continued.result), lists(standalone.result));
+    assert.ok(continued.outcome.kind === "compacted" && standalone.outcome.kind === "compacted");
+    assert.deepEqual(continued.outcome.messages.slice(1), standalone.outcome.messages.slice(1));
+  });
+
+  test("切在一轮中间、之前没有历史：指令只要那一轮的摘要并引出它开头的话；摘要照上游补上 No prior history. 与分隔", async () => {
+    const task = `长任务：${"把每个模块的日志改成中文。".repeat(30)}`;
+    const messages = [
+      user(task, 1),
+      assistant("先读 a.ts。".repeat(10), 2, 0),
+      assistant("再改 b.ts。".repeat(10), 3, 0),
+      assistant("最后跑测试，全部通过。".repeat(5), 4, 0),
+    ];
+    const { result, kinds, streamFn } = await compactWith(
+      messages,
+      [{ text: "## Original Request\n改日志" }],
+      { conversation: conversation(messages) }
+    );
+    assert.deepEqual(kinds, ["continuation"]);
+    const instruction = JSON.stringify(streamFn.calls[0]?.context.messages.at(-1));
+    assert.ok(instruction.includes(`<turn-start>${task.slice(0, 200)}…</turn-start>`));
+    assert.ok(!instruction.includes("Create a structured context checkpoint summary"));
+    assert.ok(
+      result?.summary.startsWith(
+        "No prior history.\n\n---\n\n**Turn Context (split turn):**\n\n## Original Request\n改日志"
+      )
+    );
+    assert.equal(result?.retainedTail.length, 1);
+  });
+
+  test("走独立式：超长触发；整段放不下；回复里有工具调用（接续式作废，改走一次独立式）", async () => {
+    const messages = longConversation();
+    const text: FakeReply = { text: "## Goal\n独立式" };
+    const overflow = await compactWith(messages, [text], {
+      trigger: "overflow",
+      conversation: conversation(messages),
+    });
+    assert.deepEqual(overflow.kinds, ["standalone"]);
+    assert.deepEqual(overflow.record, { mode: "standalone", reason: "overflow" });
+    const full = await compactWith(messages, [text], {
+      conversation: conversation(messages, 1_000_000 - 100),
+    });
+    assert.deepEqual(full.kinds, ["standalone"]);
+    assert.deepEqual(full.record, { mode: "standalone", reason: "no-room" });
+    const toolCall: FakeReply = { text: "", toolCalls: [{ name: "echo", args: { text: "x" } }] };
+    const misfire = await compactWith(messages, [toolCall, text], {
+      conversation: conversation(messages),
+    });
+    assert.deepEqual(misfire.kinds, ["continuation", "standalone"]);
+    assert.deepEqual(misfire.record, { mode: "standalone", reason: "tool-call" });
+    assert.ok(misfire.result?.summary.startsWith("## Goal\n独立式"));
+  });
 });
