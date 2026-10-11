@@ -2,15 +2,18 @@
 // 交出图片内容并附一行元信息，否则只给元信息；其他二进制（开头有 NUL、认得的格式、非 UTF-8 编码）只给类型与大小，
 // 不放解码出的乱码；这些读取同样记进读取记录。少量非法字节的文本照常按行读。
 // 决策 416：超出单张上限的图片缩小后交出（保持原格式，只超字节的转 JPEG）；缩放库载入失败时退回只给元信息。
+// 决策 417：交出前完整解码一遍，截断的图只给元信息；其他工具（MCP）结果里的图片块走同一道关口。
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { crc32, deflateSync } from "node:zlib";
+import { Type } from "typebox";
 import { test } from "vitest";
 import { detectImage } from "./file-kind.ts";
-import { createPhotonResizer } from "./image-resize.ts";
-import { createReadFileTool, IMAGE_MAX_BASE64_BYTES, IMAGE_MAX_EDGE } from "./read-file.ts";
+import { IMAGE_MAX_BASE64_BYTES, IMAGE_MAX_EDGE, withImageGate } from "./image-gate.ts";
+import { createPhotonPreparer, photonPreparer } from "./image-resize.ts";
+import { createReadFileTool } from "./read-file.ts";
 import { FileReadTracker } from "./read-tracker.ts";
 
 // 合法的最小 PNG（全透明，RGBA）；padTo 给出时在末尾补零到这么多字节（只用来撑大体积）
@@ -37,28 +40,20 @@ function png(width: number, height: number, padTo = 0): Buffer {
   return padTo > file.length ? Buffer.concat([file, Buffer.alloc(padTo - file.length)]) : file;
 }
 
-// 其余三种只含读尺寸所需的文件头结构（不经解码器）
-function jpeg(width: number, height: number): Buffer {
-  const app0 = [0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46, 0, 1, 1, 0, 0, 1, 0, 1, 0, 0];
-  const sof0 = [0xff, 0xc0, 0x00, 0x11, 8, height >> 8, height & 0xff, width >> 8, width & 0xff, 3];
-  return Buffer.from([0xff, 0xd8, ...app0, ...sof0, ...Array(9).fill(1), 0xff, 0xd9]);
+// 合法的 JPEG、WebP（由 photon 从 PNG 转码）与最小的 1×1 GIF
+async function encoded(kind: "jpeg" | "webp", width: number, height: number): Promise<Buffer> {
+  const mod = await import("@silvia-odwyer/photon-node");
+  const lib = "PhotonImage" in mod ? mod : (mod as unknown as { default: typeof mod }).default;
+  const image = lib.PhotonImage.new_from_byteslice(png(width, height));
+  try {
+    return Buffer.from(kind === "jpeg" ? image.get_bytes_jpeg(80) : image.get_bytes_webp());
+  } finally {
+    image.free();
+  }
 }
-function gif(width: number, height: number): Buffer {
-  const out = Buffer.from("GIF89a\0\0\0\0\0\0\0;", "latin1");
-  out.writeUInt16LE(width, 6);
-  out.writeUInt16LE(height, 8);
-  return out;
-}
-function webp(width: number, height: number): Buffer {
-  const out = Buffer.alloc(30);
-  out.write("RIFF", 0, "latin1");
-  out.writeUInt32LE(22, 4);
-  out.write("WEBPVP8L", 8, "latin1");
-  out.writeUInt32LE(5, 16);
-  out[20] = 0x2f;
-  out.writeUInt32LE((width - 1) | ((height - 1) << 14), 21);
-  return out;
-}
+const GIF_1X1 = Buffer.from("R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7", "base64");
+// 截掉后 40%：文件头与尺寸完好，像素数据不全
+const truncated = (bytes: Buffer) => bytes.subarray(0, Math.floor(bytes.length * 0.6));
 
 function withFiles(
   files: Record<string, Buffer | string>,
@@ -72,14 +67,14 @@ function withFiles(
 type Block = { type: string; text?: string; data?: string; mimeType?: string };
 const blocksOf = (result: { content: readonly Block[] }) => result.content;
 
-test("能看图：四种图片按文件头认出（扩展名不算数），交出图片内容并附一行尺寸与字节数；读取记进读取记录", () => {
+test("能看图：四种图片按文件头认出（扩展名不算数），交出图片内容并附一行尺寸与字节数；读取记进读取记录", async () => {
   const images: Array<[string, Buffer, string, string]> = [
     ["shot.dat", png(3, 2), "image/png", "3×2"],
-    ["b.jpg", jpeg(640, 480), "image/jpeg", "640×480"],
-    ["c.gif", gif(7, 9), "image/gif", "7×9"],
-    ["d.webp", webp(17, 5), "image/webp", "17×5"],
+    ["b.jpg", await encoded("jpeg", 64, 48), "image/jpeg", "64×48"],
+    ["c.gif", GIF_1X1, "image/gif", "1×1"],
+    ["d.webp", await encoded("webp", 17, 5), "image/webp", "17×5"],
   ];
-  return withFiles(
+  await withFiles(
     Object.fromEntries(images.map(([name, bytes]) => [name, bytes])),
     async (root) => {
       const reads = new FileReadTracker();
@@ -158,19 +153,58 @@ test("超出单张上限的图片缩小后交出：长边超的缩到上限内�
     }
   ));
 
-test("缩放库载入失败时退回只给元信息", () =>
-  withFiles({ "wide.png": png(IMAGE_MAX_EDGE + 1, 1) }, async (root) => {
-    const read = createReadFileTool(root, {
+test("截断的图在交出前被拦下只给元信息；图像库载入失败时同样只给元信息", () =>
+  withFiles({ "cut.png": truncated(png(40, 30)), "ok.png": png(3, 2) }, async (root) => {
+    const kinds = async (read: ReturnType<typeof createReadFileTool>, path: string) => {
+      const blocks = blocksOf(await read.execute("r", { path }));
+      return { types: blocks.map((block) => block.type), text: blocks[0]?.text ?? "" };
+    };
+    const cut = await kinds(createReadFileTool(root, { imageInput: true }), "cut.png");
+    assert.deepEqual(cut.types, ["text"]);
+    assert.match(cut.text, /40×30.*解不开/);
+    const broken = createReadFileTool(root, {
       imageInput: true,
-      resizeImage: createPhotonResizer(() => Promise.reject(new Error("载入失败"))),
+      prepareImage: createPhotonPreparer(() => Promise.reject(new Error("载入失败"))),
     });
-    const blocks = blocksOf(await read.execute("r", { path: "wide.png" }));
-    assert.deepEqual(
-      blocks.map((block) => block.type),
-      ["text"]
-    );
-    assert.match(blocks[0]?.text ?? "", /2001×1.*缩小未成功/);
+    const ok = await kinds(broken, "ok.png");
+    assert.deepEqual(ok.types, ["text"]);
+    assert.match(ok.text, /3×2.*载入失败/);
   }));
+
+test("其他工具结果里的图片块走同一道关口：好图照交、截断的换成一行说明、超限的缩小后交出，文字块不动", async () => {
+  const good = png(3, 2);
+  const tool = withImageGate(
+    {
+      name: "shot",
+      label: "shot",
+      description: "截图",
+      parameters: Type.Object({}),
+      execute: async () => ({
+        content: [
+          { type: "text", text: "三张图" },
+          { type: "image", data: good.toString("base64"), mimeType: "image/png" },
+          { type: "image", data: truncated(png(40, 30)).toString("base64"), mimeType: "image/png" },
+          {
+            type: "image",
+            data: png(IMAGE_MAX_EDGE + 400, 12).toString("base64"),
+            mimeType: "image/png",
+          },
+        ],
+        details: undefined,
+      }),
+    },
+    photonPreparer
+  );
+  const content = blocksOf(await tool.execute("t", {}));
+  assert.deepEqual(
+    content.map((block) => block.type),
+    ["text", "image", "text", "text", "image"]
+  );
+  assert.equal(content[1]?.data, good.toString("base64"));
+  assert.match(content[2]?.text ?? "", /未交出.*解不开.*40×30/);
+  assert.match(content[3]?.text ?? "", /2000×10/);
+  assert.equal(detectImage(Buffer.from(content[4]?.data ?? "", "base64"))?.width, 2000);
+});
 
 test("少量非法字节的文本照常按行读（带锚点、分页不变）", () => {
   const lines = Array.from({ length: 200 }, (_, i) => `line ${i + 1}`).join("\n");

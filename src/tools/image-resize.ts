@@ -1,9 +1,9 @@
-// 图片缩放（决策 416）：用 photon（Rust 编译成的 WASM，npm 包 @silvia-odwyer/photon-node）在进程内把超出单张上限的图片缩到
-// 上限以内，供 read_file 交给能看图的模型。首次用到时才载入（同步编译约 1.9 MB 的 wasm），载入失败记住、不再重试；载入或处理
-// 失败一律返回 undefined，由 read_file 退回只给元信息。
-// 做法：长边超过上限时等比缩到长边恰为上限（Lanczos3）；缩过的尽量保持原格式（PNG、WebP 照原格式编码，JPEG 质量 85，GIF 取
-// 第一帧编码为 PNG）；编码后仍超字节上限，或只是字节超限（尺寸在限内），转 JPEG 并按质量 85、70、55、40 逐级降；都超即放弃。
-// 不处理 EXIF 方向；转 JPEG 时透明部分不保留。
+// 图片的核验与缩放（决策 416、417）：用 photon（Rust 编译成的 WASM，npm 包 @silvia-odwyer/photon-node）在进程内把要交给模型的
+// 图片完整解码一遍；解不开的不交（坏图交出去，服务方拒收整条请求，且它留在历史里之后每次请求都会被拒）；超出单张上限的缩到
+// 上限以内。首次用到时才载入（同步编译约 1.9 MB 的 wasm），载入失败记住、不再重试。
+// 缩放：长边超过上限时等比缩到长边恰为上限（Lanczos3）；缩过的尽量保持原格式（PNG、WebP 照原格式编码，GIF 取第一帧编码为
+// PNG）；编码后仍超字节上限，或只是字节超限（尺寸在限内），转 JPEG 并按质量 85、70、55、40 逐级降（原图是 JPEG 的直接从这里
+// 开始）；都超即放弃。不处理 EXIF 方向；转 JPEG 时透明部分不保留。在限内又解得开的图原字节照交。
 // 打包后的产物里 photon 按产物所在目录找 wasm（见 scripts/build-bundle.mjs）。
 import type { ImageMimeType } from "./file-kind.ts";
 
@@ -14,11 +14,13 @@ export interface ImageLimits {
   maxBase64Bytes: number;
 }
 
-export interface ResizedImage {
+// 要交出的那份：resized 为假即原字节
+export interface PreparedImage {
   data: Buffer;
   mimeType: ImageMimeType;
   width: number;
   height: number;
+  resized: boolean;
 }
 
 // 原图的类型与像素尺寸（取自文件头）
@@ -28,13 +30,19 @@ export interface SourceImage {
   height: number;
 }
 
-export type ImageResizer = (
+// unavailable 图像库载入失败；undecodable 解不开；failed 缩放或编码出错；too-large 降到最低质量仍超限
+export type PrepareFailure = "unavailable" | "undecodable" | "failed" | "too-large";
+
+export type PrepareResult = { image: PreparedImage } | { failure: PrepareFailure };
+
+export type ImagePreparer = (
   bytes: Uint8Array,
   source: SourceImage,
   limits: ImageLimits
-) => Promise<ResizedImage | undefined>;
+) => Promise<PrepareResult>;
 
 export type PhotonModule = typeof import("@silvia-odwyer/photon-node");
+type PhotonImage = InstanceType<PhotonModule["PhotonImage"]>;
 
 // 转 JPEG 时依次试的质量
 const JPEG_QUALITIES = [85, 70, 55, 40] as const;
@@ -50,9 +58,9 @@ async function importPhoton(): Promise<PhotonModule> {
 }
 
 // load 供测试注入（例如模拟载入失败）
-export function createPhotonResizer(
+export function createPhotonPreparer(
   load: () => Promise<PhotonModule> = importPhoton
-): ImageResizer {
+): ImagePreparer {
   let photon: Promise<PhotonModule> | undefined;
   return async (bytes, source, limits) => {
     photon ??= load();
@@ -60,34 +68,52 @@ export function createPhotonResizer(
     try {
       lib = await photon;
     } catch {
-      return undefined;
+      return { failure: "unavailable" };
+    }
+    let decoded: PhotonImage;
+    try {
+      decoded = lib.PhotonImage.new_from_byteslice(bytes);
+    } catch {
+      return { failure: "undecodable" };
     }
     try {
-      return resizeWith(lib, bytes, source, limits);
+      return prepareDecoded(lib, decoded, bytes, source, limits);
     } catch {
-      return undefined;
+      return { failure: "failed" };
+    } finally {
+      decoded.free();
     }
   };
 }
 
-function resizeWith(
+function prepareDecoded(
   lib: PhotonModule,
+  decoded: PhotonImage,
   bytes: Uint8Array,
   source: SourceImage,
   limits: ImageLimits
-): ResizedImage | undefined {
-  const decoded = lib.PhotonImage.new_from_byteslice(bytes);
+): PrepareResult {
+  const longEdge = Math.max(source.width, source.height);
+  const resized = longEdge > limits.maxEdge;
+  if (!resized && base64Length(bytes.length) <= limits.maxBase64Bytes) {
+    return {
+      image: {
+        data: Buffer.from(bytes),
+        mimeType: source.mimeType,
+        width: decoded.get_width(),
+        height: decoded.get_height(),
+        resized: false,
+      },
+    };
+  }
   let image = decoded;
   try {
-    const longEdge = Math.max(source.width, source.height);
-    const resized = longEdge > limits.maxEdge;
     if (resized) {
       const scale = limits.maxEdge / longEdge;
       const width = Math.max(1, Math.round(decoded.get_width() * scale));
       const height = Math.max(1, Math.round(decoded.get_height() * scale));
       image = lib.resize(decoded, width, height, lib.SamplingFilter.Lanczos3);
     }
-    // 原图是 JPEG 的，照原格式即从下面的质量梯度开始
     const keepFormat = resized && source.mimeType !== "image/jpeg";
     const encodings: Array<() => [Uint8Array, ImageMimeType]> = [
       ...(keepFormat ? [() => sameFormat(image, source.mimeType)] : []),
@@ -100,29 +126,28 @@ function resizeWith(
       const [data, mimeType] = encode();
       if (base64Length(data.length) <= limits.maxBase64Bytes) {
         return {
-          data: Buffer.from(data),
-          mimeType,
-          width: image.get_width(),
-          height: image.get_height(),
+          image: {
+            data: Buffer.from(data),
+            mimeType,
+            width: image.get_width(),
+            height: image.get_height(),
+            resized: true,
+          },
         };
       }
     }
-    return undefined;
+    return { failure: "too-large" };
   } finally {
     if (image !== decoded) image.free();
-    decoded.free();
   }
 }
 
 // 照原格式编码（JPEG 之外）：GIF 没有编码器，取第一帧编为 PNG
-function sameFormat(
-  image: InstanceType<PhotonModule["PhotonImage"]>,
-  mimeType: ImageMimeType
-): [Uint8Array, ImageMimeType] {
+function sameFormat(image: PhotonImage, mimeType: ImageMimeType): [Uint8Array, ImageMimeType] {
   return mimeType === "image/webp"
     ? [image.get_bytes_webp(), "image/webp"]
     : [image.get_bytes(), "image/png"];
 }
 
-// 缺省的缩放器（整个进程共用一份载入）
-export const photonResizer: ImageResizer = createPhotonResizer();
+// 缺省的核验与缩放（整个进程共用一份载入）
+export const photonPreparer: ImagePreparer = createPhotonPreparer();

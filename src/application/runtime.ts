@@ -126,6 +126,8 @@ import { CommandOutputStore } from "../tools/command-output.ts";
 import { createEditFileTool, EditFileParamsSchema } from "../tools/edit-file.ts";
 import { DEFAULT_EDIT_MODE, type EditMode } from "../tools/edit-mode.ts";
 import { WEB_FETCH_TOOL, WEB_SEARCH_TOOL } from "../tools/host-scope.ts";
+import { withImageGate } from "../tools/image-gate.ts";
+import { photonPreparer } from "../tools/image-resize.ts";
 import {
   createJobKillTool,
   createJobOutputTool,
@@ -1295,7 +1297,10 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
           ]
         : []),
       ...(hasSkills ? [createLoadSkillTool({ catalog: skillCatalog })] : []),
-      ...mcpTools.map((bridged) => bridged.tool),
+      // 决策 417：模型能看图时 MCP 工具返回的图片与 read_file 走同一道关口
+      ...mcpTools.map((bridged) =>
+        readOptions.imageInput ? withImageGate(bridged.tool, photonPreparer) : bridged.tool
+      ),
       ...(spawnSlot !== undefined
         ? [createSpawnWorkerTool(spawnSlot, policy.allow), ...createOrchestrationTools(spawnSlot)]
         : []),
