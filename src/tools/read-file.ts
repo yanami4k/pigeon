@@ -10,6 +10,7 @@
 // 决策 414：按文件头认出图片（PNG、JPEG、GIF、WebP）与其他二进制（判定见 file-kind.ts），整个文件一次交回、不分行：
 // 模型能看图（imageInput，取自模型信息）且图片在上限以内时交出图片内容，附一行路径、类型、像素尺寸与字节数；其余只给这些
 // 元信息与可用的命令行工具，不把解码出的乱码放进上下文。这类读取同样记进读取记录（读后改写的保护照旧）。
+// 决策 416：超出单张上限的图片先在进程内缩小（image-resize.ts），缩不成（库载入或处理失败、降到最低质量仍超）才只给元信息。
 import { type Static, Type } from "typebox";
 import { Value } from "typebox/value";
 import {
@@ -21,6 +22,7 @@ import { type CommandOutputStore, isOutputsUri, OutputPathError } from "./comman
 import type { EditMode } from "./edit-mode.ts";
 import { type BinaryInfo, detectBinary, detectImage, type ImageInfo } from "./file-kind.ts";
 import { lineTag, snapshotTag, splitContent } from "./hashline.ts";
+import { base64Length, type ImageResizer, photonResizer } from "./image-resize.ts";
 import { asWorkspaceHost } from "./local-host.ts";
 import { WorkspacePathError } from "./paths.ts";
 import type { ReadTarget } from "./read-paths.ts";
@@ -71,6 +73,8 @@ export interface ReadFileWholeDetails {
   width?: number;
   height?: number;
   imageSent?: true;
+  // 决策 416：缩小后交出的那份
+  resized?: { mimeType: string; width: number; height: number; bytes: number };
   // 二进制：认得的格式
   format?: string;
 }
@@ -92,6 +96,8 @@ export interface ReadFileToolOptions {
   reads?: FileReadTracker;
   // 决策 414：模型能看图（模型信息的 input 含 image）时图片以图片内容交回；缺省不能
   imageInput?: boolean;
+  // 决策 416：超出单张上限的图片的缩放器；缺省用 photon
+  resizeImage?: ImageResizer;
 }
 
 // 读到的内容：总行数、按行号取行，与读取成功后的收尾
@@ -245,7 +251,12 @@ export function createReadFileTool(
       const loaded = await load(args.path, offset, limit, approved);
       if ("whole" in loaded) {
         options.reads?.record(loaded.resolvedPath, loaded.bytes);
-        return wholeFileResult(args.path, loaded, options.imageInput === true);
+        return wholeFileResult(
+          args.path,
+          loaded,
+          options.imageInput === true,
+          options.resizeImage ?? photonResizer
+        );
       }
       const { resolvedPath, snapshot, totalLines } = loaded;
       if (totalLines === 0) {
@@ -323,15 +334,16 @@ export function createReadFileTool(
 // 决策 414：模型能看图时工具说明另加的一句
 const IMAGE_SENTENCE =
   "图片（PNG、JPEG、GIF、WebP）以图片交回，可直接看图，不必为看图另写脚本或装库；" +
-  `长边超过 ${IMAGE_MAX_EDGE} 像素或编码后超过 ${IMAGE_MAX_MB} 的不交出图片内容。` +
+  `长边超过 ${IMAGE_MAX_EDGE} 像素或编码后超过 ${IMAGE_MAX_MB} 的先自动缩小再交出。` +
   "其他二进制文件只给类型与大小。";
 
-// 图片与其他二进制：一行元信息；能交出的图片附图片内容
-function wholeFileResult(
+// 图片与其他二进制：一行元信息；能交出的图片附图片内容（超出单张上限的先缩小）
+async function wholeFileResult(
   path: string,
   file: WholeFile,
-  imageInput: boolean
-): PigeonToolResult<ReadFileWholeDetails> {
+  imageInput: boolean,
+  resizeImage: ImageResizer
+): Promise<PigeonToolResult<ReadFileWholeDetails>> {
   const size = `${file.bytes.length} 字节`;
   const { image } = file;
   if (image === undefined) {
@@ -354,8 +366,39 @@ function wholeFileResult(
     ...(width !== undefined && height !== undefined ? { width, height } : {}),
   };
   const withheld = imageWithheld(image, file.bytes.length, imageInput);
+  if (withheld === OVER_LIMIT && width !== undefined && height !== undefined) {
+    const resized = await resizeImage(
+      file.bytes,
+      { mimeType: image.mimeType, width, height },
+      { maxEdge: IMAGE_MAX_EDGE, maxBase64Bytes: IMAGE_MAX_BASE64_BYTES }
+    );
+    if (resized !== undefined) {
+      const format = resized.mimeType.slice("image/".length).toUpperCase();
+      const scale = Math.round((width / resized.width) * 100) / 100;
+      const note =
+        `；超出单张上限，已缩小为 ${format} ${resized.width}×${resized.height}（${resized.data.length} 字节）交出` +
+        (scale !== 1 ? `，图中坐标乘以 ${scale} 即原图坐标` : "");
+      return {
+        content: [
+          { type: "text", text: `${head}${note}` },
+          { type: "image", data: resized.data.toString("base64"), mimeType: resized.mimeType },
+        ],
+        details: {
+          ...details,
+          imageSent: true,
+          resized: {
+            mimeType: resized.mimeType,
+            width: resized.width,
+            height: resized.height,
+            bytes: resized.data.length,
+          },
+        },
+      };
+    }
+  }
   if (withheld !== undefined) {
-    return { content: [{ type: "text", text: `${head}。${withheld}` }], details };
+    const reason = withheld === OVER_LIMIT ? OVER_LIMIT_TEXT : withheld;
+    return { content: [{ type: "text", text: `${head}。${reason}` }], details };
   }
   return {
     content: [
@@ -366,7 +409,13 @@ function wholeFileResult(
   };
 }
 
-// 不交出图片内容的原因与办法；能交出返回 undefined
+// 超出单张上限（先试缩小）的标记，与缩不成时的说明
+const OVER_LIMIT = "over-limit";
+const OVER_LIMIT_TEXT =
+  `超出单张图片上限（长边 ${IMAGE_MAX_EDGE} 像素、编码后 ${IMAGE_MAX_MB}），自动缩小未成功，未交出图片内容；` +
+  "可先用命令行工具缩小到上限以内（如 ImageMagick 或 python 的图像库）再读。";
+
+// 不交出图片内容的原因与办法；超出单张上限返回 OVER_LIMIT；能交出返回 undefined
 function imageWithheld(image: ImageInfo, bytes: number, imageInput: boolean): string | undefined {
   if (!imageInput) {
     return (
@@ -378,16 +427,9 @@ function imageWithheld(image: ImageInfo, bytes: number, imageInput: boolean): st
   if (width === undefined || height === undefined) {
     return "读不出像素尺寸（文件头不完整或已损坏），未交出图片内容；可用 file、identify 等命令行工具查看。";
   }
-  const over: string[] = [];
-  if (Math.max(width, height) > IMAGE_MAX_EDGE) over.push(`长边超过 ${IMAGE_MAX_EDGE} 像素`);
-  if (Math.ceil(bytes / 3) * 4 > IMAGE_MAX_BASE64_BYTES) {
-    over.push(`编码后超过 ${IMAGE_MAX_MB}`);
-  }
-  if (over.length === 0) return undefined;
-  return (
-    `${over.join("、")}，超出单张图片上限，未交出图片内容；` +
-    "可先用命令行工具缩小到上限以内（如 ImageMagick 或 python 的图像库）再读。"
-  );
+  const over =
+    Math.max(width, height) > IMAGE_MAX_EDGE || base64Length(bytes) > IMAGE_MAX_BASE64_BYTES;
+  return over ? OVER_LIMIT : undefined;
 }
 
 function binaryText(path: string, size: string, binary: BinaryInfo | undefined): string {

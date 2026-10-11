@@ -1,12 +1,15 @@
 // read_file 认出图片与其他二进制（决策 414）：按文件头认 PNG、JPEG、GIF、WebP（扩展名不算数）；模型能看图且在上限以内时
 // 交出图片内容并附一行元信息，否则只给元信息；其他二进制（开头有 NUL、认得的格式、非 UTF-8 编码）只给类型与大小，
 // 不放解码出的乱码；这些读取同样记进读取记录。少量非法字节的文本照常按行读。
+// 决策 416：超出单张上限的图片缩小后交出（保持原格式，只超字节的转 JPEG）；缩放库载入失败时退回只给元信息。
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { crc32, deflateSync } from "node:zlib";
 import { test } from "vitest";
+import { detectImage } from "./file-kind.ts";
+import { createPhotonResizer } from "./image-resize.ts";
 import { createReadFileTool, IMAGE_MAX_BASE64_BYTES, IMAGE_MAX_EDGE } from "./read-file.ts";
 import { FileReadTracker } from "./read-tracker.ts";
 
@@ -124,22 +127,50 @@ test("不能看图：图片只给元信息；其他二进制（开头有 NUL、�
   });
 });
 
-test("超出单张上限（长边像素或编码后字节数）的图片不交出图片内容；恰在上限上的照交", () =>
+test("超出单张上限的图片缩小后交出：长边超的缩到上限内并保持格式，只超字节的转 JPEG；恰在上限上的原样交出", () =>
   withFiles(
     {
       "edge.png": png(IMAGE_MAX_EDGE, 1),
-      "wide.png": png(IMAGE_MAX_EDGE + 1, 1),
+      "wide.png": png(IMAGE_MAX_EDGE + 400, 12),
       "heavy.png": png(4, 4, Math.floor((IMAGE_MAX_BASE64_BYTES / 4) * 3) + 1),
     },
     async (root) => {
       const read = createReadFileTool(root, { imageInput: true });
-      const kinds = async (path: string) =>
-        blocksOf(await read.execute("r", { path })).map((block) => block.type);
-      assert.deepEqual(await kinds("edge.png"), ["text", "image"]);
-      assert.deepEqual(await kinds("wide.png"), ["text"]);
-      assert.deepEqual(await kinds("heavy.png"), ["text"]);
+      const sent = async (path: string) => {
+        const [head, image] = blocksOf(await read.execute("r", { path }));
+        assert.equal(image?.type, "image", path);
+        const bytes = Buffer.from(image?.data ?? "", "base64");
+        return { head: head?.text ?? "", bytes, info: detectImage(bytes) };
+      };
+      const edge = await sent("edge.png");
+      assert.deepEqual(edge.bytes, png(IMAGE_MAX_EDGE, 1));
+      const wide = await sent("wide.png");
+      assert.deepEqual(wide.info, {
+        mimeType: "image/png",
+        format: "PNG",
+        width: 2000,
+        height: 10,
+      });
+      assert.match(wide.head, /2400×12.*2000×10/);
+      const heavy = await sent("heavy.png");
+      assert.equal(heavy.info?.mimeType, "image/jpeg");
+      assert.ok(heavy.bytes.length < IMAGE_MAX_BASE64_BYTES);
     }
   ));
+
+test("缩放库载入失败时退回只给元信息", () =>
+  withFiles({ "wide.png": png(IMAGE_MAX_EDGE + 1, 1) }, async (root) => {
+    const read = createReadFileTool(root, {
+      imageInput: true,
+      resizeImage: createPhotonResizer(() => Promise.reject(new Error("载入失败"))),
+    });
+    const blocks = blocksOf(await read.execute("r", { path: "wide.png" }));
+    assert.deepEqual(
+      blocks.map((block) => block.type),
+      ["text"]
+    );
+    assert.match(blocks[0]?.text ?? "", /2001×1.*缩小未成功/);
+  }));
 
 test("少量非法字节的文本照常按行读（带锚点、分页不变）", () => {
   const lines = Array.from({ length: 200 }, (_, i) => `line ${i + 1}`).join("\n");
