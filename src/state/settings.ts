@@ -4,7 +4,7 @@
 //   hooks（决策 323/324）、学到的记忆的两层上限 memory（决策 332）、模型信息的覆盖值 modelInfo（决策 362）、撞上限续跑
 //   truncationContinuation、流式重复检测 repetitionGuard（决策 367）、工具的上限类设置 tools（决策 356、357、368）、
 //   上下文裁剪 contextPrune（决策 361）、快照的大小上限 snapshot（决策 381）、会话检索的开关 sessionSearch（决策 382）与
-//   推理档位 thinking（决策 390）；
+//   推理档位 thinking（决策 390）、模型请求的失败重试 modelRequest（决策 420）；
 //   另有顶层键 disableAllHooks 与 stopHookBlockCap（324/323）、只许写在用户级的
 //   trustedDirectories（决策 326 ③）与整个文件可选的 $schema。
 // - 合并：对象按键逐层合并，标量与数组由高优先层整体替换；两个例外：permissions 的放权规则三层并集生效，
@@ -36,6 +36,11 @@ import {
 import { type DotMcpJson, type McpConfig, McpSectionSchema, mergeMcpConfig } from "./mcp-config.ts";
 import { type MemoryLimits, MemorySectionSchema, memoryLimits } from "./memory-config.ts";
 import { type ModelInfoSection, ModelInfoSectionSchema } from "./model-info.ts";
+import {
+  type ModelRequestSection,
+  ModelRequestSectionSchema,
+  modelRequestMaxRetries,
+} from "./model-request-config.ts";
 import {
   OrchestrationSectionSchema,
   type OrchestrationSettings,
@@ -110,6 +115,7 @@ export const SETTINGS_SECTIONS = {
   snapshot: SnapshotSectionSchema,
   sessionSearch: SessionSearchSectionSchema,
   thinking: ThinkingSectionSchema,
+  modelRequest: ModelRequestSectionSchema,
 } as const satisfies Record<string, TSchema>;
 export type SettingsSectionName = keyof typeof SETTINGS_SECTIONS;
 
@@ -139,6 +145,7 @@ export const SettingsFileSchema = Type.Object(
     snapshot: Type.Optional(SnapshotSectionSchema),
     sessionSearch: Type.Optional(SessionSearchSectionSchema),
     thinking: Type.Optional(ThinkingSectionSchema),
+    modelRequest: Type.Optional(ModelRequestSectionSchema),
     [DISABLE_ALL_HOOKS_KEY]: Type.Optional(Type.Boolean()),
     [STOP_HOOK_BLOCK_CAP_KEY]: Type.Optional(Type.Integer({ minimum: 1 })),
     trustedDirectories: Type.Optional(Type.Array(Type.String({ minLength: 1 }))),
@@ -298,6 +305,7 @@ export interface MergedSettings {
   snapshot?: SnapshotSection;
   sessionSearch?: Static<typeof SessionSearchSectionSchema>;
   thinking?: ThinkingSection;
+  modelRequest?: ModelRequestSection;
   trustedDirectories: string[];
   // 停用全部钩子（324）：三层按标量覆盖（高优先层说了算），缺省 false
   disableAllHooks: boolean;
@@ -502,6 +510,11 @@ export function sessionSearchEnabledOf(snapshot: SettingsSnapshot): boolean {
 // 推理档位（决策 390）：合并后的 thinking 一节（没写为 undefined，按模型信息定缺省档位）
 export function thinkingSectionOf(snapshot: SettingsSnapshot): ThinkingSection | undefined {
   return snapshot.merged.thinking;
+}
+
+// 决策 420：模型请求的失败重试次数（modelRequest 一节，缺省 4）
+export function modelRequestMaxRetriesOf(snapshot: SettingsSnapshot): number {
+  return modelRequestMaxRetries(snapshot.merged.modelRequest);
 }
 
 // 决策 356：run_command 输出的头尾保留与落盘总量（tools 一节，不给的取缺省）

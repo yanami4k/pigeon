@@ -2,7 +2,12 @@
 // 自造第二套措辞）。住在 application/（M2 S1，决策 025）：它是 cli 与将来的 tui 唯一同时
 // 可达的共享层——resume 流程（application/resume.ts）与 CLI 各只读视图（cli/）都从这里取措辞。
 import type { FailureClass } from "../state/classification.ts";
-import type { ContinuationData, PruneData, RepetitionData } from "../state/session-entries.ts";
+import type {
+  ContinuationData,
+  PruneData,
+  RepetitionData,
+  RequestRetryData,
+} from "../state/session-entries.ts";
 import type { ToolExecutionDecision } from "../state/tool-execution.ts";
 
 // 参数摘要上限（字符）；超出截断并标注原长，防大参数刷屏
@@ -67,6 +72,15 @@ export function repetitionLine(data: RepetitionData): string {
     `重复检测命中：${criterion}（${channel}）｜ ${period} ${data.periodChars} 字 ｜ ` +
     `重复 ${data.repeats} 次 ｜ ${data.mode === "abort" ? "已掐断" : "只记录"}`
   );
+}
+
+// 模型请求失败重试（决策 420）的一行（trace 与 replay 共用）：第几次、上一次的状态码或连接失败、实测等待
+export function requestRetryLine(data: RequestRetryData): string {
+  const cause =
+    data.status !== undefined
+      ? `HTTP ${data.status}`
+      : `连接失败${data.error !== undefined ? `（${data.error}）` : ""}`;
+  return `模型请求重试第 ${data.retry} 次：上一次 ${cause} ｜ 等待 ${(data.waitMs / 1000).toFixed(1)} 秒`;
 }
 
 export function shortId(id: string): string {

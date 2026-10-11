@@ -53,6 +53,7 @@ export const SessionEntryType = {
   Status: "pigeon.status",
   Prune: "pigeon.prune",
   BackgroundJob: "pigeon.background-job",
+  RequestRetry: "pigeon.request-retry",
 } as const;
 export type SessionEntryTypeName = (typeof SessionEntryType)[keyof typeof SessionEntryType];
 
@@ -492,6 +493,19 @@ export const BackgroundJobDataSchema = Type.Union([
 ]);
 export type BackgroundJobData = Static<typeof BackgroundJobDataSchema>;
 
+// 模型请求的一次失败重试（决策 420）：这次请求里的第几次重试、上一次尝试的 HTTP 状态码（连接失败时没有，记错误文字）与
+// 上一次失败到这次重发之间的实测等待毫秒数。Run 之外的请求（Run 开始前或手动的压缩摘要）不带 runId
+export const RequestRetryDataSchema = Type.Object({
+  version: VERSION,
+  runId: Type.Optional(RunIdSchema),
+  retry: Type.Integer({ minimum: 1 }),
+  status: Type.Optional(Type.Integer()),
+  error: Type.Optional(Type.String()),
+  waitMs: Type.Integer({ minimum: 0 }),
+  retriedAt: Type.Integer({ minimum: 0 }),
+});
+export type RequestRetryData = Static<typeof RequestRetryDataSchema>;
+
 // 一条待写的自定义条目：customType 与数据成对
 export type SessionCustomEntry =
   | { customType: typeof SessionEntryType.RunStart; data: RunStartData }
@@ -508,7 +522,8 @@ export type SessionCustomEntry =
   | { customType: typeof SessionEntryType.Repetition; data: RepetitionData }
   | { customType: typeof SessionEntryType.Status; data: StatusData }
   | { customType: typeof SessionEntryType.Prune; data: PruneData }
-  | { customType: typeof SessionEntryType.BackgroundJob; data: BackgroundJobData };
+  | { customType: typeof SessionEntryType.BackgroundJob; data: BackgroundJobData }
+  | { customType: typeof SessionEntryType.RequestRetry; data: RequestRetryData };
 
 // 各 customType 的数据 schema（读者校验用）
 export const SESSION_ENTRY_SCHEMAS = {
@@ -527,6 +542,7 @@ export const SESSION_ENTRY_SCHEMAS = {
   [SessionEntryType.Status]: StatusDataSchema,
   [SessionEntryType.Prune]: PruneDataSchema,
   [SessionEntryType.BackgroundJob]: BackgroundJobDataSchema,
+  [SessionEntryType.RequestRetry]: RequestRetryDataSchema,
 } as const;
 
 // 自定义条目的写入面：写者自身从不抛，写失败按内部故障处理（向标准错误输出去重告警），不中断运行。

@@ -57,6 +57,7 @@ export function deepseekModelInfo(): ModelInfoDeclaration {
   return {
     provider: DEEPSEEK_PROVIDER,
     id: DEEPSEEK_MODEL_ID,
+    api: "anthropic-messages",
     servedBy: DEEPSEEK_PROVIDER,
     cost: {
       input: PRICE_CNY_PER_MTOK.cacheMiss,
