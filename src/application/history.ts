@@ -79,10 +79,13 @@ export function messageLines(
       (sum, block) => sum + (block.type === "text" ? block.text.length : 0),
       0
     );
+    // 决策 414：带图的结果注明图片张数（图片本身不显示）
+    const images = message.blocks.filter((block) => block.type === "image").length;
+    const imageNote = images > 0 ? `，${images} 张图片` : "";
     return [
       {
         kind: "toolResult",
-        text: `[result] ${message.toolName ?? "?"} ${message.isError === true ? "error" : "ok"}（${chars} 字符，已折叠）`,
+        text: `[result] ${message.toolName ?? "?"} ${message.isError === true ? "error" : "ok"}（${chars} 字符${imageNote}，已折叠）`,
       },
     ];
   }
