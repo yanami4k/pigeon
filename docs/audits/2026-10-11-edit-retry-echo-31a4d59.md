@@ -26,3 +26,29 @@ hashline 模式（`src/tools/edit-file.ts`）：工具说明改为写明同一�
 - hashline 模式的多处成功、任一处不通过整组不写、重叠报错由原有的 `src/tools/hashline.test.ts` 与 `src/tools/edit-file.test.ts` 覆盖。
 - `src/application/runtime-edit-mode.test.ts`：replace 版 edit_file 的参数名清单加上 `edits`。
 - 变异：在 execute 里先把 `edits` 逐项各写一次、再走整组写入（即去掉"全部校验后才写"），两条新用例变红（整组不写的那条在第一项已写入处失败）；还原后用例全过，文件与提交内容一致。
+
+## 二、模型请求的失败重试（决策 420，048cb79）
+
+pi-ai 0.84.4 的现状（只读核对，未改）：
+
+- `utils/provider-retry.js` 的 `retryProviderRequest`：连接失败（状态码缺失）与 408、409、429、5xx 重试，响应头 `x-should-retry` 优先；有 `retry-after-ms` 或 `retry-after` 照它等，超过 `maxRetryDelayMs`（缺省 60 秒）直接报错；否则按 0.5 秒起翻倍、封顶 8 秒、减去至多四分之一的随机量退避。次数取请求选项 `maxRetries`，缺省 0。等待可被中止信号打断。
+- anthropic-messages、openai-completions、openai-responses、azure-openai-responses 四条线路把开始收回复之前的那次请求包在它里面，SDK 自身的重试关着（`maxRetries: 0`），调用选项里的 `fetch` 交给 SDK 客户端，一次尝试即一次 fetch。
+- 回调：`onPayload` 在第一次发送前调一次，`onResponse` 只在重试结束、拿到成功响应后调一次，`retryProviderRequest` 本身没有回调；三者都看不出发生了重试。
+- google-generative-ai 与 google-vertex 两条线路遇到自带的 `fetch` 直接报错（"Custom fetch is not supported"），bedrock-converse-stream 不走 fetch。
+
+改法：
+
+- 设置：新节 `modelRequest`，键 `maxRetries`（整数，不小于 0，缺省 4，0 为不重试），`src/state/model-request-config.ts`；`src/state/settings.ts` 登记该节并加取值函数 `modelRequestMaxRetriesOf`。三层合并、未知键报错、`/reload` 比较随节表生效。`docs/configuration.md` 加一节"模型请求的失败重试"与节表一行。
+- 包装：`src/pi-runtime/request-retry.ts` 的 `withRequestRetries` 包在模型接入的 streamFn 外层，每次调用在选项里放 `maxRetries`。`buildRuntime`（`src/application/runtime.ts`）用它包一次，主请求（再套温度与单轮输出上限的包装）、压缩摘要与网页提炼三处都用包过的这一个。终端界面、逐行对话、`pigeon run`、续接与 worker 都经 `buildRuntime` 装配。
+- 记录：调用选项里的 `fetch` 换成一个按次计数的包装（建在调用方给的 fetch 或全局 fetch 之上），每次模型请求一个。一次尝试失败（非 2xx 响应，或 fetch 抛错）之后又发起了下一次尝试，即记一次重试：第几次（本次请求内从 1 起）、上一次的 HTTP 状态码（连接失败时没有，改记错误文字，至多 200 字）、上一次失败到这次发起之间的实测毫秒数。记录在重发那一刻写，失败之后没有再发的（400、次数用完）不记。记录出错不影响请求。
+- 接管条件：只在接入模块声明的线路属于上面四条时才换 `fetch`。模型信息声明（`ModelInfoDeclarationSchema`，`src/state/model-info.ts`）新增可选字段 `api`（pi-ai 模型对象的同名字段，此前已在认得的键里、不告警）；自带的 DeepSeek 接入的声明加上 `api: "anthropic-messages"`。没声明或声明为其他线路的模块照样收到 `maxRetries`，只是不记。
+- 会话记录：新条目 `pigeon.request-retry`（`src/state/session-entries.ts`），数据为 `version`、`runId`（Run 之外的请求，如 Run 开始前或手动的压缩摘要，不带）、`retry`、`status`、`error`、`waitMs`、`retriedAt`。会话视图（`src/state/session-view.ts`）认作 `request-retry`，按 `runId` 归到 Run；`pigeon trace` 的 Run 摘要与 `pigeon replay` 的条目各列一行（`src/application/format.ts` 的 `requestRetryLine`："模型请求重试第 n 次：上一次 HTTP 429 ｜ 等待 x 秒"，连接失败写"连接失败（错误文字）"）。
+- 与决策 417 的去图重试：400 不在 pi-ai 的重试之列，请求照旧以 400 收尾，由运行面的去图重试处理，两者不重叠。重试发生在一次模型请求之内，不增加轮数。
+
+测试：
+
+- `src/pi-runtime/request-retry.test.ts`：自带的 DeepSeek 接入与真的 anthropic-messages 线路，调用选项注入假的 fetch（失败响应带 `retry-after-ms: 1`）。429、503 之后成功：共发 3 次，回调两次（第 1 次 429、第 2 次 503）；连接失败一次后成功：记录没有状态码、带错误文字；400：只发 1 次、不回调、以出错收尾；次数给 1 时两次 429 后以出错收尾、共发 2 次；接管条件的线路判断。
+- `src/application/request-retry-wiring.test.ts`：装配层冒烟——空设置时取值为 4；设置 `modelRequest.maxRetries` 为 2、HTTP 层（替换全局 fetch，用完还原）依次回 429、503、429：共发 3 次，Run 以出错收尾，会话视图里这个 Run 有两条 `request-retry`（429、503）。
+- 测试用的假 HTTP 层 `scriptedFetch`、`failedReply` 放在 `src/pi-runtime/fixtures.ts`。
+- 变异：去掉包装里传的 `maxRetries`，上述两个文件的三条重试用例变红（只有线路判断那条不受影响）；还原后全过。
+- 原有经真 pi-ai 线路发请求的用例（`deepseek-stream.test.ts`、`runtime-thinking.test.ts`）在自己的选项里显式给 `fetch` 与 `maxRetries: 0`，覆盖包装给的值，行为不变。
