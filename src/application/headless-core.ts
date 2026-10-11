@@ -312,6 +312,10 @@ export async function runHeadless(options: HeadlessRunOptions): Promise<Headless
       ...(options.wallClockMs !== undefined ? { wallClockMs: options.wallClockMs } : {}),
       ...(options.maxTokens !== undefined ? { maxTokens: options.maxTokens } : {}),
     },
+    // 决策 418：设了墙钟预算时模型可见（与墙钟定时器同一起点 startedAt）
+    ...(options.wallClockMs !== undefined
+      ? { wallClock: { totalMs: options.wallClockMs, startedAt, now: Date.now } }
+      : {}),
     ...(options.branchHeader !== undefined ? { branchHeader: options.branchHeader } : {}),
     ...(options.initialMessages !== undefined ? { initialMessages: options.initialMessages } : {}),
     ...(options.statusSent !== undefined ? { statusSent: options.statusSent } : {}),

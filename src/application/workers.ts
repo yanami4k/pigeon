@@ -78,6 +78,7 @@ import { bindSpawnWorkers } from "./spawn-worker-host.ts";
 import { SpawnWorkerSlot, spawnWorkerSettingsOf } from "./spawn-worker-tool.ts";
 import { type StatusHashes, statusFromEntries } from "./status-block.ts";
 import type { StatusFacts } from "./status-sources.ts";
+import type { WallClockBudget } from "./wall-clock-status.ts";
 import type { WarnSink } from "./warnings.ts";
 import type { WebToolsConfig } from "./web-tools.ts";
 import { drainWorkers } from "./worker-notices.ts";
@@ -336,6 +337,8 @@ interface RuntimeSurface {
   webTools?: WebToolsConfig;
   // M8（决策 087）：本次尝试的预算——worker 取派出记录的上限，headless 取运行参数；冻结进注入快照
   budget?: AttemptBudget;
+  // 决策 418：墙钟预算对模型可见（只有 headless 设了墙钟预算时给）
+  wallClock?: WallClockBudget;
   // M7（决策 077）：分支会话头与分叉续跑的初始消息
   branchHeader?: BranchHeaderInput;
   initialMessages?: AgentMessage[];
@@ -625,6 +628,8 @@ export interface DetachedRuntimeRequest {
   webTools?: WebToolsConfig;
   // M8（决策 087）：本次尝试的预算冻结进注入快照
   budget?: AttemptBudget;
+  // 决策 418：墙钟预算对模型可见
+  wallClock?: WallClockBudget;
   branchHeader?: BranchHeaderInput;
   initialMessages?: AgentMessage[];
   onBundle?: (bundle: RuntimeBundle) => void;
@@ -696,6 +701,7 @@ function openRuntimeSurface(surface: RuntimeSurface): WorkerRuntimeHandle {
     ...(surface.ownWorkspaceWrites === true ? { ownWorkspaceWrites: true } : {}),
     ...(surface.webTools !== undefined ? { webTools: surface.webTools } : {}),
     ...(surface.budget !== undefined ? { budget: surface.budget } : {}),
+    ...(surface.wallClock !== undefined ? { wallClock: surface.wallClock } : {}),
     ...(surface.initialMessages !== undefined ? { initialMessages: surface.initialMessages } : {}),
     ...(surface.storeWarn !== undefined ? { storeWarn: surface.storeWarn } : {}),
     ...(surface.settings !== undefined ? { settings: surface.settings } : {}),

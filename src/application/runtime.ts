@@ -246,6 +246,7 @@ import {
   toolEnvironmentProbe,
 } from "./tool-environment.ts";
 import { toolExecutionModeOf } from "./tool-execution-modes.ts";
+import { budgetRemainingMs, budgetStatus, type WallClockBudget } from "./wall-clock-status.ts";
 import { stderrWarn, type WarnSink } from "./warnings.ts";
 import { createModelDistiller, type WebToolsConfig } from "./web-tools.ts";
 
@@ -313,6 +314,9 @@ export interface RuntimeDeps {
   temperature?: number;
   // M8（决策 087）：本次尝试的预算——冻结进注入快照并随 Run 开始条目落盘
   budget?: AttemptBudget;
+  // 决策 418：墙钟预算对模型可见（开工状态块的时间预算一节、run_command 的超时按剩余时间夹取）。只有设了墙钟预算的
+  // 无人值守运行给（pigeon run --wall-clock）；worker 自己的时限与交互入口不给
+  wallClock?: WallClockBudget;
   // M7（决策 077）：分叉续跑的 Agent 初始消息
   initialMessages?: AgentMessage[];
   // 决策 177：worker 与分支会话的来历，新建会话文件时写进文件头
@@ -1111,16 +1115,25 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
       sessionStore.append(statusEntry(hashes));
     }
   };
+  // 决策 418：设了墙钟预算时补上时间预算等节（每次现算）与比对键，再交给状态变化通道
+  const wallClock = deps.wallClock;
+  const nextStatus = (state: StatusState, compacted: boolean): string | undefined => {
+    if (wallClock === undefined) {
+      return statusTracker.next(state, compacted);
+    }
+    const budget = budgetStatus(wallClock, { runCommand: offered(RUN_COMMAND_TOOL) });
+    return statusTracker.next(new Map([...state, ...budget.sections]), compacted, budget.keys);
+  };
   let statusTouched = false;
   const statusChannel: StatusChannel = {
     beforeRun: async ({ compacted }) => {
       statusTouched = false;
-      return statusTracker.next(await currentStatus(true), compacted);
+      return nextStatus(await currentStatus(true), compacted);
     },
     betweenTurns: async ({ compacted }) => {
       const refresh = statusTouched || skillTreeFingerprint(localSkills.roots) !== skillPrint;
       statusTouched = false;
-      return statusTracker.next(await currentStatus(refresh), compacted);
+      return nextStatus(await currentStatus(refresh), compacted);
     },
     delivered: () => recordStatus(statusTracker.delivered()),
   };
@@ -1269,6 +1282,10 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
         timeoutMs: commandTimeouts.defaultSeconds * 1000,
         maxTimeoutMs: commandTimeouts.maxSeconds * 1000,
         jobs,
+        // 决策 418：设了墙钟预算时前台命令的超时按剩余时间夹取
+        ...(wallClock !== undefined
+          ? { budgetRemainingMs: () => budgetRemainingMs(wallClock) }
+          : {}),
       }),
       ...(jobs.available ? [createJobOutputTool(jobs), createJobKillTool(jobs)] : []),
       ...createSearchTools(workspaceHost, {

@@ -49,6 +49,8 @@ export const DEFAULT_RUN_COMMAND_TIMEOUT_MS = 120_000;
 export const KEEP_AFTER_SESSION_PARAM = "keep_after_session";
 // 决策 365：timeout_seconds 参数的上限（设置可改）
 export const DEFAULT_RUN_COMMAND_MAX_TIMEOUT_MS = 600_000;
+// 决策 418：设了墙钟预算时，前台命令的超时不超过剩余时间减去这段余量（留给模型收到结果后再答一轮），至少 1 秒
+export const COMMAND_BUDGET_MARGIN_MS = 30_000;
 export const DEFAULT_RUN_COMMAND_OUTPUT_BYTES = 32 * 1024;
 // 决策 358：命令串长度。参数 schema 的字符上限只防误传巨大参数；能否交给进程按执行端与平台另判（commandTooLong）
 export const RUN_COMMAND_MAX_CHARS = 65_536;
@@ -193,6 +195,8 @@ export interface ExecEvidence {
   backgroundJobs?: Array<{ id: string; command: string }>;
   // 决策 411：timeout_seconds 超过上限，按上限执行（秒）
   timeoutClamped?: { requestedSeconds: number; appliedSeconds: number };
+  // 决策 418：超时超过本次运行的剩余时间，按剩余时间缩短（fromMs 为原本要用的超时）；与上一项只出其一
+  timeoutShortened?: { fromMs: number; appliedSeconds: number };
   // 决策 365：以后台作业启动（其余字段为启动时的占位：没有退出码与输出）；决策 409：keep 为会话结束后保留
   background?: { jobId: string; output: string; keep?: true };
 }
@@ -247,6 +251,8 @@ export interface RunCommandOptions {
   pathOnly?: boolean;
   // 决策 365：本会话的后台作业（不给即不能用 background）
   jobs?: SessionJobs;
+  // 决策 418：本次运行剩余的墙钟时间（毫秒）；设了墙钟预算的运行才给。前台命令的超时按它夹取，后台作业不受影响
+  budgetRemainingMs?: () => number;
 }
 
 // 审批状态（170 ④）：yolo 为命令自动批准；prompt 为有人工审批通道；none 为没有审批通道（无人值守又未放权），
@@ -663,10 +669,11 @@ export function createRunCommandTool(
       const inspection = inspect(parsed.command);
       const { command, alias } = inspection;
       const authorized = shellAuthorized.delete(toolCallId);
-      const { timeoutMs, clamped } = commandTimeout(
+      const { timeoutMs, clamped, shortened } = commandTimeout(
         parsed.timeout_seconds,
         defaultTimeoutMs,
-        maxTimeoutMs
+        maxTimeoutMs,
+        options.budgetRemainingMs?.()
       );
       if (!permitted(inspection.input, command)) {
         const names = options.allowlist?.join("、") ?? "";
@@ -794,6 +801,7 @@ export function createRunCommandTool(
           : {}),
         ...(backgroundJobs.length > 0 ? { backgroundJobs } : {}),
         ...(clamped !== undefined ? { timeoutClamped: clamped } : {}),
+        ...(shortened !== undefined ? { timeoutShortened: shortened } : {}),
       };
       if (run.spawnError !== undefined) {
         if (run.spawnError.code === "ENOENT") {
@@ -831,20 +839,40 @@ export function durationText(ms: number): string {
 }
 
 // 本次命令的超时：给了 timeout_seconds 用它，否则用缺省。决策 411：超过上限按上限执行，交回夹取的情形（结果里注明，
-// 免得模型以为设上了）
+// 免得模型以为设上了）。决策 418：给了剩余时间时，超时再不超过剩余时间减去余量（整秒，至少 1 秒）；两者叠加取更小者，
+// 只交回起作用的那一种
 function commandTimeout(
   seconds: number | undefined,
   defaultMs: number,
-  maxMs: number
-): { timeoutMs: number; clamped?: NonNullable<ExecEvidence["timeoutClamped"]> } {
-  if (seconds === undefined) return { timeoutMs: defaultMs };
-  if (seconds * 1000 > maxMs) {
-    return {
-      timeoutMs: maxMs,
-      clamped: { requestedSeconds: seconds, appliedSeconds: Math.floor(maxMs / 1000) },
-    };
-  }
-  return { timeoutMs: seconds * 1000 };
+  maxMs: number,
+  remainingMs: number | undefined
+): {
+  timeoutMs: number;
+  clamped?: NonNullable<ExecEvidence["timeoutClamped"]>;
+  shortened?: NonNullable<ExecEvidence["timeoutShortened"]>;
+} {
+  const base =
+    seconds === undefined
+      ? { timeoutMs: defaultMs }
+      : seconds * 1000 > maxMs
+        ? {
+            timeoutMs: maxMs,
+            clamped: { requestedSeconds: seconds, appliedSeconds: Math.floor(maxMs / 1000) },
+          }
+        : { timeoutMs: seconds * 1000 };
+  if (remainingMs === undefined) return base;
+  const budgetMs = Math.max(
+    1000,
+    Math.floor((remainingMs - COMMAND_BUDGET_MARGIN_MS) / 1000) * 1000
+  );
+  if (base.timeoutMs <= budgetMs) return base;
+  return {
+    timeoutMs: budgetMs,
+    shortened: {
+      fromMs: seconds !== undefined ? seconds * 1000 : defaultMs,
+      appliedSeconds: budgetMs / 1000,
+    },
+  };
 }
 
 // 决策 411：夹取的说明一句
@@ -852,6 +880,16 @@ function timeoutClampedText(clamped: NonNullable<ExecEvidence["timeoutClamped"]>
   return (
     `timeout_seconds 给的是 ${clamped.requestedSeconds}，超过上限，已夹到上限 ${clamped.appliedSeconds} 秒执行；` +
     "更久的命令请用 background 在后台运行"
+  );
+}
+
+// 决策 418：按剩余时间缩短的说明一句
+export function timeoutShortenedText(
+  shortened: NonNullable<ExecEvidence["timeoutShortened"]>
+): string {
+  return (
+    `本次运行的剩余时间不够，超时已按剩余时间缩短为 ${shortened.appliedSeconds} 秒执行（原为 ${durationText(shortened.fromMs)}，` +
+    `剩余时间里留出 ${COMMAND_BUDGET_MARGIN_MS / 1000} 秒收尾）`
   );
 }
 
@@ -950,6 +988,9 @@ function resultText(evidence: ExecEvidence, headBytes: number): string {
     `$ ${evidence.command}${evidence.alias !== undefined ? `（短名 ${evidence.alias}）` : ""}${route}`,
     `退出码：${evidence.exitCode ?? "无"}${evidence.signal !== undefined ? `（信号 ${evidence.signal}）` : ""}`,
     ...(evidence.timeoutClamped !== undefined ? [timeoutClampedText(evidence.timeoutClamped)] : []),
+    ...(evidence.timeoutShortened !== undefined
+      ? [timeoutShortenedText(evidence.timeoutShortened)]
+      : []),
     ...(evidence.memoryLimitExceeded !== undefined
       ? [memoryLimitText(evidence.memoryLimitExceeded)]
       : []),
