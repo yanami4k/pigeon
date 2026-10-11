@@ -72,3 +72,22 @@
 ## 七、回报
 
 分支 worktree-agent-a59c15b9b3e8a7d1b，代码 6c2c4db，审计另提交。改法：引号外换行（前后有内容）判经 shell，引号内换行留在参数里，首尾空白换行不算。核对：Linux、macOS、容器经 sh -c 逐行执行；Windows 经 cmd.exe 实测只执行第一行、不报错，待裁决（拒绝、改写成 &&、临时 .cmd、换 shell）。测试增 44 行，去掉换行判定两条精确变红；本机测试、tsc、biome 通过。服务器补跑 sh 逐行一条与 verify:full。未测：Windows 宿主经 docker 传多行。
+
+## 八、补充：本机 Windows 拒绝含换行的 cmd.exe 命令（决策 415）
+
+| 提交 | 内容 |
+|---|---|
+| fc2d617 | 415：本机 Windows 上要经 cmd.exe 运行、去掉首尾空白后仍含换行的命令判为无法执行；Windows 的工具说明写明不支持多行命令与改法；配置文档随之更新；测试 |
+
+- 判定：只读检查 `inspect` 在原有判定（改名为 `classify`）之后加一步：执行端平台为 win32、原判定为经 shell（即经 cmd.exe）、命令串去掉首尾空白后含 `\n` 时，改判为无法执行（`mode: "invalid"`，不需 shell），错误为"命令含换行：在 Windows 上它要经 cmd.exe 运行，而 cmd.exe 只会执行第一行，已拒绝，未执行任何命令。多条命令用 && 连成一行，或先用 write_file 写成脚本文件再运行该脚本。"
+- 报错路径：与"引号未闭合""命令为空"同一条——`execute` 在拉起进程之前抛 `RunCommandError`（域错误，作为工具结果交给模型），不启动任何进程；预览（审批面板）显示"无法执行：……"。治理层对无法执行的命令照旧处理：有人工审批时仍会请示，批准后工具报错，与其他无法执行的命令相同。
+- 判定范围：看的是"要经 cmd.exe"与"含换行"。引号外的换行本就使命令经 shell，全部在内；此外，因 shell 符号或 `.cmd` / `.bat` 带字符集外参数而经 cmd.exe 的命令，其引号内的换行同样被 cmd.exe 截断（第三节的核对），也一并拒绝——这一点比 415 的字面"引号外含换行"宽。不经 shell 直接执行的命令里引号内的换行照常是参数；cmd 启动器路径的参数字符集不含换行，不涉及。首尾的空白换行不算：模型给的命令串在检查前已修剪，短名展开的命令串按去掉首尾空白后判断。
+- 说明文字：win32 的工具说明在 shell 一句之后加"不支持多行命令（cmd.exe 只执行第一行，含换行的命令会被拒绝）：多条命令用 && 连成一行，或先用 write_file 写成脚本文件再运行该脚本。"；系统提示与开工状态块的一句不变。`docs/configuration.md` 的"run_command 何时经 shell"一段改写 Windows 部分：要经 cmd.exe 的命令含换行即报错、不执行，并写明改法；不经 shell 的命令里引号内的换行照常是参数；宿主是 Windows 时容器执行端同样经 `/bin/sh -c`。
+- Windows 宿主上的容器执行端：`createRunCommandTool` 按执行端的 `platform` 判定，容器执行端的 `platform` 恒为 `"linux"`（`execution/container-host.ts`），宿主平台不参与这一判定，故不受此限，多行命令在容器里经 `/bin/sh -c` 逐行执行；命令串长度照旧另按宿主平台判（`commandTooLong` 的 `localPlatform`）。命令串作为 docker 客户端的一个参数经 Windows 命令行传递：本机以 Node 按相同方式（不原样拼接，由 Node 加引号）起子进程核对，含 LF、CRLF、空格与双引号的参数往返后逐字一致；docker 客户端本身未运行。第三节末条"未实测"的说法以此为准。
+- 测试：`run-command-shell.test.ts` 的 413 一条改为按平台注入执行端平台——`linux` 下多行命令为 `shell`；`win32` 下多行命令为 `invalid`，经 `&&` 且引号内含换行的为 `invalid`，直接执行且引号内含换行的为 `direct`；两种平台下首尾多出换行的单行命令都为 `direct`；`win32` 下即使已授权 shell，执行也报错（错误含 cmd.exe 与 &&），第一行本应建的文件不存在；有 `/bin/sh` 的平台再真执行两行命令，输出为两行之和。`run-command-text.test.ts` 的 Windows 一条加核对工具说明含"不支持多行命令"与 write_file。测试增 26 行、删 11 行；产品代码增 35 行、删 3 行。
+- 变异：把 Windows 判定的平台条件改为恒不成立（等于去掉判定），跑上述三个测试文件：只有该一条变红，其余 19 项照过；还原后文件的 sha256 与改前一致。
+- 本机验证：同第六节的五个测试文件，29 项中 26 项通过、3 项跳过（同前）；`npm run check`（tsc）与对改动文件的 `biome check` 通过。未跑 `verify:full` 与真容器验收。
+
+## 九、回报（补充）
+
+分支 worktree-agent-a59c15b9b3e8a7d1b，代码 fc2d617，审计另提交。改法：本机 Windows 要经 cmd.exe 的命令去首尾空白后含换行即判无法执行，走现有错误路径、不起进程；Windows 说明写明不支持多行与改法。范围比 415 字面宽：经 cmd.exe 的命令里引号内的换行也拒（cmd 同样截断）。容器执行端平台恒为 linux，Windows 宿主不受限；参数往返本机核对一致。变异去掉判定一条精确变红；本机测试、tsc、biome 通过。服务器补跑 sh 逐行一条与 verify:full。
