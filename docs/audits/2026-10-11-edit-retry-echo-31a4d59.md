@@ -51,4 +51,39 @@ pi-ai 0.84.4 的现状（只读核对，未改）：
 - `src/application/request-retry-wiring.test.ts`：装配层冒烟——空设置时取值为 4；设置 `modelRequest.maxRetries` 为 2、HTTP 层（替换全局 fetch，用完还原）依次回 429、503、429：共发 3 次，Run 以出错收尾，会话视图里这个 Run 有两条 `request-retry`（429、503）。
 - 测试用的假 HTTP 层 `scriptedFetch`、`failedReply` 放在 `src/pi-runtime/fixtures.ts`。
 - 变异：去掉包装里传的 `maxRetries`，上述两个文件的三条重试用例变红（只有线路判断那条不受影响）；还原后全过。
-- 原有经真 pi-ai 线路发请求的用例（`deepseek-stream.test.ts`、`runtime-thinking.test.ts`）在自己的选项里显式给 `fetch` 与 `maxRetries: 0`，覆盖包装给的值，行为不变。
+- 原有经真 pi-ai 线路发请求的用例：`runtime-thinking.test.ts` 经装配层发请求，它的接入在选项里显式给 `fetch` 与 `maxRetries: 0`，覆盖包装给的值；`deepseek-stream.test.ts` 不经装配层。两者行为不变。
+
+## 三、命令结果不整段回显命令（决策 421，e79c492）
+
+前提核实（上下文裁剪与压缩不会清掉早先工具调用的参数）：
+
+- 上下文裁剪（`src/pi-runtime/context-prune.ts`）：`applyPrunes` 只把命中的 `toolResult` 消息的正文换成占位，其余消息（含带工具调用参数的助手消息）原样返回；命令结果的占位取调用参数里的 `command`（压平、至多 160 字）与 details，文件变化一段按结果正文里最后一个"文件变化："截取，与首行回显无关。决策 417 的拒收占位走同一条路。前提成立。
+- 压缩：pi-agent-core 0.84.4 的 `findValidCutPoints` 不在工具结果处切，保留段里的工具结果都连着它的调用；摘要请求的序列化（`serializeConversation`）把工具调用连参数一起写成 `[Assistant tool calls]: 名(键=值)`，摘要模型看得到命令。被摘要掉的调用与结果一起移出上下文。前提成立。
+- 例外：PreToolUse 钩子改写了参数时（`adapter.ts` 的 `#updatedArgs`），执行的是改写后的命令，历史里的调用参数仍是模型发出的原样；这种情形下长命令在结果里只见改写后命令的开头。
+
+改法：
+
+- `src/tools/command-echo.ts`：`commandEcho` 为结果与报错里的回显——去掉末尾空白后只有一行、且不超过 200 字的原样返回；否则给首行（超过 200 字截断加"…"），后加"（共 N 行，其余已省略，完整命令见本次调用）"，单行时写"共 M 字"。`commandLabel` 为后台作业的简短标识——首行至多 80 字，有省略加"…"，多行再加"（共 N 行）"。
+- `src/tools/run-command.ts`：结果首行 `$ …` 改用回显；用了短名时照旧给出展开后的完整命令与"（短名 x）"；"（经 shell）""（经 cmd.exe 启动器）"照旧。后台作业启动的那句、"命令被中止"、"未经人确认 shell，拒绝执行"、"无法执行"的回显同样改用回显；内存超限时列出的期间在跑的作业改用简短标识。超时报错的首句"命令超时（…）已终止整个进程组：命令"未改，长命令超时时这一句仍有整条命令（其后的结果首行是回显）。
+- 后台作业：`job_output`、`job_kill` 交回的作业段与作业列表（`src/tools/job-tools.ts`）、并发上限拒绝启动时列出的在跑作业（`src/tools/background-jobs.ts`）、作业结束通知、收尾时仍在跑的提示与上一进程丢失作业的提示（`src/application/background-jobs.ts`）改用作业号加简短标识。给人看的两行（沙箱交回时的作业提示、上次异常退出的残留作业告警）未改。
+- 不受影响的地方：审批面板取的是调用参数与预览（预览里是 `inspection.command` 全文）；执行证据 `details.command` 是全文，随工具结果写进会话记录；会话记录里助手消息的调用参数不变；`pigeon trace` 与 `pigeon replay` 的"提议参数"取调用参数（`summarizeArgs`），不取结果文本。显示结果正文的地方（trace、replay 带正文时，终端界面展开工具输出）随之只见回显。
+- 会话检索按工具结果的正文建索引，调用参数只取 100 字的来历摘要；长命令首行之后的文字不再出现在命令结果的可搜文本里。
+
+测试（`src/tools/run-command-echo.test.ts`）：
+
+- 31 行的命令（换行在引号里，不经 shell 直接执行，各平台都能跑）：结果首行为"$ 首行（共 31 行，其余已省略，完整命令见本次调用）"，结果里没有命令的最后一行；`details.command` 与预览是全文。超过 200 字的单行命令：首行为前 200 字加"…（共 M 字，…）"。短命令：首行为"$ 命令"原样。
+- 短名展开为同一条长命令：结果给出展开后的全文与"（短名 gen）"。
+- `commandLabel` 的单行、多行与超长三种，`commandEcho` 对末尾换行的处理。
+- 变异：把回显恢复为整段命令，长命令那条用例变红，其余两条不受影响；还原后全过。
+- 原有的 run_command、后台作业与上下文裁剪用例照常通过（短命令的回显与改前相同）。
+
+## 本机验证
+
+- 只跑改动涉及的测试文件（`--maxWorkers=2`）：edit 相关 7 个文件、重试相关与受装配改动影响的 16 个文件、run_command 与后台作业相关 10 个文件，全部通过；Windows 上按平台跳过的用例（POSIX 专用）未跑。
+- `npm run check`：只有缺少 `@silvia-odwyer/photon-node` 的 3 处报错（`src/tools/image-resize.ts` 两处、`src/tools/read-file-images.test.ts` 一处），本机共用的依赖目录里没有该包，与本次改动无关；没有其他类型错误。
+- biome（改动文件）与 `npm run deps` 通过。
+- 未跑 `npm run verify:full`，需在验证服务器上补跑；读图缩放相关用例依赖上述包，也在服务器上跑。
+
+## 回报
+
+分支 worktree-agent-aea010794beedd65b，头为本审计提交。419：replace 加 edits，逐项校验查交叠，全过才写。420：请求传 maxRetries（缺省 4，可设），包装 fetch 记重试，限可接管线路。421：前提成立，只回显首行至多 200 字，短名照旧。变异均变红；本机测试过，tsc 仅缺 photon-node；待服务器 verify:full。存疑：Google 线路重试不记；超时首句含整条命令；钩子改写命令只见开头。
