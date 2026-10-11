@@ -469,7 +469,7 @@ const imagesOf = (messages: readonly AgentMessage[]) =>
       : []
   );
 
-test("图片超过预算时不论时机从最旧的起清掉带图的结果，清到预算的一半以下，最新一张不清；不超过不清", () => {
+test("图片超过预算时不论时机从最旧的起清掉带图的结果，清到预算的一半以下，最新一张与最近一轮的不清；不超过不清", () => {
   const messages = [
     user("任务"),
     ...Array.from({ length: 6 }, (_, i) => imageTurn(`p${i}.png`, 200, `img${i}`)).flat(),
