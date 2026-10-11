@@ -485,9 +485,18 @@ test("图片超过预算时不论时机从最旧的起清掉带图的结果，�
   );
   assert.match(record?.items[0]?.placeholder ?? "", /p0\.png.*10×10/);
   assert.deepEqual(imagesOf(view), ["img4", "img5"]);
-  // 最新一张单独就超过预算的一半也留着
-  const tight = new ContextPruner(settings({ maxImageBytes: 100 })).beforeRequest(messages);
+  // 最新一张（之后又有一轮不带图的）单独就超过预算的一半也留着
+  const later = [...messages, ...turn({ name: "grep", text: "x", args: { pattern: "x" } }, "g")];
+  const tight = new ContextPruner(settings({ maxImageBytes: 100 })).beforeRequest(later);
   assert.deepEqual(imagesOf(tight.messages), ["img5"]);
+  // 最近一轮同时读的几张（模型还没看过）不清
+  type Pair = [AgentMessage & { content: object[] }, AgentMessage];
+  const [callA, resultA] = imageTurn("a.png", 600, "a") as Pair;
+  const [callB, resultB] = imageTurn("b.png", 600, "b") as Pair;
+  const both = { ...callA, content: [...callA.content, ...callB.content.slice(2)] };
+  const batch = [user("任务"), both as AgentMessage, resultA, resultB];
+  const fresh = new ContextPruner(settings({ maxImageBytes: 1_000 })).beforeRequest(batch);
+  assert.deepEqual(imagesOf(fresh.messages), ["a", "b"]);
 });
 
 test("同一张图片再读一次，前一次读取即成过时读取（图片按整个文件算）", () => {

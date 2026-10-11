@@ -15,8 +15,8 @@
 // 打转检测看的是上游 turn_end 事件里的原文，不受裁剪影响。
 // 图片（决策 414）：带图的工具结果同样是候选（读图按整个文件算，之后再读同一文件即过时；较大的旧结果按估算的 token 算）。
 // 另设图片预算：没裁的工具结果里的图片（base64）合计超过 maxImageBytes 时，不论时机、不受保护轮与价格比约束，从最旧的起
-// 清掉带图的结果，直到合计不超过预算的一半（最新一个带图的结果不清）——历史里的图每次请求都重发，超过服务方的请求体上限
-// 请求就发不出去。
+// 清掉带图的结果，直到合计不超过预算的一半（最新一个带图的结果与最近一轮的结果不清，模型还没看过）——历史里的图每次请求
+// 都重发，超过服务方的请求体上限请求就发不出去。
 import { createHash } from "node:crypto";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { estimateTokens } from "@earendil-works/pi-agent-core";
@@ -413,8 +413,8 @@ function callsOf(messages: readonly AgentMessage[]): {
   return { calls, turns };
 }
 
-// 决策 414：图片预算的候选——没裁、这次也没选的工具结果里的图片合计超过预算时，从最旧的起直到合计不超过预算的一半，
-// 最新一个带图的结果不算
+// 决策 414：图片预算的候选——没裁、这次也没选的工具结果里的图片合计超过预算时，从最旧的起直到合计不超过预算的一半；
+// 最新一个带图的结果与最近一轮（模型还没看过）的结果不算
 function imageCandidates(
   messages: readonly AgentMessage[],
   sizes: readonly number[],
@@ -434,10 +434,11 @@ function imageCandidates(
     live += bytes;
   });
   if (live <= settings.maxImageBytes) return [];
-  const { calls } = callsOf(messages);
+  const { calls, turns } = callsOf(messages);
   const out: Candidate[] = [];
   for (const holder of holders.slice(0, -1)) {
     if (live <= settings.maxImageBytes / 2) break;
+    if (calls.get(holder.result.toolCallId)?.turn === turns - 1) continue;
     out.push({
       index: holder.index,
       toolCallId: holder.result.toolCallId,
