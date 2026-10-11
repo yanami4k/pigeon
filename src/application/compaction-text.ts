@@ -11,6 +11,7 @@ import { dedupedWarner, failureDetail, type WarnSink } from "./warnings.ts";
 const TRIGGER_LABELS: Readonly<Record<CompactionTrigger, string>> = {
   turn: "自动，轮间",
   "run-start": "自动，Run 开始前",
+  overflow: "自动，上下文超长出错后",
   manual: "手动",
 };
 
@@ -36,8 +37,11 @@ export function compactionNoticeText(notice: CompactionNotice): string {
   switch (notice.kind) {
     case "compacted":
       return `上下文已压缩（${TRIGGER_LABELS[notice.trigger]}）：约 ${notice.tokensBefore} → ${notice.tokensAfter} token`;
-    case "incomplete":
-      return `上下文压缩未完成（${TRIGGER_LABELS[notice.trigger]}）：${reasonOf(notice.outcome)}；本轮按原上下文继续`;
+    case "incomplete": {
+      // 决策 422：超长出错后的压缩没压成即不重试
+      const after = notice.trigger === "overflow" ? "不再重试，按原错误收尾" : "本轮按原上下文继续";
+      return `上下文压缩未完成（${TRIGGER_LABELS[notice.trigger]}）：${reasonOf(notice.outcome)}；${after}`;
+    }
     case "hook-failed":
       return `压缩前回调失败：${failureDetail(notice.error)}；压缩照常进行`;
   }

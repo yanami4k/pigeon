@@ -100,7 +100,7 @@ export interface WorkerRuntimeDeps {
   editMode?: EditMode;
   // 决策 063、347：单轮输出上限（缺省不设，跟模型）
   maxOutputTokens?: number;
-  // 决策 188、218：上下文压缩的配置——worker 按主会话同一配置跑（缺省为产品缺省）
+  // 决策 188、218：上下文压缩的配置——worker 按主会话显式给的配置跑（窗口没给时按 worker 所用模型的信息取，决策 422）
   compaction?: CompactionConfigInput;
   // 决策 367：撞上限续跑与流式重复检测——worker 按主会话实际生效的设定跑（缺省取设置快照）
   truncationContinuation?: TruncationContinuationSettings;
@@ -235,8 +235,9 @@ export function sessionWorkerRuntimeFactory(
   // 决策 063：worker 继承父运行面冻结快照里的单轮输出上限（显式传入时以传入值为准）
   const maxOutputTokens =
     deps.maxOutputTokens ?? deps.bundle.adapter.snapshot().model.maxOutputTokens;
-  // 决策 188、218：worker 继承父运行面的压缩配置（显式传入时以传入值为准）；父运行面没给即产品缺省
-  const compaction = deps.compaction ?? deps.bundle.adapter.compactionConfig();
+  // 决策 188、218：worker 继承父运行面显式给的压缩配置（显式传入时以传入值为准）；决策 422：窗口没显式给时按 worker
+  // 自己所用模型的信息取（角色可另配模型接入），不沿用父运行面按它的模型取到的窗口
+  const compaction = deps.compaction ?? deps.bundle.compaction;
   // 决策 191、217：worker 继承父运行面的推送记忆（开着才带）
   const learnedMemory = deps.learnedMemory ?? deps.bundle.learnedMemory;
   // 决策 367：worker 继承父运行面实际生效的续跑与重复检测设定（父运行面的设定可能是显式给出的，不只来自设置快照）
@@ -317,7 +318,7 @@ interface RuntimeSurface {
   taskDirective?: string;
   // 决策 193：能否检索历史会话（缺省开着）；同上，只有无父会话的运行面会给
   sessionSearch?: boolean;
-  // 决策 188、218：上下文压缩的配置（缺省为产品缺省）；worker 取主会话的配置
+  // 决策 188、218：上下文压缩的配置（没给的项取缺省，窗口取模型信息）；worker 取主会话显式给的配置
   compaction?: CompactionConfigInput;
   // 压缩前回调；只有无父会话的运行面会给
   beforeCompaction?: BeforeCompaction;

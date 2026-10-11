@@ -1,5 +1,5 @@
-// worker 继承父运行面的上下文压缩配置（决策 188、218）：压缩对所有 Run 生效，worker 按主会话同一配置跑，
-// worker 会话的 Run 开始条目记下同一份；主会话没给配置时即产品缺省。
+// worker 继承父运行面显式给的上下文压缩配置（决策 188、218）：压缩对所有 Run 生效，worker 会话的 Run 开始条目记下；
+// 窗口没显式给时按 worker 所用模型的信息取（决策 422）。
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
@@ -10,6 +10,7 @@ import { locateSessionFile } from "../persistence/session-reader.ts";
 import { loadStoreSessionFile } from "../persistence/session-view.ts";
 import type { CompactionConfigInput } from "../pi-runtime/compaction.ts";
 import { createFakeStreamFn } from "../pi-runtime/fixtures.ts";
+import { registerModelAccess } from "../pi-runtime/model-access.ts";
 import { newSessionId } from "../state/ids.ts";
 import { type RunStartData, SessionEntryType } from "../state/session-entries.ts";
 import { buildRuntime, disposeRuntime } from "./runtime.ts";
@@ -30,7 +31,9 @@ async function workerCompaction(parentConfig: CompactionConfigInput | undefined)
     writeFileSync(join(repo, "a.ts"), "alpha\n");
     git(repo, ["add", "a.ts"]);
     git(repo, ["commit", "-q", "-m", "init"]);
-    const streamFn = createFakeStreamFn({ replies: [{ text: "看过了" }] });
+    const streamFn = registerModelAccess(createFakeStreamFn({ replies: [{ text: "看过了" }] }), {
+      declared: { contextWindow: 500_000 },
+    });
     const parent = buildRuntime({
       streamFn,
       workspaceRoot: repo,
@@ -72,9 +75,10 @@ async function workerCompaction(parentConfig: CompactionConfigInput | undefined)
   }
 }
 
-test("worker 继承父运行面的压缩配置：worker 会话的 Run 开始条目记下与主会话同一份配置", async () => {
+test("worker 继承父运行面显式给的压缩配置，窗口取 worker 所用模型的信息：Run 开始条目记下窗口与来源", async () => {
   assert.deepEqual(await workerCompaction({ thresholdTokens: 30_000, keepRecentTokens: 4000 }), {
-    contextWindow: 1_000_000,
+    contextWindow: 500_000,
+    contextWindowSource: "declared",
     reserveTokens: 16_384,
     keepRecentTokens: 4000,
     thresholdTokens: 30_000,

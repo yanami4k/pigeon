@@ -41,6 +41,11 @@
 //    新加的带图工具结果时，暂扣收尾（同空回复重试），经裁剪器把这些结果换成拒收占位——先写会话记录再生效，续跑、分叉与轮间
 //    压缩后的还原照记录重放，图不会回来——再从 Agent 的消息去掉那条出错消息（会话文件照实留着）接着运行一次；一个 Run 只重试
 //    一次，仍失败照原错误收尾。思考块等其余消息不动。没有裁剪器时不重试。
+// 17. 上下文超长（决策 422）：模型请求出错、且上游的识别函数（pi-ai 的 isContextOverflow，按报错文案，先排除限额类）判为上下文
+//    超长时，暂扣收尾（同空回复重试），走一次压缩（同自动压缩：压缩前回调、压缩条目写进会话记录、压缩提示）；压成了即以压缩后的
+//    上下文接着运行一次（那条出错消息不再发给模型，会话文件照实留着），没压成不重试、照原错误收尾，没压成的情形记进 Run 收尾
+//    条目。同一次超长只重试一次：重试的那次请求仍超长即照原错误收尾；重试之后来了正常回复，之后再超长算新的一次。400 且请求里有
+//    新加的图时先按 16 处理。没有配置压缩时不重试。
 import {
   type AfterToolCallContext,
   type AfterToolCallResult,
@@ -81,6 +86,7 @@ import {
   type ToolSettledPayload,
 } from "../state/runtime-events.ts";
 import {
+  type RunEndData,
   type RunEnding,
   type RunStopCause,
   SESSION_ENTRY_VERSION,
@@ -91,7 +97,6 @@ import { isStatusMessage, STATUS_MARKER, withoutStatusMarker } from "../state/st
 import type { ToolErrorKind, ToolExecution } from "../state/tool-execution.ts";
 import { classifyToolError } from "../tools/error-kind.ts";
 import {
-  type CompactionConfig,
   type CompactionOutcome,
   type CompactionStore,
   type CompactionTrigger,
@@ -101,6 +106,7 @@ import {
 import type { ContextPruner, PruneRecord } from "./context-prune.ts";
 import { isSyntheticFailureMessage, normalizePiEvent } from "./events.ts";
 import type { ToolGovernance, ToolGovernanceFactory, ToolHookPort } from "./governance.ts";
+import { isContextOverflowReply } from "./overflow.ts";
 import { guardRepetition, type RepetitionHit } from "./repetition-guard.ts";
 import type { SessionStoreSink } from "./session-store.ts";
 import { type InjectionSnapshot, InjectionSnapshotSchema } from "./snapshot.ts";
@@ -326,6 +332,9 @@ export class PiRuntimeAdapter {
   #emptyReplyRetried = false;
   // 拒收图片重试（决策 417）：本 Run 是否已重试过
   #rejectedImagesRetried = false;
+  // 超长后压缩重试（决策 422）：当前这次超长已重试过（重试之后来了正常回复即清零）；压缩没压成时的结果（记进 Run 收尾条目）
+  #overflowRetried = false;
+  #overflowCompactionFailure: Exclude<CompactionOutcome, { kind: "compacted" }> | undefined;
   #deferredRunEnd: AgentEvent | undefined;
   // 撞上限续跑（决策 367）：配置；本 Run 已续跑次数与连续次数（一条回复没触发续跑即清零）；
   // 被重复检测掐断的回复将占的条目序号（续跑记录据此区分截断的来由）
@@ -534,6 +543,8 @@ export class PiRuntimeAdapter {
     this.#hookStopReason = undefined;
     this.#emptyReplyRetried = false;
     this.#rejectedImagesRetried = false;
+    this.#overflowRetried = false;
+    this.#overflowCompactionFailure = undefined;
     this.#deferredRunEnd = undefined;
     this.#continuations = 0;
     this.#consecutiveContinuations = 0;
@@ -614,7 +625,11 @@ export class PiRuntimeAdapter {
       if (last?.role === "assistant" && isEmptyReply(last)) {
         await this.#retryEmptyReply();
       } else if (last?.role === "assistant" && last.stopReason === "error") {
-        if (!(await this.#retryRejectedImages())) {
+        // 决策 417 与 422：400 且有新加的图先换图重试，其余（暂扣时判为上下文超长的）压缩后重试
+        const retried = this.#shouldRetryRejectedImages()
+          ? await this.#retryRejectedImages()
+          : await this.#retryOverflow();
+        if (!retried) {
           this.#recordAndForward(deferred);
           return;
         }
@@ -664,6 +679,66 @@ export class PiRuntimeAdapter {
       httpStatusOf(last.errorMessage) === 400 &&
       this.#prune.hasNewImages(messages)
     );
+  }
+
+  // 超长后压缩重试（决策 422）：走一次压缩（触发时的 token 数按去掉出错消息的上下文估算），压成了即换成压缩后的上下文——按会话树
+  // 还原，末尾带回那条出错消息，去掉它——状态通道照压缩之后重发完整块，再接着运行一次。没压成不重试，记下结果，返回 false
+  async #retryOverflow(): Promise<boolean> {
+    this.#overflowRetried = true;
+    const compactor = this.#compactor;
+    if (compactor === undefined) {
+      return false;
+    }
+    const abort = new AbortController();
+    this.#compactionAbort = abort;
+    let outcome: CompactionOutcome;
+    try {
+      const tokens = this.#sentTokens(compactor, this.#agent.state.messages.slice(0, -1));
+      outcome = await this.#runCompaction("overflow", tokens, abort.signal);
+    } catch (error) {
+      this.#listenerErrors.push(error);
+      outcome = { kind: "failed", stage: "summary", error };
+    } finally {
+      this.#compactionAbort = undefined;
+    }
+    if (outcome.kind !== "compacted") {
+      this.#overflowCompactionFailure = outcome;
+      return false;
+    }
+    const tail = outcome.messages.at(-1);
+    this.#agent.state.messages = structuredClone(
+      tail?.role === "assistant" && tail.stopReason === "error"
+        ? outcome.messages.slice(0, -1)
+        : outcome.messages
+    );
+    // Agent 的消息已是压缩后的上下文，Run 结束不必再按本 Run 早先的轮间压缩还原
+    this.#turnCompaction = undefined;
+    this.#statusCompacted = true;
+    for (const message of await this.#statusMessages("turn")) {
+      this.#agent.steer(message);
+    }
+    // 压缩期间来的中止请求落空（上游没有活动运行），故照常发起再立即中止（同 #runWith）
+    const started = this.#agent.continue();
+    if (this.#interruptRequested || this.#disposed) {
+      this.#agent.abort();
+    }
+    await started;
+    return true;
+  }
+
+  // 这次 agent_end 要不要暂扣、等超长后压缩重试（决策 422）：配置了压缩、这次超长还没重试过、没来过中止请求、钩子没要求停止，
+  // 且对话以上下文超长的出错消息收尾
+  #shouldRetryOverflow(): boolean {
+    if (
+      this.#compactor === undefined ||
+      this.#overflowRetried ||
+      this.#interruptRequested ||
+      this.#hookStopReason !== undefined
+    ) {
+      return false;
+    }
+    const last = this.#agent.state.messages.at(-1);
+    return last !== undefined && isContextOverflowReply(last);
   }
 
   // 空回复重试（决策 170 ②）：从 Agent 状态去掉这条空消息（会话文件照实留着它）再接着运行一次
@@ -899,11 +974,6 @@ export class PiRuntimeAdapter {
       tokens: this.#sentTokens(compactor, this.#agent.state.messages),
       contextWindow: compactor.config.contextWindow,
     };
-  }
-
-  // 本运行面的压缩配置（188、218）：派出的 worker 按同一配置跑；没有配置压缩时为 undefined
-  compactionConfig(): CompactionConfig | undefined {
-    return this.#compactor !== undefined ? { ...this.#compactor.config } : undefined;
   }
 
   // 手动压缩（189 的 /compact [重点]）：重点作为摘要的附加说明。只在没有进行中的 Run 时可用；
@@ -1516,6 +1586,7 @@ export class PiRuntimeAdapter {
         event.type === "agent_end" &&
         (this.#shouldRetryEmptyReply() ||
           this.#shouldRetryRejectedImages() ||
+          this.#shouldRetryOverflow() ||
           this.#shouldContinueTruncated())
       ) {
         this.#deferredRunEnd = event;
@@ -1531,6 +1602,10 @@ export class PiRuntimeAdapter {
         // 决策 367：一条助手回复没触发续跑（不是撞上限且没有工具调用），连续续跑次数清零
         if (event.message.role === "assistant" && !isTruncatedWithoutTools(event.message)) {
           this.#consecutiveContinuations = 0;
+        }
+        // 决策 422：来了正常回复（不是出错收尾），之后再超长算新的一次
+        if (event.message.role === "assistant" && event.message.stopReason !== "error") {
+          this.#overflowRetried = false;
         }
         if (event.message.role === "toolResult") {
           this.#markToolResult(event.message);
@@ -1699,6 +1774,10 @@ export class PiRuntimeAdapter {
           ...(result.errorMessage !== undefined ? { errorMessage: result.errorMessage } : {}),
           messageCount: this.#runEntrySeq,
           endedAt: Date.now(),
+          // 决策 422：超长后的压缩没压成
+          ...(this.#overflowCompactionFailure !== undefined
+            ? { overflowCompaction: overflowCompactionRecord(this.#overflowCompactionFailure) }
+            : {}),
         },
       });
     } catch (error) {
@@ -1784,6 +1863,17 @@ export class PiRuntimeAdapter {
       throw new Error("PiRuntimeAdapter 已释放，不能再启动 Run");
     }
   }
+}
+
+// 决策 422：超长后压缩没压成的记录（Run 收尾条目的 overflowCompaction）
+function overflowCompactionRecord(
+  failure: Exclude<CompactionOutcome, { kind: "compacted" }>
+): NonNullable<RunEndData["overflowCompaction"]> {
+  if (failure.kind === "skipped") {
+    return { kind: "skipped", reason: failure.reason };
+  }
+  const error = failure.error instanceof Error ? failure.error.message : String(failure.error);
+  return { kind: "failed", stage: failure.stage, error };
 }
 
 // 递归冻结快照（含嵌套对象与数组）
