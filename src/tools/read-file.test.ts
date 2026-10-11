@@ -19,7 +19,7 @@ function makeWorkspace(files: Record<string, string>): { root: string; cleanup: 
 }
 
 // 工具结果首段文本（TextContent | ImageContent 联合类型需按 type 窄化）
-function textOf(result: PigeonToolResult<ReadFileDetails>): string {
+function textOf(result: PigeonToolResult<unknown>): string {
   const first = result.content[0];
   return first?.type === "text" ? first.text : "";
 }
