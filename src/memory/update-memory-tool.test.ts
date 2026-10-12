@@ -1,4 +1,4 @@
-// 记忆工具 update_memory（决策 328、329、331、332）：说明、参数与返回文字为记忆文字 v3；两层各自增、按编号替换与删除；
+// 记忆工具 update_memory（决策 328、329、331、332、428）：说明、参数与返回文字为记忆文字 v4；两层各自增、按编号替换与删除；
 // 编号、日期、来源与会话编号由工具补在行内；新增被拒与替换被拒分开写、数字准确；替换后不比替换前长即放行；写满判定在锁内；
 // 人改坏格式时拒写并指出行号；写入后经 onWritten 交出一行提示；等锁超时按固定文字回话；两个进程同时写同一层，条目不丢不重。
 import assert from "node:assert/strict";
@@ -8,12 +8,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "vitest";
 import { acquireExclusiveLock } from "../persistence/exclusive-lock.ts";
-import {
-  MEMORY_FILE_HEADERS,
-  MEMORY_LAYER_LABELS,
-  type MemoryLayer,
-  parseMemory,
-} from "./learned.ts";
+import { MEMORY_FILE_HEADERS, type MemoryLayer, parseMemory } from "./learned.ts";
 import { memoryLocation } from "./learned-store.ts";
 import {
   applyMemoryUpdate,
@@ -92,18 +87,18 @@ function assertIncludesAll(text: string, fragments: readonly string[]): void {
 
 // 说明与参数说明全仓只在这里逐字检查：守"改这段文字必须升 MEMORY_TEXT_VERSION"（版本号进跑批身份，文字一改即换条件）。
 // 例外（决策 383）："新增前去重"与"纠正过时条目"两句不升版本——跑批不注册 update_memory，说明的变化到不了跑批
-test("工具说明与参数说明为记忆文字 v3：两层、只写内容、取向、写满时新增或改长都会被拒绝；新增前去重与纠正过时条目（383，不升版本）", () => {
+test("工具说明与参数说明为记忆文字 v4：两层、只写内容、取向、写满时新增或改长都会被拒绝；新增前去重与纠正过时条目（383，不升版本）", () => {
   assert.equal(
     UPDATE_MEMORY_DESCRIPTION,
-    "新增、改写或删除学到的记忆。记忆分两层：project 只对本项目（.pigeon/state/memory.md），user 对所有项目（~/.pigeon/state/memory.md）。只写不读：两层记忆已在开工状态里。\n" +
-      "记用户的偏好、用户对你做法的纠正，以及从代码和 git 历史看不出的项目信息（外部资料在哪里、约定、背景）；不记能从代码或 git 历史看出的内容（代码结构、文件位置、实现细节、改过什么），不记任务经过，也不记密钥、令牌、密码等敏感信息（需要时只记去哪里找）。\n" +
-      "每条一句话，只写内容；编号、日期、来源与会话编号由工具补上。只对本项目成立的记在 project，对所有项目都成立的记在 user；拿不准记在哪一层时，先问用户。\n" +
-      "每层有字符上限，写满时新增或改长都会被拒绝，须先合并相近条目或删除过时条目。\n" +
-      "新增前先看两层里有没有说同一件事的条目，有就用 replace 改写那一条，不另加。\n" +
-      "发现某条记忆已经不对（与现在的项目情况或用户最新的说法不符）时，用户亲口要求的那类点明后问用户，其余的直接改写或删除，并在回复里说一句。\n" +
-      "用户亲口要求的条目，只有用户改口时才改写或删除。"
+    "Add, rewrite, or delete learned memory entries. Memory has two layers: project applies only to this project (.pigeon/state/memory.md), and user applies to all projects (~/.pigeon/state/memory.md). This tool only writes and does not read: both layers are already in the startup status.\n" +
+      "Record the user's preferences, the user's corrections to how you work, and project information that cannot be seen from the code or git history (where external material is, conventions, background). Do not record what can be seen from the code or git history (code structure, file locations, implementation details, what was changed), do not record the course of a task, and do not record secrets such as keys, tokens, or passwords (if needed, record only where to find them).\n" +
+      "One sentence per entry, content only; the tool adds the ID, date, source, and session ID. Record what holds only for this project in project, and what holds for all projects in user; if you are unsure which layer, ask the user first.\n" +
+      "Each layer has a character limit; when it is full, adding an entry or making one longer is rejected, so first merge similar entries or delete outdated ones.\n" +
+      "Before adding, check whether either layer already has an entry about the same thing; if so, rewrite that entry with replace instead of adding another.\n" +
+      "When you find that a memory entry is no longer right (it conflicts with the current state of the project or with what the user said most recently): for the kind the user explicitly asked for, point it out and ask the user; rewrite or delete the others directly, and say so in your reply.\n" +
+      "Rewrite or delete an entry the user explicitly asked for only when the user changes their mind."
   );
-  assert.doesNotMatch(UPDATE_MEMORY_DESCRIPTION, /引用|\[L|理由/);
+  assert.doesNotMatch(UPDATE_MEMORY_DESCRIPTION, /\bcit(e|ation)|\[L|\breason/i);
   const props = UpdateMemoryParamsSchema.properties as unknown as Record<
     "action" | "layer" | "id" | "content",
     { description?: string }
@@ -111,13 +106,19 @@ test("工具说明与参数说明为记忆文字 v3：两层、只写内容、�
   assert.deepEqual(Object.keys(props).sort(), ["action", "content", "id", "layer"]);
   assert.equal(
     props.action.description,
-    "add 新增一条；replace 用新内容整条替换编号指定的一条；remove 删除编号指定的一条"
+    "add adds an entry; replace replaces the whole entry with the given id with new content; remove deletes the entry with the given id"
   );
-  assert.equal(props.layer.description, "project 只对本项目；user 对所有项目");
-  assert.equal(props.id.description, "条目编号，如 P3 或 U2，见记忆全文里每条开头的方括号");
+  assert.equal(
+    props.layer.description,
+    "project applies only to this project; user applies to all projects"
+  );
+  assert.equal(
+    props.id.description,
+    "Entry ID, such as P3 or U2; see the square brackets at the start of each entry in the memory text"
+  );
   assert.equal(
     props.content.description,
-    "一句话写明要记的内容（不写编号、日期与来源，工具会补上）"
+    "One sentence stating what to remember (do not include the ID, date, or source; the tool adds them)"
   );
   const tool = createUpdateMemoryTool({
     governanceRoot: ".",
@@ -146,14 +147,14 @@ test("新增、替换、删除：两层各写各的文件；工具补编号、�
   withFixture(async (fx) => {
     const added = await fx.call({ action: "add", content: "提交信息用英文祈使句" });
     const p1 = lineChars("P1", "提交信息用英文祈使句");
-    assert.equal(added.text, `已在项目级新增 P1（当前 ${p1}/4000 字符）。`);
+    assert.equal(added.text, `Added P1 to the project memory (now ${p1}/4000 characters).`);
     assert.equal(
       fx.read("project"),
       `${MEMORY_FILE_HEADERS.project}- [P1] 提交信息用英文祈使句${ORIGIN}\n`
     );
     const user = await fx.call({ action: "add", layer: "user", content: "回复用中文" });
     const u1 = lineChars("U1", "回复用中文");
-    assert.equal(user.text, `已在用户级新增 U1（当前 ${u1}/4000 字符）。`);
+    assert.equal(user.text, `Added U1 to the user memory (now ${u1}/4000 characters).`);
     assert.equal(fx.file("user"), join(fx.home, ".pigeon", "state", "memory.md"));
     assert.equal(fx.read("user"), `${MEMORY_FILE_HEADERS.user}- [U1] 回复用中文${ORIGIN}\n`);
     // 内容里的换行并成一个空格，〔〕换成普通括号（〔〕留给来处）
@@ -162,9 +163,12 @@ test("新增、替换、删除：两层各写各的文件；工具补编号、�
     const replaced = await fx.call({ action: "replace", id: "p1", content: "提交信息用英文" });
     const p2 = lineChars("P2", "设计文档 在（内部）wiki");
     const p1b = lineChars("P1", "提交信息用英文");
-    assert.equal(replaced.text, `已替换项目级 P1（当前 ${p1b + p2}/4000 字符）。`);
+    assert.equal(
+      replaced.text,
+      `Replaced P1 in the project memory (now ${p1b + p2}/4000 characters).`
+    );
     const removed = await fx.call({ action: "remove", id: "P2" });
-    assert.equal(removed.text, `已删除项目级 P2（当前 ${p1b}/4000 字符）。`);
+    assert.equal(removed.text, `Removed P2 from the project memory (now ${p1b}/4000 characters).`);
     assert.equal(
       fx.read("project"),
       `${MEMORY_FILE_HEADERS.project}- [P1] 提交信息用英文${ORIGIN}\n`
@@ -192,10 +196,10 @@ test("新增被拒（328）：写明当前用量、该条字数与还差多少�
     const used = a + b;
     const needed = lineChars("P3", "丙丙丙丙丙丙丙😀");
     const full = await fx.call({ action: "add", content: "丙丙丙丙丙丙丙😀" }, { project: limit });
-    // 写满被拒的文字属记忆文字 v3，全仓只在这里逐字检查：守"改这段文字必须升 MEMORY_TEXT_VERSION"
+    // 写满被拒的文字属记忆文字 v4，全仓只在这里逐字检查：守"改这段文字必须升 MEMORY_TEXT_VERSION"
     assert.equal(
       full.text,
-      `项目级记忆已满，这条没有新增：当前 ${used}/${limit} 字符，这条需要 ${needed} 字符（含工具补上的编号、日期、来源与会话编号），还差 ${used + needed - limit} 字符。把这条写短，或先用 replace 合并相近条目、用 remove 删除过时条目，再新增。现有条目（编号：字符数）：P1：${a}、P2：${b}。`
+      `The project memory is full, so this entry was not added: currently ${used}/${limit} characters; this entry needs ${needed} characters (including the ID, date, source, and session ID the tool adds), ${used + needed - limit} characters more than is left. Shorten this entry, or first merge similar entries with replace and delete outdated ones with remove, then add it. Existing entries (ID: characters): P1: ${a}, P2: ${b}.`
     );
     assert.equal(full.details.rejected, "full");
     assert.equal(fx.notices.length, 2, "被拒不交出提示");
@@ -218,10 +222,10 @@ test("替换被拒（328）：写明被替换条目现有字数、新内容字�
       { action: "replace", id: "P1", content: "甲甲甲甲甲甲" },
       { project: limit }
     );
-    // 写满被拒的文字属记忆文字 v3，全仓只在这里逐字检查：守"改这段文字必须升 MEMORY_TEXT_VERSION"
+    // 写满被拒的文字属记忆文字 v4，全仓只在这里逐字检查：守"改这段文字必须升 MEMORY_TEXT_VERSION"
     assert.equal(
       rejected.text,
-      `替换后超出项目级上限，P1 没有替换：P1 现有 ${a} 字符，新内容 ${newChars} 字符（含工具补上的编号、日期、来源与会话编号），替换后共 ${after}/${limit} 字符，超出 ${after - limit} 字符。把新内容至少写短 ${after - limit} 字符，或先用 remove 删除别的过时条目，再替换。现有条目（编号：字符数）：P1：${a}、P2：${b}。`
+      `Replacing would exceed the project memory limit, so P1 was not replaced: P1 currently has ${a} characters, the new content has ${newChars} characters (including the ID, date, source, and session ID the tool adds), and after replacing the total would be ${after}/${limit} characters, ${after - limit} characters over. Shorten the new content by at least ${after - limit} characters, or first delete other outdated entries with remove, then replace it. Existing entries (ID: characters): P1: ${a}, P2: ${b}.`
     );
     // 按提示把新内容写短超出的字数即放得下
     const shortened = "甲".repeat(6 - (after - limit));
@@ -265,16 +269,19 @@ test("两层分别计：项目级写满不影响用户级新增，拒绝文字�
     const projectFull = await fx.call({ action: "add", content: "乙" }, limits);
     assert.match(
       projectFull.text,
-      new RegExp(`^项目级记忆已满.*当前 ${p}/${p} 字符.*：P1：${p}。$`)
+      new RegExp(`^The project memory is full.*currently ${p}/${p} characters.*: P1: ${p}\\.$`)
     );
     const user = await fx.call({ action: "add", layer: "user", content: "乙" }, limits);
     const u = lineChars("U1", "乙");
-    assert.equal(user.text, `已在用户级新增 U1（当前 ${u}/4000 字符）。`);
+    assert.equal(user.text, `Added U1 to the user memory (now ${u}/4000 characters).`);
     const userFull = await fx.call(
       { action: "add", layer: "user", content: "丙" },
       { project: 4000, user: u }
     );
-    assert.match(userFull.text, new RegExp(`^用户级记忆已满.*当前 ${u}/${u} 字符.*：U1：${u}。$`));
+    assert.match(
+      userFull.text,
+      new RegExp(`^The user memory is full.*currently ${u}/${u} characters.*: U1: ${u}\\.$`)
+    );
   }));
 
 test("内容相同不新增；缺内容、缺层级、编号不存在或层前缀不符：按固定文字回话、不写文件", () =>
@@ -283,15 +290,15 @@ test("内容相同不新增；缺内容、缺层级、编号不存在或层前�
     await fx.call({ action: "add", content: "二" });
     assert.equal(
       (await fx.call({ action: "add", content: " 一 " })).text,
-      "与项目级 P1 内容相同，未新增。"
+      "Same content as P1 in the project memory; not added."
     );
     assert.equal(
       (await fx.call({ action: "add", content: "  " })).text,
-      "add 与 replace 需要 content：一句话写明要记的内容。"
+      "add and replace need content: one sentence stating what to remember."
     );
     assert.equal(
       (await fx.call({ action: "replace", id: "P1" })).text,
-      "add 与 replace 需要 content：一句话写明要记的内容。"
+      "add and replace need content: one sentence stating what to remember."
     );
     const noLayer = await applyMemoryUpdate(
       {
@@ -304,19 +311,19 @@ test("内容相同不新增；缺内容、缺层级、编号不存在或层前�
     );
     assert.equal(
       noLayer.text,
-      "需要 layer：project（只对本项目）或 user（对所有项目）；拿不准时先问用户。"
+      "layer is required: project (this project only) or user (all projects); if you are unsure, ask the user first."
     );
     assert.equal(
       (await fx.call({ action: "remove", id: "P9" })).text,
-      "项目级没有 P9；现有条目编号：P1、P2。"
+      "The project memory has no P9; existing entry IDs: P1, P2."
     );
     assert.equal(
       (await fx.call({ action: "remove", id: "U1" })).text,
-      "项目级没有 U1；现有条目编号：P1、P2。"
+      "The project memory has no U1; existing entry IDs: P1, P2."
     );
     assert.equal(
       (await fx.call({ action: "remove", layer: "user", id: "U1" })).text,
-      "用户级没有 U1；现有条目编号：（没有条目）。"
+      "The user memory has no U1; existing entry IDs: (no entries)."
     );
     assert.equal(fx.notices.length, 2);
   }));
@@ -343,7 +350,7 @@ test("等锁超时：同一层一直被另一处占着，按固定文字回话�
     const release = acquireExclusiveLock(location.lock, "测试持锁");
     try {
       const result = await fx.call({ action: "add", content: "一" }, {}, 50);
-      assert.equal(result.text, UPDATE_MEMORY_TEXTS.busy(MEMORY_LAYER_LABELS.project));
+      assert.equal(result.text, UPDATE_MEMORY_TEXTS.busy("project"));
       assert.deepEqual(
         { written: result.details.written, rejected: result.details.rejected },
         { written: false, rejected: "busy" }
@@ -364,7 +371,7 @@ test("人改坏格式：拒绝写入并指出文件与行号，文件原样不�
     writeFileSync(file, broken);
     const result = await fx.call({ action: "add", content: "二" });
     assertIncludesAll(result.text, [
-      ".pigeon/state/memory.md 第 5 行起格式不对",
+      ".pigeon/state/memory.md is malformed from line 5 on",
       "/memory edit project",
     ]);
     assert.equal(fx.read("project"), broken);

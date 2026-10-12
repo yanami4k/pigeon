@@ -197,7 +197,7 @@ test("开跑的计划行、log 行与结束汇总进消息区；树形视图接�
     assert.ok(after.includes(`script t (${runId})  done`), after);
     assert.ok(after.includes("phase 修改  done"), after);
     await type(term, CTRL_X);
-    assert.ok(screenFlat(term).includes(`[Script notice] 脚本 t（运行号 ${runId}）已完成。`));
+    assert.ok(screenFlat(term).includes(`[Script notice] Script t (run ID ${runId}) completed.`));
   } finally {
     await close();
   }
@@ -220,9 +220,9 @@ test("界面上停止整个脚本：树形视图里选中脚本下的 worker 按
     const summary = await within(done, "停止后的汇总");
     assert.match(
       summary,
-      new RegExp(`脚本 t（运行号 ${runId}）已停止。worker 2 个：成功 0，失败 2`)
+      new RegExp(`Script t \\(run ID ${runId}\\) was stopped\\. Workers: 2; succeeded 0, failed 2`)
     );
-    assert.match(summary, /失败：[^\n]*取消/);
+    assert.match(summary, /Failed: [^\n]*取消/);
     assert.equal(harness.sink.spawned.length, 2, "停止之后不再派");
     // 那一行写在主会话的消息区：关上树形视图再看
     await type(term, CTRL_X);
@@ -233,7 +233,7 @@ test("界面上停止整个脚本：树形视图里选中脚本下的 worker 按
     await until(() => harness.sink.spawned.length === 3, "派出第四个");
     await type(term, "/orchestrate stop\r");
     const stopped = await within(second, "/orchestrate stop 之后的汇总");
-    assert.match(stopped, new RegExp(`运行号 ${other}）已停止`));
+    assert.match(stopped, new RegExp(`run ID ${other}\\) was stopped`));
   } finally {
     await close();
   }
@@ -317,7 +317,7 @@ test("收回的请示：来源写明脚本与运行号，按 take_worker 的写�
       script('const r = await agent("写"); return { collect: [r] };'),
       undefined
     );
-    assert.match(await within(done, "收回后的汇总"), /收回：叠入 n\.txt/);
+    assert.match(await within(done, "收回后的汇总"), /Collected: applied n\.txt/);
     assert.equal(harness.collectRequests.length, 1);
   } finally {
     await close();

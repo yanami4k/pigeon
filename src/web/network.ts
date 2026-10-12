@@ -136,7 +136,7 @@ export function isPublicIp(address: string): boolean {
   );
 }
 
-export const PUBLIC_DESTINATION = "只能访问公网的 http(s) 网址";
+export const PUBLIC_DESTINATION = "Only public http(s) URLs can be accessed";
 
 export interface ResolvedPublicUrl {
   url: URL;
@@ -153,7 +153,7 @@ export async function resolvePublicHttpUrl(
   try {
     url = new URL(value);
   } catch {
-    throw new UnsafeUrlError(`${PUBLIC_DESTINATION}：网址无法解析`);
+    throw new UnsafeUrlError(`${PUBLIC_DESTINATION}: the URL cannot be parsed`);
   }
   if (
     (url.protocol !== "http:" && url.protocol !== "https:") ||
@@ -163,7 +163,7 @@ export async function resolvePublicHttpUrl(
     url.hostname === "localhost" ||
     url.hostname.endsWith(".localhost")
   ) {
-    throw new UnsafeUrlError(`${PUBLIC_DESTINATION}：${describeRejectedUrl(url)}`);
+    throw new UnsafeUrlError(`${PUBLIC_DESTINATION}: ${describeRejectedUrl(url)}`);
   }
   const hostname = url.hostname.replace(/^\[|\]$/g, "");
   const literalFamily = isIP(hostname);
@@ -172,13 +172,13 @@ export async function resolvePublicHttpUrl(
       ? [{ address: hostname, family: literalFamily === 6 ? 6 : 4 }]
       : await lookup(hostname).catch(() => []);
   if (addresses.length === 0) {
-    throw new UnsafeUrlError(`${PUBLIC_DESTINATION}：主机 ${hostname} 无法解析`);
+    throw new UnsafeUrlError(`${PUBLIC_DESTINATION}: host ${hostname} cannot be resolved`);
   }
   const nonPublic = addresses.filter(({ address }) => !isPublicIp(address));
   if (nonPublic.length > 0) {
-    const list = nonPublic.map(({ address }) => address).join("、");
+    const list = nonPublic.map(({ address }) => address).join(", ");
     throw new UnsafeUrlError(
-      `${PUBLIC_DESTINATION}：主机 ${hostname} 指向非公网地址 ${list}（回环、内网、链路本地等地址一律拒绝）`
+      `${PUBLIC_DESTINATION}: host ${hostname} points to non-public addresses ${list} (loopback, private-network, link-local, and similar addresses are always rejected)`
     );
   }
   return { url, addresses };
@@ -186,15 +186,15 @@ export async function resolvePublicHttpUrl(
 
 function describeRejectedUrl(url: URL): string {
   if (url.protocol !== "http:" && url.protocol !== "https:") {
-    return `协议 ${url.protocol} 不支持`;
+    return `protocol ${url.protocol} is not supported`;
   }
   if (url.username !== "" || url.password !== "") {
-    return "网址不能带用户名或密码";
+    return "the URL must not contain a username or password";
   }
   if (url.hostname === "") {
-    return "网址没有主机名";
+    return "the URL has no host name";
   }
-  return `主机 ${url.hostname} 是本机地址`;
+  return `host ${url.hostname} is a local address`;
 }
 
 export async function assertPublicHttpUrl(
@@ -243,7 +243,9 @@ export async function safeFetch(
   for (let redirects = 0; ; redirects++) {
     const target = resolved.addresses[0];
     if (target === undefined) {
-      throw new UnsafeUrlError(`${PUBLIC_DESTINATION}：主机 ${resolved.url.hostname} 无法解析`);
+      throw new UnsafeUrlError(
+        `${PUBLIC_DESTINATION}: host ${resolved.url.hostname} cannot be resolved`
+      );
     }
     const response = await transport(resolved.url, target, init);
     if (!REDIRECT_STATUSES.has(response.status)) {
@@ -252,19 +254,25 @@ export async function safeFetch(
     const location = response.headers.get("location");
     await response.body?.cancel().catch(() => undefined);
     if (location === null || location === "") {
-      throw new WebFetchError(`网页返回跳转（HTTP ${response.status}）但没有给出目标地址`);
+      throw new WebFetchError(
+        `The page returned a redirect (HTTP ${response.status}) but gave no target address`
+      );
     }
     let next: URL;
     try {
       next = new URL(location, resolved.url);
     } catch {
-      throw new WebFetchError(`网页返回的跳转目标无法解析：${location}`);
+      throw new WebFetchError(
+        `The redirect target returned by the page cannot be parsed: ${location}`
+      );
     }
     if (next.hostname.toLowerCase() !== resolved.url.hostname.toLowerCase()) {
       return { kind: "cross-host-redirect", from: resolved.url, to: next };
     }
     if (redirects >= maxRedirects) {
-      throw new WebFetchError(`同一网站内的跳转超过 ${maxRedirects} 次，停止抓取`);
+      throw new WebFetchError(
+        `More than ${maxRedirects} redirects within the same site; stopped fetching`
+      );
     }
     resolved = await resolvePublicHttpUrl(next, lookup !== undefined ? { lookup } : {});
   }

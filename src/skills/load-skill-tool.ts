@@ -52,18 +52,18 @@ export function createLoadSkillTool(
     name: LOAD_SKILL_TOOL,
     label: LOAD_SKILL_TOOL,
     description:
-      "按名读取 Skill 目录里登记的 Skill：不给 resource 时读 SKILL.md，给 resource 时读该 Skill 目录下的" +
-      "资源文件（如 references/x.md）。只能读登记过的 Skill 目录内的文件；scripts 只读不执行。" +
-      "MCP server 的 prompt 只有正文，不给 resource。",
+      "Read a Skill registered in the Skill catalog by name: without resource, reads SKILL.md; with resource, reads that resource file " +
+      "in the Skill's directory (such as references/x.md). Only files inside a registered Skill's directory can be read; scripts are read-only and never run. " +
+      "An MCP server prompt has only a body; do not give resource.",
     parameters: LoadSkillParamsSchema,
     executionMode: "parallel",
     async execute(_toolCallId, params): Promise<PigeonToolResult<SkillLoadedPayload>> {
       const args = Value.Parse(LoadSkillParamsSchema, params);
       const skill = options.catalog.skills.find((entry) => entry.name === args.name);
       if (skill === undefined) {
-        const available = options.catalog.skills.map((entry) => entry.name).join("、");
+        const available = options.catalog.skills.map((entry) => entry.name).join(", ");
         throw new LoadSkillError(
-          `未登记的 Skill：${args.name}（只认 Skill 目录里登记的 Skill；可用：${available || "无"}）`
+          `Unregistered Skill: ${args.name} (only Skills registered in the Skill catalog are accepted; available: ${available || "none"})`
         );
       }
       if (skill.prompt !== undefined) {
@@ -75,24 +75,24 @@ export function createLoadSkillTool(
         realDir = realpathSync(skill.dir);
       } catch {
         throw new LoadSkillError(
-          `Skill 目录已不可读：${skill.displayPath}（目录更新后会如实登记）`
+          `The Skill directory can no longer be read: ${skill.displayPath} (the catalog will be registered again to match once the directory is updated)`
         );
       }
       let realTarget: string;
       try {
         realTarget = realpathSync(path.resolve(realDir, resource));
       } catch {
-        throw new LoadSkillError(`资源不存在：${resource}（Skill ${skill.name}）`);
+        throw new LoadSkillError(`Resource not found: ${resource} (Skill ${skill.name})`);
       }
       const relative = path.relative(realDir, realTarget);
       // 与工作区路径围栏同一越界口径：名字以两个点开头的合法资源（..notes.md）不算越界
       if (isOutsideRelative(relative)) {
         throw new LoadSkillError(
-          `路径越出 Skill 目录（含符号链接或目录联接逃逸）：${resource}（Skill ${skill.name}）`
+          `Path escapes the Skill directory (including escapes through symbolic links or directory junctions): ${resource} (Skill ${skill.name})`
         );
       }
       if (relative === "" || !statSync(realTarget).isFile()) {
-        throw new LoadSkillError(`不是文件：${resource}（Skill ${skill.name}）`);
+        throw new LoadSkillError(`Not a file: ${resource} (Skill ${skill.name})`);
       }
       const resourcePath = relative.split(path.sep).join("/");
       const raw = readFileSync(realTarget);
@@ -100,8 +100,9 @@ export function createLoadSkillTool(
       const frozen = skill.files.find((file) => file.path === resourcePath);
       if (frozen === undefined || frozen.hash !== hash) {
         throw new LoadSkillError(
-          `该 Skill 已变更：${skill.name}/${resourcePath} ` +
-            `${frozen === undefined ? "是登记之后新增的文件" : "与登记时的哈希清单不符"}，下一次请求之前会重新登记，届时再读`
+          `This Skill has changed: ${skill.name}/${resourcePath} ` +
+            `${frozen === undefined ? "is a file added after registration" : "does not match the hash manifest from registration"}; ` +
+            "the Skill will be registered again before the next request, so read it then"
         );
       }
       const cut = truncateUtf8(raw.toString("utf8"), maxBytes);
@@ -112,14 +113,18 @@ export function createLoadSkillTool(
         bytes: raw.length,
         truncated: cut.truncated,
       };
-      const lines = [`[Skill ${skill.name}｜${resourcePath}｜${raw.length} 字节｜sha256 ${hash}]`];
+      const lines = [
+        `[Skill ${skill.name} | ${resourcePath} | ${raw.length} bytes | sha256 ${hash}]`,
+      ];
       if (cut.truncated) {
         lines.push(
-          `（已截断：文件 ${raw.length} 字节超出 ${maxBytes} 字节上限，只返回前 ${Buffer.byteLength(cut.text)} 字节；全文哈希 ${hash}）`
+          `(Truncated: the file is ${raw.length} bytes, over the ${maxBytes}-byte limit; only the first ${Buffer.byteLength(cut.text)} bytes are returned; full-text hash ${hash})`
         );
       }
       if (resourcePath.startsWith("scripts/")) {
-        lines.push("（scripts 在 M5 只读不执行：以下是脚本文本，不会被运行）");
+        lines.push(
+          "(Scripts are read-only and not executed: the following is the script text; it will not be run.)"
+        );
       }
       lines.push(cut.text);
       return { content: [{ type: "text", text: lines.join("\n") }], details: payload };
@@ -137,7 +142,7 @@ async function loadPromptSkill(
 ): Promise<PigeonToolResult<SkillLoadedPayload>> {
   if (resource !== undefined && resource !== MCP_PROMPT_RESOURCE) {
     throw new LoadSkillError(
-      `MCP prompt 没有资源文件：${resource}（Skill ${skill.name} 只有正文，不给 resource 即可）`
+      `An MCP prompt has no resource files: ${resource} (Skill ${skill.name} has only a body; omit resource)`
     );
   }
   const text = await source.load();
@@ -146,7 +151,7 @@ async function loadPromptSkill(
   const frozen = skill.files.find((file) => file.path === MCP_PROMPT_RESOURCE);
   if (frozen === undefined || frozen.hash !== hash) {
     throw new LoadSkillError(
-      `该 Skill 已变更：${skill.name} 的正文与会话开始时的哈希清单不符（MCP server ${source.server} 改过），下个会话生效`
+      `This Skill has changed: the body of ${skill.name} does not match the hash manifest from the start of the session (MCP server ${source.server} changed it); the change takes effect next session`
     );
   }
   const cut = truncateUtf8(text, maxBytes);
@@ -158,11 +163,11 @@ async function loadPromptSkill(
     truncated: cut.truncated,
   };
   const lines = [
-    `[Skill ${skill.name}｜MCP server ${source.server} 的 prompt ${source.prompt}｜${bytes} 字节｜sha256 ${hash}]`,
+    `[Skill ${skill.name} | prompt ${source.prompt} from MCP server ${source.server} | ${bytes} bytes | sha256 ${hash}]`,
   ];
   if (cut.truncated) {
     lines.push(
-      `（已截断：正文 ${bytes} 字节超出 ${maxBytes} 字节上限，只返回前 ${Buffer.byteLength(cut.text)} 字节；全文哈希 ${hash}）`
+      `(Truncated: the body is ${bytes} bytes, over the ${maxBytes}-byte limit; only the first ${Buffer.byteLength(cut.text)} bytes are returned; full-text hash ${hash})`
     );
   }
   lines.push(cut.text);

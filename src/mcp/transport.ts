@@ -121,7 +121,7 @@ export class PigeonStdioTransport implements Transport {
 
   start(): Promise<void> {
     if (this.#process !== undefined) {
-      return Promise.reject(new Error("MCP stdio 传输已启动"));
+      return Promise.reject(new Error("MCP stdio transport already started"));
     }
     return new Promise((resolve, reject) => {
       const child = spawn(this.plan.program, this.plan.args, {

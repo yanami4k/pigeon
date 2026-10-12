@@ -32,7 +32,7 @@ export class McpServerUnavailableError extends Error {
   readonly server: string;
 
   constructor(server: string, detail: string) {
-    super(`MCP server ${server} 不可用：${detail}`);
+    super(`MCP server ${server} is unavailable: ${detail}`);
     this.server = server;
   }
 }
@@ -223,7 +223,10 @@ export class McpServerConnection {
       )) as CallToolResult;
     } catch (error) {
       if (error instanceof McpError && error.code === ErrorCode.ConnectionClosed) {
-        throw new McpServerUnavailableError(this.name, `调用中连接断开：${error.message}`);
+        throw new McpServerUnavailableError(
+          this.name,
+          `the connection closed during the call: ${error.message}`
+        );
       }
       throw error;
     }
@@ -326,7 +329,8 @@ export class McpServerConnection {
     }
     this.#client = undefined;
     this.#state = "restarting";
-    this.#lastError = "连接断开";
+    // 给人看（启动问题、Run 开始条目）也会进给模型的不可用说明，故为英文
+    this.#lastError = "connection closed";
     this.#restarting = this.#restartLoop().finally(() => {
       this.#restarting = undefined;
     });
@@ -363,15 +367,15 @@ export class McpServerConnection {
   #unavailableDetail(): string {
     switch (this.#state) {
       case "idle":
-        return "尚未启动";
+        return "not started yet";
       case "restarting":
-        return `连接断开，正在重启（第 ${this.#restarts} 次）`;
+        return `the connection closed; restarting (attempt ${this.#restarts})`;
       case "closed":
-        return "已关闭";
+        return "closed";
       default:
         return this.#startFailed
-          ? `启动失败：${this.#lastError ?? "未知原因"}`
-          : `已超过重启上限（${this.#options.maxRestarts ?? DEFAULT_MCP_MAX_RESTARTS} 次）：${this.#lastError ?? "未知原因"}`;
+          ? `failed to start: ${this.#lastError ?? "unknown reason"}`
+          : `exceeded the restart limit (${this.#options.maxRestarts ?? DEFAULT_MCP_MAX_RESTARTS}): ${this.#lastError ?? "unknown reason"}`;
     }
   }
 }

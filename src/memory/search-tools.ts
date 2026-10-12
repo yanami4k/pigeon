@@ -50,9 +50,14 @@ export const READ_CONTEXT_CHARS = 1_000;
 
 // 三件工具共同的说明：能找到的、找不到的，以及代码现状与来历去哪里看
 const SCOPE_GUIDANCE =
-  "能找到的：以前会话里的讨论、试过的做法及其结果、使用者说过的话（要求、偏好、纠正）。" +
-  "找不到的：当前任务的背景（以当前任务的说明为准）、最新的代码（以前会话里看到的代码可能已经过时）。" +
-  "代码现状请直接读代码，代码的来历用 git log 与 git blame。";
+  "What you can find: discussions in earlier sessions, approaches tried and their results, and what the user said (requests, preferences, corrections). " +
+  "What you cannot find: the background of the current task (the current task's description is authoritative) and the latest code (code seen in earlier sessions may be out of date). " +
+  "For the current state of the code, read the code directly; for its history, use git log and git blame.";
+
+// 条数与名词：1 session、2 sessions
+function counted(count: number, noun: string): string {
+  return `${count} ${noun}${count === 1 ? "" : "s"}`;
+}
 
 // 域错误（模型侧给错 entryId 等）：与环境异常区分。M5.5 S5（决策 050）：带归类标记，
 // tools/error-kind.ts 读标记归 domain（tools 不反向 import 本层）
@@ -68,7 +73,7 @@ function rejectUnknownParams(tool: string, params: unknown, known: readonly stri
   const unknown = Object.keys(params).filter((key) => !known.includes(key));
   if (unknown.length > 0) {
     throw new SessionToolError(
-      `${tool} 不认识的参数：${unknown.join("、")}（可用：${known.join("、")}）`
+      `Unknown parameters for ${tool}: ${unknown.join(", ")} (available: ${known.join(", ")})`
     );
   }
 }
@@ -180,21 +185,21 @@ function minuteTime(timestamp: number): string {
 // 命中在工具输出上的片段前加一行来历并标"以前的工具输出，可能已过时"（决策 384）
 function formatGroup(group: SessionSearchGroup): string {
   const lines = [
-    `- 会话 ${group.sessionId}｜开始 ${minuteTime(group.createdAt)}｜命中 ${group.hitCount} 条`,
+    `- Session ${group.sessionId} | started ${minuteTime(group.createdAt)} | ${group.hitCount} matching ${group.hitCount === 1 ? "entry" : "entries"}`,
   ];
   for (const hit of group.hits) {
-    const tool = hit.toolName !== undefined ? `（${hit.toolName}）` : "";
+    const tool = hit.toolName !== undefined ? ` (${hit.toolName})` : "";
     lines.push(
-      `  ${hit.entryId}｜${hit.runId} 第 ${hit.runSeq} 条｜${hit.role}${tool}｜${isoTime(hit.timestamp)}｜命中：${hit.matchedKeywords.join("、")}`
+      `  ${hit.entryId} | ${hit.runId} #${hit.runSeq} | ${hit.role}${tool} | ${isoTime(hit.timestamp)} | matched: ${hit.matchedKeywords.join(", ")}`
     );
     if (hit.role === "toolResult") {
       const origin = [
-        hit.toolName ?? "工具",
+        hit.toolName ?? "tool",
         ...(hit.toolParams !== undefined ? [hit.toolParams] : []),
         ...(hit.toolOutcome !== undefined ? [hit.toolOutcome] : []),
         isoTime(hit.timestamp),
-      ].join("｜");
-      lines.push(`  以前的工具输出，可能已过时（${origin}）：`);
+      ].join(" | ");
+      lines.push(`  Earlier tool output, may be out of date (${origin}):`);
     }
     lines.push(`  ${hit.snippet}`);
   }
@@ -214,18 +219,21 @@ export function createSearchSessionsTool(
     name: SEARCH_SESSIONS_TOOL,
     label: SEARCH_SESSIONS_TOOL,
     description:
-      "检索本项目以前会话里的对话（不含当前会话所在的这一组会话：最上层的会话及其派出的各级 worker 与分叉，当前会话也在其中）。" +
+      "Search the conversations in this project's earlier sessions (excluding the group of sessions the current session belongs to: " +
+      "the top-level session and the workers and forks it spawned at every level, the current session included). " +
       SCOPE_GUIDANCE +
-      "以前的工具输出（命令输出、读过的文件内容等）也在检索范围内：可能已过时，依赖之前先核实现状；" +
-      "以前的工具调用是当时的尝试，不代表最终结果。只搜对话正文（使用者的话与模型回复）给 conversationOnly: true。" +
-      "关键词写几个以前对话里会出现的原词（名字、术语、报错里的词），不写整句，不写“讨论”“昨天”这类元词，不写本次任务才出现的新名字；" +
-      `最多 ${MAX_SEARCH_KEYWORDS} 个，任一命中即列出，每条标出命中了哪些关键词。` +
-      "按词匹配、不分大小写、不支持正则：代码名可以用其中一段命中（如 parseConfig 用 config），中文按相邻两字匹配，单个字按子串匹配；" +
-      "多词的关键词拆成词分别计分，整段出现另加分。" +
-      "越少见的词命中排得越前，挑有辨识度的词；" +
-      `结果按会话归并：每个会话一条，带命中条目数与一两段片段及其条目编号，缺省 ${DEFAULT_SESSION_LIMIT} 个会话、最多 ${MAX_SESSION_LIMIT} 个。` +
-      "命中片段只是线索，结论必须用 read_session_entry 按 entryId 回查原文；" +
-      "想先浏览以前有哪些会话、哪些会话改过某个文件，用 list_sessions。",
+      " Earlier tool output (command output, contents of files that were read, and so on) is also searched: it may be out of date, so verify the current state before relying on it; " +
+      "earlier tool calls were attempts at the time and do not represent the final result. To search only the conversation text (the user's words and the model's replies), pass conversationOnly: true. " +
+      "For keywords, give a few exact words likely to appear in the earlier conversation (names, terms, words from error messages); " +
+      'do not write whole sentences, meta words such as "discussion" or "yesterday", or new names that appear only in this task; ' +
+      `at most ${MAX_SEARCH_KEYWORDS} keywords; a session is listed if any keyword matches, and each hit shows which keywords it matched. ` +
+      "Matching is by word, case-insensitive, with no regular expressions: a code name can be matched by one of its parts (for example, config for parseConfig), " +
+      "Chinese text is matched by pairs of adjacent characters, and a single character is matched as a substring; " +
+      "a multi-word keyword is split into words that are scored separately, with extra score when the whole phrase appears. " +
+      "Hits on rarer words rank higher, so choose distinctive words; " +
+      `results are grouped by session: one item per session, with the number of matching entries and one or two snippets with their entry IDs; ${DEFAULT_SESSION_LIMIT} sessions by default, at most ${MAX_SESSION_LIMIT}. ` +
+      "Snippets are only leads: conclusions must be checked against the original text with read_session_entry by entryId; " +
+      "to first browse which earlier sessions exist and which sessions changed a given file, use list_sessions.",
     parameters: SearchSessionsParamsSchema,
     executionMode: "parallel",
     async execute(_toolCallId, params): Promise<PigeonToolResult<SearchSessionsDetails>> {
@@ -258,30 +266,34 @@ export function createSearchSessionsTool(
         groups.push(group);
       }
       const limited = result.totalSessions > result.groups.length;
-      const keywordList = args.keywords.join("、");
-      const scope = conversationOnly ? "仅对话正文" : "对话正文与工具输出";
+      const keywordList = args.keywords.join(", ");
+      const scope = conversationOnly
+        ? "conversation text only"
+        : "conversation text and tool output";
       const lines: string[] = [];
       if (groups.length === 0 && !byteCapped) {
         lines.push(
-          `没有命中（关键词：${keywordList}；范围：${scope}）。可以换同义词或别的说法再试` +
-            (conversationOnly ? "，或去掉 conversationOnly 连同工具输出一起搜。" : "。")
+          `No matches (keywords: ${keywordList}; scope: ${scope}). Try synonyms or other wording` +
+            (conversationOnly ? ", or drop conversationOnly to search tool output as well." : ".")
         );
       } else {
         lines.push(
-          `命中 ${groups.length} 个会话（关键词：${keywordList}；范围：${scope}）：`,
+          `Matches in ${counted(groups.length, "session")} (keywords: ${keywordList}; scope: ${scope}):`,
           ...blocks
         );
         if (limited) {
           lines.push(
-            `共 ${result.totalSessions} 个会话命中，只列出前 ${result.groups.length} 个；请换更具体的关键词收窄。`
+            `${counted(result.totalSessions, "session")} matched; only the first ${result.groups.length} are listed. Use more specific keywords to narrow the search.`
           );
         }
         if (byteCapped) {
           lines.push(
-            `输出已达 ${maxBytes} 字节上限，只列出前 ${groups.length} 个会话；请换更具体的关键词收窄。`
+            `The output reached the ${maxBytes}-byte limit; only the first ${counted(groups.length, "session")} are listed. Use more specific keywords to narrow the search.`
           );
         }
-        lines.push("片段只是线索：用 read_session_entry 按 entryId 读原文，结论须回查原文。");
+        lines.push(
+          "Snippets are only leads: read the original text with read_session_entry by entryId; conclusions must be checked against the original text."
+        );
       }
       return {
         content: [{ type: "text", text: lines.join("\n") }],
@@ -303,7 +315,7 @@ export function parseListTime(raw: string, edge: "start" | "end"): number {
   const value = Date.parse(day ? `${raw}T00:00:00.000Z` : raw);
   if (Number.isNaN(value)) {
     throw new SessionToolError(
-      `无法识别的时间：${raw}（写 YYYY-MM-DD 或 ISO 时间，如 2026-09-30T08:00:00Z）`
+      `Unrecognized time: ${raw} (give YYYY-MM-DD or an ISO time, such as 2026-09-30T08:00:00Z)`
     );
   }
   return day && edge === "end" ? value + 24 * 60 * 60 * 1000 - 1 : value;
@@ -312,7 +324,7 @@ export function parseListTime(raw: string, edge: "start" | "end"): number {
 function firstWords(text: string): string {
   const flat = text.replace(/\s+/g, " ").trim();
   if (flat === "") {
-    return "（无）";
+    return "(none)";
   }
   return flat.length > FIRST_USER_TEXT_CHARS ? `${flat.slice(0, FIRST_USER_TEXT_CHARS)}…` : flat;
 }
@@ -330,11 +342,11 @@ function listedSession(info: SessionCatalogInfo): ListedSession {
 function formatSession(session: ListedSession): string {
   const listed =
     session.changedFileCount === 0
-      ? "（无）"
-      : `${session.changedFiles.join("、")}${session.changedFileCount > session.changedFiles.length ? ` 等 ${session.changedFileCount} 个` : ""}`;
+      ? "(none)"
+      : `${session.changedFiles.join(", ")}${session.changedFileCount > session.changedFiles.length ? ` (${session.changedFileCount} files in total)` : ""}`;
   return (
-    `- ${session.sessionId}｜${minuteTime(session.createdAt)}｜第一句：${session.firstUserText}\n` +
-    `  改动文件：${listed}`
+    `- ${session.sessionId} | ${minuteTime(session.createdAt)} | first message: ${session.firstUserText}\n` +
+    `  changed files: ${listed}`
   );
 }
 
@@ -345,12 +357,14 @@ export function createListSessionsTool(
     name: LIST_SESSIONS_TOOL,
     label: LIST_SESSIONS_TOOL,
     description:
-      "列出本项目以前的会话（不含当前会话所在的这一组会话：最上层的会话及其派出的各级 worker 与分叉，当前会话也在其中），从新到旧，每个给出会话编号、开始时间（UTC）、" +
-      `第一句使用者的话（截断到 ${FIRST_USER_TEXT_CHARS} 字）与改动过的文件（edit_file 的写入与 run_command 报告的文件变化）。` +
-      "可按开始时间筛选（since、until，写 YYYY-MM-DD 或 ISO 时间，含两端），" +
-      "也可按文件路径筛选（path：改动过的文件路径里含这一段即算，写前缀亦可）；" +
-      `最多 ${DEFAULT_LIST_SESSIONS_LIMIT} 个，超出时说明共有多少个。` +
-      "用来先浏览以前做过什么、哪些会话动过某个文件，再用 search_sessions 检索、read_session_entry 读原文。" +
+      "List this project's earlier sessions (excluding the group of sessions the current session belongs to: " +
+      "the top-level session and the workers and forks it spawned at every level, the current session included), newest first. " +
+      "Each shows the session ID, the start time (UTC), " +
+      `the user's first message (truncated to ${FIRST_USER_TEXT_CHARS} characters), and the files changed (writes by edit_file and file changes reported by run_command). ` +
+      "You can filter by start time (since, until; give YYYY-MM-DD or an ISO time; both ends inclusive) " +
+      "or by file path (path: a session matches if a changed file's path contains this text; a prefix also works); " +
+      `at most ${DEFAULT_LIST_SESSIONS_LIMIT} sessions; when there are more, the total is stated. ` +
+      "Use it to first browse what was done before and which sessions touched a file, then search with search_sessions and read the original text with read_session_entry. " +
       SCOPE_GUIDANCE,
     parameters: ListSessionsParamsSchema,
     executionMode: "parallel",
@@ -359,7 +373,7 @@ export function createListSessionsTool(
       const args = Value.Parse(ListSessionsParamsSchema, params);
       if (args.path !== undefined && normalizeChangedPath(args.path) === "") {
         throw new SessionToolError(
-          `path 规范化后为空：${args.path}（要按文件筛选请给出路径里的一段，不筛选就不给 path）`
+          `path is empty after normalization: ${args.path} (to filter by file, give part of the path; to not filter, omit path)`
         );
       }
       const limit = Math.min(
@@ -380,25 +394,25 @@ export function createListSessionsTool(
       const filters = [
         args.since !== undefined ? `since ${args.since}` : "",
         args.until !== undefined ? `until ${args.until}` : "",
-        args.path !== undefined ? `path 含 ${args.path}` : "",
+        args.path !== undefined ? `path contains ${args.path}` : "",
       ].filter((item) => item !== "");
-      const condition = filters.length > 0 ? `；条件：${filters.join("，")}` : "";
+      const condition = filters.length > 0 ? `; filters: ${filters.join(", ")}` : "";
       const sessions = result.sessions.map(listedSession);
       const limited = result.total > sessions.length;
       const lines: string[] = [];
       if (sessions.length === 0) {
         lines.push(
-          `没有符合条件的以前会话${condition !== "" ? `（${condition.slice(1)}）` : ""}。`
+          `No earlier sessions match${condition !== "" ? ` (${condition.slice(2)})` : ""}.`
         );
       } else {
         lines.push(
-          `以前的会话 ${sessions.length} 个（从新到旧，时间为 UTC${condition}）：`,
+          `Earlier sessions: ${sessions.length} (newest first, times in UTC${condition}):`,
           ...sessions.map(formatSession)
         );
         lines.push(
           limited
-            ? `已截断：共 ${result.total} 个符合条件，只列出最新的 ${sessions.length} 个；可用 since、until 或 path 收窄。`
-            : "未截断：符合条件的会话已全部列出。"
+            ? `Truncated: ${counted(result.total, "session")} match; only the newest ${sessions.length} are listed. Narrow the list with since, until, or path.`
+            : "Not truncated: all matching sessions are listed."
         );
       }
       return {
@@ -414,18 +428,18 @@ function renderBlock(block: ViewBlock): string {
     case "text":
       return block.text;
     case "omitted-thinking":
-      return `[thinking 未持久化，${block.bytes} 字节]`;
+      return `[thinking not persisted, ${block.bytes} bytes]`;
     case "thinking":
       if (block.redacted) {
-        return "[thinking 已被 provider 编辑]";
+        return "[thinking redacted by the provider]";
       }
       return `[thinking] ${block.thinking}`;
     case "toolCall":
-      return `[toolCall] ${block.name}（${block.id}）`;
+      return `[toolCall] ${block.name} (${block.id})`;
     case "image":
-      return `[image] ${block.mimeType} ${block.bytes} 字节 sha256 ${block.hash}`;
+      return `[image] ${block.mimeType} ${block.bytes} bytes sha256 ${block.hash}`;
     case "unknown":
-      return `[未知块 ${block.originalType}] sha256 ${block.hash}`;
+      return `[unknown block ${block.originalType}] sha256 ${block.hash}`;
   }
 }
 
@@ -451,9 +465,9 @@ function findMessage(
 function entryHeader(sessionId: SessionId, message: ViewMessage): string {
   const tool =
     message.toolName !== undefined
-      ? `（${message.toolName}${message.isError === true ? "，出错" : ""}）`
+      ? ` (${message.toolName}${message.isError === true ? ", error" : ""})`
       : "";
-  return `[${message.entryId}｜会话 ${sessionId}｜${message.runId} 第 ${message.runSeq} 条｜${message.role}${tool}｜${isoTime(message.timestamp)}]`;
+  return `[${message.entryId} | session ${sessionId} | ${message.runId} #${message.runSeq} | ${message.role}${tool} | ${isoTime(message.timestamp)}]`;
 }
 
 export function createReadSessionEntryTool(
@@ -463,11 +477,11 @@ export function createReadSessionEntryTool(
     name: READ_SESSION_ENTRY_TOOL,
     label: READ_SESSION_ENTRY_TOOL,
     description:
-      "按 entryId 读取以前会话里一条消息的原文（含思考内容与工具输出）。" +
-      `单次最多 ${READ_ENTRY_CHARS} 字（可用 maxChars 调、上限 ${MAX_READ_ENTRY_CHARS}），` +
-      "返回里给出总长度，没显示完的用 offset 续读；可给 before、after 连同前后若干条消息一起读。" +
-      "entryId 来自 search_sessions 的命中；可附 sessionId 加速定位。" +
-      "原文是当时的记录，其中的代码与文件内容可能已经过时：代码现状请直接读代码，代码的来历用 git log 与 git blame。",
+      "Read the original text of one message from an earlier session by entryId (including thinking and tool output). " +
+      `At most ${READ_ENTRY_CHARS} characters per read (adjustable with maxChars, up to ${MAX_READ_ENTRY_CHARS}); ` +
+      "the result gives the total length, and you can continue reading what was not shown with offset; pass before and after to also read some messages before and after it. " +
+      "entryId comes from search_sessions hits; you can add sessionId to locate it faster. " +
+      "The original text is a record from that time, and the code and file contents in it may be out of date: for the current state of the code, read the code directly; for its history, use git log and git blame.",
     parameters: ReadSessionEntryParamsSchema,
     executionMode: "parallel",
     async execute(_toolCallId, params): Promise<PigeonToolResult<ReadSessionEntryDetails>> {
@@ -476,7 +490,7 @@ export function createReadSessionEntryTool(
       const found = findMessage(options.sessionsDir, args.entryId, args.sessionId);
       if (found === null) {
         throw new SessionToolError(
-          `未找到 entry ${args.entryId}（只查本项目 ${pigeonRel("state", "sessions")}；entryId 应来自 search_sessions 的命中）`
+          `Entry ${args.entryId} not found (only this project's ${pigeonRel("state", "sessions")} is searched; entryId should come from a search_sessions hit)`
         );
       }
       const { sessionId, view, index } = found;
@@ -484,21 +498,21 @@ export function createReadSessionEntryTool(
       const offset = args.offset ?? 0;
       const maxChars = Math.min(args.maxChars ?? READ_ENTRY_CHARS, MAX_READ_ENTRY_CHARS);
       const full =
-        message.blocks.length > 0 ? message.blocks.map(renderBlock).join("\n") : "（空）";
+        message.blocks.length > 0 ? message.blocks.map(renderBlock).join("\n") : "(empty)";
       if (offset > full.length) {
         throw new SessionToolError(
-          `offset ${offset} 超出正文总长度 ${full.length}（entry ${args.entryId}）`
+          `offset ${offset} is beyond the total text length ${full.length} (entry ${args.entryId})`
         );
       }
       const slice = full.slice(offset, offset + maxChars);
       const end = offset + slice.length;
       const lines = [
         entryHeader(sessionId, message),
-        `--- 正文（共 ${full.length} 字，显示第 ${offset}–${end} 字）---`,
+        `--- Text (${full.length} characters in total, showing ${offset}–${end}) ---`,
         slice,
       ];
       if (end < full.length) {
-        lines.push(`（未显示完：用 offset: ${end} 续读）`);
+        lines.push(`(Not fully shown: continue with offset: ${end})`);
       }
       const context = (count: number, direction: "before" | "after"): void => {
         if (count === 0) {
@@ -518,15 +532,15 @@ export function createReadSessionEntryTool(
         if (direction === "before") {
           indexes.reverse();
         }
-        lines.push(`--- ${direction === "before" ? "前" : "后"} ${indexes.length} 条 ---`);
+        lines.push(`--- ${counted(indexes.length, "message")} ${direction} ---`);
         for (const at of indexes) {
           const item = view.messages[at] as ViewMessage;
-          const text = item.blocks.length > 0 ? item.blocks.map(renderBlock).join("\n") : "（空）";
+          const text = item.blocks.length > 0 ? item.blocks.map(renderBlock).join("\n") : "(empty)";
           const flat = text.replace(/\s+/g, " ").trim();
           lines.push(
             entryHeader(sessionId, item),
             flat.length > READ_CONTEXT_CHARS
-              ? `${flat.slice(0, READ_CONTEXT_CHARS)}…（截断；读全文用 entryId 加 read_session_entry）`
+              ? `${flat.slice(0, READ_CONTEXT_CHARS)}… (truncated; to read the full text, use read_session_entry with its entryId)`
               : flat
           );
         }

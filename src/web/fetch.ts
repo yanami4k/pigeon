@@ -112,14 +112,14 @@ export async function fetchPage(url: string, options: FetchPageOptions): Promise
   if (!response.ok) {
     await response.body?.cancel().catch(() => undefined);
     throw new WebFetchError(
-      `抓取失败：HTTP ${response.status}${response.statusText !== "" ? ` ${response.statusText}` : ""}`
+      `Fetch failed: HTTP ${response.status}${response.statusText !== "" ? ` ${response.statusText}` : ""}`
     );
   }
   const contentType = response.headers.get("content-type") ?? "";
   if (contentType !== "" && !isTextContentType(contentType)) {
     await response.body?.cancel().catch(() => undefined);
     throw new WebFetchError(
-      `不是文本内容，无法读取：${contentType.split(";")[0]?.trim() ?? contentType}`
+      `Not text content; cannot read it: ${contentType.split(";")[0]?.trim() ?? contentType}`
     );
   }
   const body = await readBodyCapped(response, limits.maxBytes);

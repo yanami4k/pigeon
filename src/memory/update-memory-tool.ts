@@ -1,5 +1,5 @@
 // 记忆工具 update_memory（决策 217、328、329、331、332）：在项目级或用户级新增、按编号替换、按编号删除学到的记忆，
-// 只写不读（两层记忆已在开工状态块的「记忆」一节里）。说明、参数说明与各情形的返回文字为记忆文字 v3（MEMORY_TEXT_VERSION）。
+// 只写不读（两层记忆已在开工状态块的「记忆」一节里）。说明、参数说明与各情形的返回文字为记忆文字 v4（MEMORY_TEXT_VERSION）。
 // - 只给有人对话的入口（终端界面主会话含沙箱会话、--line 命令行对话）；pigeon run、worker 与跑批器只推送、不注册（331）。
 // - 写入不审批（331），写入后经 onWritten 交给入口在消息区显示一行（记下的内容与层级）。
 // - agent 只写内容；编号、日期、来源（入口名）与会话编号由工具补在行内（332）。内容完全相同即不新增。
@@ -47,43 +47,50 @@ export const MEMORY_SOURCE_LABELS: Readonly<Record<MemorySource, string>> = {
   line: "命令行对话",
 };
 
-// 工具说明（记忆文字 v3；决策 383 加的"新增前去重"与"纠正过时条目"两句不升 MEMORY_TEXT_VERSION：跑批不注册
+// 工具说明（记忆文字 v4；决策 383 加的"新增前去重"与"纠正过时条目"两句不升 MEMORY_TEXT_VERSION：跑批不注册
 // update_memory，说明的变化到不了跑批，不影响实验条件）
 export const UPDATE_MEMORY_DESCRIPTION = [
-  `新增、改写或删除学到的记忆。记忆分两层：project 只对本项目（${MEMORY_DISPLAY_PATHS.project}），user 对所有项目（${MEMORY_DISPLAY_PATHS.user}）。只写不读：两层记忆已在开工状态里。`,
-  "记用户的偏好、用户对你做法的纠正，以及从代码和 git 历史看不出的项目信息（外部资料在哪里、约定、背景）；不记能从代码或 git 历史看出的内容（代码结构、文件位置、实现细节、改过什么），不记任务经过，也不记密钥、令牌、密码等敏感信息（需要时只记去哪里找）。",
-  "每条一句话，只写内容；编号、日期、来源与会话编号由工具补上。只对本项目成立的记在 project，对所有项目都成立的记在 user；拿不准记在哪一层时，先问用户。",
-  "每层有字符上限，写满时新增或改长都会被拒绝，须先合并相近条目或删除过时条目。",
-  "新增前先看两层里有没有说同一件事的条目，有就用 replace 改写那一条，不另加。",
-  "发现某条记忆已经不对（与现在的项目情况或用户最新的说法不符）时，用户亲口要求的那类点明后问用户，其余的直接改写或删除，并在回复里说一句。",
-  "用户亲口要求的条目，只有用户改口时才改写或删除。",
+  `Add, rewrite, or delete learned memory entries. Memory has two layers: project applies only to this project (${MEMORY_DISPLAY_PATHS.project}), and user applies to all projects (${MEMORY_DISPLAY_PATHS.user}). This tool only writes and does not read: both layers are already in the startup status.`,
+  "Record the user's preferences, the user's corrections to how you work, and project information that cannot be seen from the code or git history (where external material is, conventions, background). Do not record what can be seen from the code or git history (code structure, file locations, implementation details, what was changed), do not record the course of a task, and do not record secrets such as keys, tokens, or passwords (if needed, record only where to find them).",
+  "One sentence per entry, content only; the tool adds the ID, date, source, and session ID. Record what holds only for this project in project, and what holds for all projects in user; if you are unsure which layer, ask the user first.",
+  "Each layer has a character limit; when it is full, adding an entry or making one longer is rejected, so first merge similar entries or delete outdated ones.",
+  "Before adding, check whether either layer already has an entry about the same thing; if so, rewrite that entry with replace instead of adding another.",
+  "When you find that a memory entry is no longer right (it conflicts with the current state of the project or with what the user said most recently): for the kind the user explicitly asked for, point it out and ask the user; rewrite or delete the others directly, and say so in your reply.",
+  "Rewrite or delete an entry the user explicitly asked for only when the user changes their mind.",
 ].join("\n");
 
-// 参数（说明文字为记忆文字 v3）。必填与否随动作而定，由工具自己检查并按固定文字回话，schema 里 id 与 content 可选
+// 参数（说明文字为记忆文字 v4）。必填与否随动作而定，由工具自己检查并按固定文字回话，schema 里 id 与 content 可选
 export const UpdateMemoryParamsSchema = Type.Object({
   action: Type.Union([Type.Literal("add"), Type.Literal("replace"), Type.Literal("remove")], {
-    description: "add 新增一条；replace 用新内容整条替换编号指定的一条；remove 删除编号指定的一条",
+    description:
+      "add adds an entry; replace replaces the whole entry with the given id with new content; remove deletes the entry with the given id",
   }),
   layer: Type.Union([Type.Literal("project"), Type.Literal("user")], {
-    description: "project 只对本项目；user 对所有项目",
+    description: "project applies only to this project; user applies to all projects",
   }),
   id: Type.Optional(
-    Type.String({ description: "条目编号，如 P3 或 U2，见记忆全文里每条开头的方括号" })
+    Type.String({
+      description:
+        "Entry ID, such as P3 or U2; see the square brackets at the start of each entry in the memory text",
+    })
   ),
   content: Type.Optional(
-    Type.String({ description: "一句话写明要记的内容（不写编号、日期与来源，工具会补上）" })
+    Type.String({
+      description:
+        "One sentence stating what to remember (do not include the ID, date, or source; the tool adds them)",
+    })
   ),
 });
 export type UpdateMemoryParams = Static<typeof UpdateMemoryParamsSchema>;
 
-// 返回给 agent 的文字（记忆文字 v3）
+// 返回给 agent 的文字（记忆文字 v4）；layer 为层的键（project 或 user）
 export const UPDATE_MEMORY_TEXTS = {
   added: (layer: string, id: string, used: number, limit: number) =>
-    `已在${layer}新增 ${id}（当前 ${used}/${limit} 字符）。`,
+    `Added ${id} to the ${layer} memory (now ${used}/${limit} characters).`,
   replaced: (layer: string, id: string, used: number, limit: number) =>
-    `已替换${layer} ${id}（当前 ${used}/${limit} 字符）。`,
+    `Replaced ${id} in the ${layer} memory (now ${used}/${limit} characters).`,
   removed: (layer: string, id: string, used: number, limit: number) =>
-    `已删除${layer} ${id}（当前 ${used}/${limit} 字符）。`,
+    `Removed ${id} from the ${layer} memory (now ${used}/${limit} characters).`,
   // 新增被拒（328）
   addFull: (input: {
     layer: string;
@@ -93,7 +100,7 @@ export const UPDATE_MEMORY_TEXTS = {
     short: number;
     entries: string;
   }) =>
-    `${input.layer}记忆已满，这条没有新增：当前 ${input.used}/${input.limit} 字符，这条需要 ${input.needed} 字符（含工具补上的编号、日期、来源与会话编号），还差 ${input.short} 字符。把这条写短，或先用 replace 合并相近条目、用 remove 删除过时条目，再新增。现有条目（编号：字符数）：${input.entries}。`,
+    `The ${input.layer} memory is full, so this entry was not added: currently ${input.used}/${input.limit} characters; this entry needs ${input.needed} characters (including the ID, date, source, and session ID the tool adds), ${input.short} characters more than is left. Shorten this entry, or first merge similar entries with replace and delete outdated ones with remove, then add it. Existing entries (ID: characters): ${input.entries}.`,
   // 替换被拒（328）
   replaceFull: (input: {
     layer: string;
@@ -105,33 +112,36 @@ export const UPDATE_MEMORY_TEXTS = {
     over: number;
     entries: string;
   }) =>
-    `替换后超出${input.layer}上限，${input.id} 没有替换：${input.id} 现有 ${input.oldChars} 字符，新内容 ${input.newChars} 字符（含工具补上的编号、日期、来源与会话编号），替换后共 ${input.after}/${input.limit} 字符，超出 ${input.over} 字符。把新内容至少写短 ${input.over} 字符，或先用 remove 删除别的过时条目，再替换。现有条目（编号：字符数）：${input.entries}。`,
-  duplicate: (layer: string, id: string) => `与${layer} ${id} 内容相同，未新增。`,
+    `Replacing would exceed the ${input.layer} memory limit, so ${input.id} was not replaced: ${input.id} currently has ${input.oldChars} characters, the new content has ${input.newChars} characters (including the ID, date, source, and session ID the tool adds), and after replacing the total would be ${input.after}/${input.limit} characters, ${input.over} characters over. Shorten the new content by at least ${input.over} characters, or first delete other outdated entries with remove, then replace it. Existing entries (ID: characters): ${input.entries}.`,
+  duplicate: (layer: string, id: string) =>
+    `Same content as ${id} in the ${layer} memory; not added.`,
   missingId: (layer: string, id: string, ids: string) =>
-    `${layer}没有 ${id}；现有条目编号：${ids}。`,
-  missingContent: "add 与 replace 需要 content：一句话写明要记的内容。",
-  missingLayer: "需要 layer：project（只对本项目）或 user（对所有项目）；拿不准时先问用户。",
+    `The ${layer} memory has no ${id}; existing entry IDs: ${ids}.`,
+  missingContent: "add and replace need content: one sentence stating what to remember.",
+  missingLayer:
+    "layer is required: project (this project only) or user (all projects); if you are unsure, ask the user first.",
   broken: (path: string, line: number, layer: MemoryLayer) =>
-    `${path} 第 ${line} 行起格式不对，已拒绝写入，以免覆盖人的修改；请告知用户用 /memory edit ${layer} 修复。`,
+    `${path} is malformed from line ${line} on, so the write was refused to avoid overwriting someone's manual edits; tell the user to fix it with /memory edit ${layer}.`,
   // 等锁超时：同一层正被别的会话写入，等满仍没拿到锁。这是记忆文字 v3 下新增的一种拒绝情形，不升 MEMORY_TEXT_VERSION：
   // 跑批不注册 update_memory，不影响实验条件
-  busy: (layer: string) => `${layer}记忆文件正被别的会话写入，这次没有写成；可稍后重试。`,
+  busy: (layer: string) =>
+    `The ${layer} memory file is being written by another session, so this write did not happen; you can retry later.`,
 } as const;
 
 // 没有条目时的编号列表
-const NO_ENTRIES = "（没有条目）";
+const NO_ENTRIES = "(no entries)";
 
 function idList(entries: readonly MemoryEntry[], layer: MemoryLayer): string {
   return entries.length === 0
     ? NO_ENTRIES
-    : entries.map((entry) => entryId(layer, entry.id)).join("、");
+    : entries.map((entry) => entryId(layer, entry.id)).join(", ");
 }
 
-// 编号与各条字数：P1：120、P2：88
+// 编号与各条字数：P1: 120, P2: 88
 function sizeList(entries: readonly MemoryEntry[], layer: MemoryLayer): string {
   return entries.length === 0
     ? NO_ENTRIES
-    : entries.map((entry) => `${entryId(layer, entry.id)}：${entryChars(entry, layer)}`).join("、");
+    : entries.map((entry) => `${entryId(layer, entry.id)}: ${entryChars(entry, layer)}`).join(", ");
 }
 
 // 一处文字里的换行与首尾空白：每条只占一行，换行并成一个空格；〔〕留给工具补的来处，内容里换成普通括号
@@ -223,7 +233,8 @@ export async function applyMemoryUpdate(
     };
   }
   const layer = params.layer;
-  const label = MEMORY_LAYER_LABELS[layer];
+  // 回话里的层名：参数里的键（project 或 user）
+  const label = layer;
   const limit = options.limits[layer];
   const reply = (
     text: string,

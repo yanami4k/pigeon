@@ -153,9 +153,9 @@ const spawned = (name: string, role = "explorer") =>
     : SPAWN_WORKER_TEXTS.spawned({ name, role, branch: `pigeon/${name}` });
 
 // 决策 279：每段返回文字末尾另起一行写起点与取用方式（提交号随仓库变）；比对收尾文字时去掉这一行，格式另在一处专门核对
-const START_LINE = /\n起点：[^\n]*/g;
+const START_LINE = /\nStart point: [^\n]*/g;
 // 通知末行的 worker 会话号（续接时据它判定通知是否已递出）同样随会话变，格式另在 spawn-worker-tool.test 核对
-const MARKER_LINE = /\n（worker 会话 sess_[0-9A-Z]+）/g;
+const MARKER_LINE = /\n\(worker session sess_[0-9A-Z]+\)/g;
 const withoutMarker = (text: string): string => text.replace(MARKER_LINE, "");
 const withoutStart = (text: string): string =>
   text.replace(START_LINE, "").replace(MARKER_LINE, "");
@@ -413,7 +413,7 @@ test("无人值守：worker 要跑命令即停下、以可恢复错误交回，�
   );
   // 决策 302：implementer 改自己工作树里的文件没有请示，照常完成
   assert.ok(
-    notices.some((text) => text.includes("worker editor（implementer）已完成。")),
+    notices.some((text) => text.includes("Worker editor (implementer) completed.")),
     notices.join("\n")
   );
 });
@@ -446,7 +446,7 @@ test("给了总数上限：pigeon run 的一次运行是一整次交办，通知
   assert.deepEqual(results, [spawned("tester-1", "tester"), SPAWN_WORKER_TEXTS.spawnLimit(1)]);
   // 决策 279：仓库干净时起点就是 HEAD，通知末行写明派出时没有未提交的文件与取用方式
   const notice = userTexts(root, result.sessionId).find((text) =>
-    text.includes("tester-1（tester）已完成")
+    text.includes("tester-1 (tester) completed")
   );
   assert.equal(
     withoutMarker(notice ?? "")
@@ -584,12 +584,12 @@ test("放开嵌套（2 层）：主会话派的 worker 再派下一层并等它�
     text.startsWith(WORKER_NOTICE_PREFIX)
   );
   assert.equal(parentNotices.length, 1);
-  assert.ok(parentNotices[0]?.includes("worker child（explorer）已完成。"), parentNotices[0]);
+  assert.ok(parentNotices[0]?.includes("Worker child (explorer) completed."), parentNotices[0]);
   const mainNotices = userTexts(root, result.sessionId).filter((text) =>
     text.startsWith(WORKER_NOTICE_PREFIX)
   );
   assert.equal(mainNotices.length, 1);
-  assert.ok(mainNotices[0]?.includes("worker parent（implementer）已完成。"), mainNotices[0]);
+  assert.ok(mainNotices[0]?.includes("Worker parent (implementer) completed."), mainNotices[0]);
 });
 
 test("治理根与工作区根分开（--governance-root）：implementer 的工作树建在治理根下、从工作区开工，take_worker 叠回工作区；explorer 就地读工作区", async () => {
@@ -603,7 +603,7 @@ test("治理根与工作区根分开（--governance-root）：implementer 的工
     const messages = context.messages as Array<{ role: string; toolName?: string }>;
     const fixDone = context.messages.some(
       (message) =>
-        message.role === "user" && textOf(message).includes("worker fix（implementer）已完成")
+        message.role === "user" && textOf(message).includes("Worker fix (implementer) completed")
     );
     const taken = messages.some((message) => message.toolName === "take_worker");
     const reply = !messages.some((message) => message.role === "toolResult")

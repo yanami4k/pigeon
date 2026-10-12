@@ -39,7 +39,7 @@ test("Skill 暂存目录：缺省扫描不加载 .pigeon/candidates/skills，显
       [["staged", ".pigeon/candidates/skills/staged", "configured"]]
     );
     assert.deepEqual(explicit.roots, [candidates]);
-    assert.match(explicit.section, /staged：staged 简介（\.pigeon\/candidates\/skills\/staged）/);
+    assert.match(explicit.section, /staged: staged 简介 \(\.pigeon\/candidates\/skills\/staged\)/);
   } finally {
     rmSync(workspace, { recursive: true, force: true });
     rmSync(home, { recursive: true, force: true });

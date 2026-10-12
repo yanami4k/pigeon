@@ -99,10 +99,10 @@ test("已叠入：只取 worker 自己的改动写进主工作目录；worker �
     };
     // 关键片段（模板原文在冲突一条逐字核对，那条删除个数为 0）：叠入的文件与个数；没有冲突时不给查看命令；
     // worker 删除的文件个数非零时照列、注明未删
-    assert.ok(text.includes("叠入的文件（2）：b.txt、n.txt。"), text);
-    assert.ok(text.includes("冲突未写入的文件（0）：无。"), text);
+    assert.ok(text.includes("Files applied (2): b.txt, n.txt. "), text);
+    assert.ok(text.includes("Files with conflicts, not written (0): none."), text);
     assert.ok(!text.includes("git -C"), text);
-    assert.ok(text.endsWith("worker 删除的文件（1，未删）：d.txt。"), text);
+    assert.ok(text.endsWith("Files deleted by the worker (1, not deleted here): d.txt."), text);
     assert.deepEqual(details.result, expected);
     assert.equal(readFileSync(join(f.main, "b.txt"), "utf8"), "b1\nb2 worker\nb3\n");
     assert.equal(readFileSync(join(f.main, "n.txt"), "utf8"), "new\n");
@@ -130,7 +130,7 @@ test("冲突：同一处双方都改的文件不写入，返回里带查看 work
     const { text } = takeWorkerChanges(f.host([f.status("completed")]), "fix-a");
     assert.equal(
       text,
-      `已把 worker fix-a 的改动叠进工作目录。叠入的文件（1）：b.txt。冲突未写入的文件（1）：a.txt；查看 worker 在这些文件上的改动：git -C ${f.worktree} diff ${f.base.slice(0, 12)} -- <文件>。worker 删除的文件（0，未删）：无。`
+      `Applied the changes of worker fix-a to the working directory. Files applied (1): b.txt. Files with conflicts, not written (1): a.txt; to see the worker's changes to these files: git -C ${f.worktree} diff ${f.base.slice(0, 12)} -- <file>. Files deleted by the worker (0, not deleted here): none.`
     );
     assert.equal(
       readFileSync(join(f.main, "a.txt"), "utf8"),
@@ -153,11 +153,11 @@ test("没改动、未收尾、不存在、工作树已清理、没有起点：�
     );
     assert.equal(
       TAKE_WORKER_TEXTS.noChanges("fix-a"),
-      "worker fix-a 相对起点快照没有改动，工作目录未变。"
+      "Worker fix-a has no changes relative to its start snapshot; the working directory is unchanged."
     );
     assert.equal(
       takeWorkerChanges(f.host([f.status("running")]), "fix-a").text,
-      "worker fix-a 还没收尾，等它交回后再取。"
+      "Worker fix-a has not finished yet; take its changes after it returns."
     );
     assert.equal(
       takeWorkerChanges(f.host([f.status("queued")]), " fix-a ").details.rejected,
@@ -165,18 +165,18 @@ test("没改动、未收尾、不存在、工作树已清理、没有起点：�
     );
     assert.equal(
       takeWorkerChanges(f.host([f.status("completed")]), "nope").text,
-      "没有名为 nope 的 worker；用 spawn_worker 交回结果里的名字。"
+      "There is no worker named nope; use the name given in the result returned by spawn_worker."
     );
     assert.equal(
       takeWorkerChanges(f.host([f.status("completed", true)]), "fix-a").text,
-      "worker fix-a 没有记录起点快照，改动无法取用。"
+      "Worker fix-a has no recorded start snapshot, so its changes cannot be taken."
     );
     // 工作树已清理（日常使用里不自动清理；人用 git worktree remove 之后）
     writeFileSync(join(f.worktree, "b.txt"), "changed\n");
     git(f.main, "worktree", "remove", "--force", f.worktree);
     assert.equal(
       takeWorkerChanges(f.host([f.status("completed")]), "fix-a").text,
-      "worker fix-a 的工作树已清理，改动无法取用。"
+      "The worktree of worker fix-a has been cleaned up, so its changes cannot be taken."
     );
     assert.equal(readFileSync(join(f.main, "a.txt"), "utf8"), before);
     assert.equal(
@@ -194,11 +194,11 @@ test("工具形态：名字、定稿说明、参数说明、写档注册；未�
   assert.equal(
     TAKE_WORKER_DESCRIPTION,
     [
-      "把一个已收尾的 worker 自己的改动叠进你的工作目录。worker 从派出时拍的快照开工；本工具只取快照之后它改过的文件，以快照里的版本为共同祖先逐文件三方合并，写进你的工作目录。",
-      "只写入 worker 改过的文件，它没碰的文件一律不动；不删除、不回退你工作目录里的任何文件。worker 删除的文件不自动删，只在结果里列出，由你决定删不删。",
-      "叠不上的文件（你在同一处也改了）不写入，列在冲突清单里；worker 的分支与工作树原样保留，查看它在这些文件上的改动：git -C <工作树路径> diff <快照号> -- <文件>。叠加没有撤销：叠之前先看清交回的摘要与改动文件。",
-      "多个 worker 的改动按需要逐个取，前一个取完再取下一个；后取的若和先取的改了同一处，会列为冲突。",
-      "返回三份清单：已叠入的文件、有冲突未写入的文件、worker 删除的文件。",
+      "Apply a finished worker's own changes to your working directory. A worker starts from a snapshot taken at spawn time; this tool takes only the files it changed after that snapshot and merges them file by file with a three-way merge, using the snapshot version as the common ancestor, into your working directory.",
+      "Only files the worker changed are written; files it did not touch are left alone. Nothing in your working directory is deleted or reverted. Files the worker deleted are not deleted automatically; they are only listed in the result, and you decide whether to delete them.",
+      "Files that cannot be merged (you also changed the same spot) are not written and are listed as conflicts; the worker's branch and worktree are kept as they are, and you can see its changes to those files with: git -C <worktree path> diff <snapshot> -- <file>. Applying cannot be undone: review the returned summary and changed files before applying.",
+      "Take the changes of several workers one at a time as needed, finishing one before taking the next; if a later one changed the same spot as an earlier one, it is listed as a conflict.",
+      "Returns three lists: files applied, files with conflicts that were not written, and files the worker deleted.",
     ].join("\n")
   );
   const registration = takeWorkerRegistration();
@@ -208,7 +208,7 @@ test("工具形态：名字、定稿说明、参数说明、写档注册；未�
   assert.equal(
     (registration.parameters as { properties: { worker: { description: string } } }).properties
       .worker.description,
-    "worker 的名字，即 spawn_worker 交回结果里的名字（分支 pigeon/<名>）"
+    "The worker's name, as given in the result returned by spawn_worker (branch pigeon/<name>)"
   );
 
   const slot = new SpawnWorkerSlot();
@@ -218,7 +218,7 @@ test("工具形态：名字、定稿说明、参数说明、写档注册；未�
   const unbound = await tool.execute("c1", { worker: "fix-a" }, undefined);
   assert.equal(
     unbound.content[0]?.type === "text" ? unbound.content[0].text : "",
-    "取用 worker fix-a 的改动失败：本会话没有装配编排器。已叠入的文件（0）：无。"
+    "Taking the changes of worker fix-a failed: this session has no worker orchestrator set up. Files applied (0): none."
   );
   assert.equal(unbound.details.rejected, "unbound");
 

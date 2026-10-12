@@ -70,13 +70,13 @@ test("MCP prompts 进 Skill Catalog：名称、简介、来源标 server；哈�
     });
     assert.ok(
       catalog.section.includes(
-        "- mcp__everything__simple_prompt：A prompt with no arguments（MCP server everything 的 prompt）"
+        "- mcp__everything__simple_prompt: A prompt with no arguments (a prompt from MCP server everything)"
       ),
       catalog.section
     );
     assert.ok(
       catalog.section.includes(
-        "- mcp__everything__untitled：（无简介）（MCP server everything 的 prompt）"
+        "- mcp__everything__untitled: (no description) (a prompt from MCP server everything)"
       ),
       catalog.section
     );

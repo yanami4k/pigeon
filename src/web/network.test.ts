@@ -62,7 +62,7 @@ test("内网防护：域名解析到内网地址也拒绝（任一地址非公�
   );
   await assert.rejects(
     resolvePublicHttpUrl("https://nowhere.example/", { lookup: async () => [] }),
-    /无法解析/
+    /cannot be resolved/
   );
   await assert.rejects(
     resolvePublicHttpUrl("https://boom.example/", {
@@ -70,7 +70,7 @@ test("内网防护：域名解析到内网地址也拒绝（任一地址非公�
         throw new Error("dns down");
       },
     }),
-    /无法解析/
+    /cannot be resolved/
   );
 });
 
@@ -175,7 +175,7 @@ test("同主机跳转跟随：相对地址与协议升级都按同一主机处�
       {},
       { lookup: publicLookup, transport: loop, maxRedirects: 2 }
     ),
-    (error) => error instanceof WebFetchError && /超过 2 次/.test(error.message)
+    (error) => error instanceof WebFetchError && /More than 2 redirects/.test(error.message)
   );
 });
 

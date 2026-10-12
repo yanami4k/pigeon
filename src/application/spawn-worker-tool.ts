@@ -34,14 +34,13 @@ import {
   type OrchestrationSettings,
 } from "../state/orchestration-config.ts";
 import type { ToolScope } from "../state/session-payloads.ts";
-import { type SkippedFile, skippedFilesText } from "../state/snapshot-config.ts";
+import { formatBytes, type SkippedFile } from "../state/snapshot-config.ts";
 import { WEB_FETCH_TOOL, WEB_SEARCH_TOOL } from "../tools/host-scope.ts";
 import type { ToolRegistration } from "../tools/registry.ts";
 import { RUN_COMMAND_TOOL } from "../tools/run-command.ts";
 import { SCOPABLE_TOOLS } from "../tools/tool-scope.ts";
 import type { PigeonAgentTool, PigeonToolResult } from "../tools/wrap.ts";
 import type { WorkerNotices } from "./worker-notices.ts";
-import { workerStartLine } from "./workers-commands.ts";
 
 export const SPAWN_WORKER_TOOL = "spawn_worker";
 // 决策 279：取用 worker 自身改动的工具名（工具在 take-worker-tool.ts，与本工具共用工具槽；返回文字里要提到它）
@@ -104,7 +103,9 @@ export function assertSpawnWorkerSettings(settings: SpawnWorkerSettings): void {
 // 第 5 句的后半：层数为缺省的 1 层（或新 worker 已在最底层）时写"也不能再派 worker"，放开时写明还能往下派几层
 function nestingClause(settings: SpawnWorkerSettings): string {
   const below = settings.maxDepth - (settings.depth + 1);
-  return below > 0 ? `；它还能往下再派 ${below} 层 worker。` : "，也不能再派 worker。";
+  return below > 0
+    ? `; it can itself spawn workers up to ${below} more ${below === 1 ? "level" : "levels"} down.`
+    : ", and it cannot spawn workers of its own.";
 }
 
 // 决策 360：说明里提到的工具按主 agent 当前已注册的工具生成（available 为它的工具名单；不给即按都在）
@@ -119,19 +120,27 @@ function scopableOf(kind: "paths" | "commandPrefixes", has: ToolPresence = () =>
 function rolesSentence(has: ToolPresence): string {
   const read = has("read_file");
   const sessions = [SEARCH_SESSIONS_TOOL, READ_SESSION_ENTRY_TOOL, LIST_SESSIONS_TOOL].every(has);
-  const explorer = [...(read ? ["读代码"] : []), ...(sessions ? ["检索历史会话"] : [])];
+  const explorer = [...(read ? ["read code"] : []), ...(sessions ? ["search past sessions"] : [])];
   const web = [WEB_SEARCH_TOOL, WEB_FETCH_TOOL].filter(has);
   const clauses = [
-    ...(explorer.length > 0 ? [`explorer 只能${explorer.join("与")}，适合调查与定位`] : []),
+    ...(explorer.length > 0
+      ? [`explorer can only ${explorer.join(" and ")}, suited to investigating and locating things`]
+      : []),
     ...(has("edit_file")
-      ? [`implementer 能${read ? "读写文件" : "改文件"}、不能跑命令，适合按明确的方案改代码`]
+      ? [
+          `implementer can ${read ? "read and write files" : "edit files"} but cannot run commands, suited to changing code by a clear plan`,
+        ]
       : []),
     ...(has(RUN_COMMAND_TOOL)
-      ? [`tester 能${read ? "读文件与跑命令" : "跑命令"}、不能改文件，适合运行与诊断测试`]
+      ? [
+          `tester can ${read ? "read files and run commands" : "run commands"} but cannot change files, suited to running and diagnosing tests`,
+        ]
       : []),
-    ...(web.length > 0 ? [`三种角色另外都能用 ${web.join(" 与 ")} 查资料`] : []),
+    ...(web.length > 0
+      ? [`all three roles can also use ${web.join(" and ")} to look things up`]
+      : []),
   ];
-  return `不给 tools 时，角色决定 worker 能用的工具：${clauses.join("；")}。`;
+  return `Without tools, the role decides which tools a worker can use: ${clauses.join("; ")}.`;
 }
 
 // 工具清单与作用范围一句：能收窄的工具取登记表与主 agent 现有工具的交集
@@ -139,17 +148,23 @@ function toolsSentence(has: ToolPresence): string {
   const pathTools = scopableOf("paths", has);
   const commandTools = scopableOf("commandPrefixes", has);
   const narrowing = [
-    ...(pathTools.length > 0 ? [`${pathTools.join("、")} 限在给定的路径之内`] : []),
+    ...(pathTools.length > 0
+      ? [
+          `${pathTools.join(", ")} ${pathTools.length === 1 ? "is" : "are"} limited to the given paths`,
+        ]
+      : []),
     ...(commandTools.length > 0
-      ? [`${commandTools.join("、")} 只能运行以给定前缀开头、不经 shell 的单条命令`]
+      ? [
+          `${commandTools.join(", ")} can only run single commands that start with a given prefix and do not go through a shell`,
+        ]
       : []),
   ];
   return (
-    "要别的组合就给 tools：只能从你自己现在能用的工具里选（派 worker、写记忆、任务清单一类除外），没列的工具 worker 没有。" +
+    "For a different combination, give tools: you can choose only from the tools you can use now (except tools for spawning workers, writing memory, and the task list), and a worker does not have any tool you leave out." +
     (narrowing.length > 0
-      ? `还可以用 scopes 收窄某件工具：${narrowing.join("，")}；越出范围的调用会被拒绝。`
+      ? ` You can also narrow a tool with scopes: ${narrowing.join(", and ")}; calls outside the scope are rejected.`
       : "") +
-    (has(RUN_COMMAND_TOOL) ? "worker 跑命令与你同一套审批规则。" : "")
+    (has(RUN_COMMAND_TOOL) ? " A worker's commands follow the same approval rules as yours." : "")
   );
 }
 
@@ -160,25 +175,25 @@ export function spawnWorkerDescription(
 ): string {
   const has: ToolPresence = (tool) => available === undefined || available.includes(tool);
   return [
-    "派一个 worker 去完成一项独立的子任务。派出后立即返回它的名字，不等它做完；它结束时会有一条通知进入你的对话，交回它的分支、改动过的文件与工作摘要（explorer 只交回摘要）。",
-    "implementer 与 tester 从派出时主工作目录的快照开工（含未提交的改动与未被忽略的新文件），在自己的 git 工作树与分支里干活；explorer 不建工作树，直接只读你当前的工作区，读到的是正在变的内容，可能读到正在修改的文件。worker 都看不到本会话的对话。",
-    `要并行，就多次调用本工具，每次派一个（可在同一次回复里连续调用）；同时最多跑 ${settings.maxConcurrent} 个，多的排队。派出后可以接着做自己的事，但不要把派出去的活自己再做一遍。需要结果才能往下做时用 ${WAIT_WORKERS_TOOL} 等；${WORKER_STATUS_TOOL} 查看进度，${MESSAGE_WORKER_TOOL} 给在跑的 worker 补充说明，${STOP_WORKER_TOOL} 停掉不再需要的。` +
+    "Spawn a worker to complete an independent subtask. It returns the worker's name right after spawning, without waiting for it to finish; when the worker finishes, a notice enters your conversation with its branch, the files it changed, and a summary of its work (an explorer returns only the summary).",
+    "implementer and tester start from a snapshot of the main working directory at spawn time (including uncommitted changes and new files that are not ignored) and work in their own git worktree and branch; explorer gets no worktree and reads your current workspace directly, read-only, so it sees content that is still changing and may read files that are being modified. No worker can see this session's conversation.",
+    `To work in parallel, call this tool several times, one worker per call (you can make several calls in the same reply); at most ${settings.maxConcurrent} run at once, and the rest queue. After spawning you can go on with your own work, but do not redo the work you handed off. When you need a result before you can continue, wait with ${WAIT_WORKERS_TOOL}; check progress with ${WORKER_STATUS_TOOL}, give a running worker more instructions with ${MESSAGE_WORKER_TOOL}, and stop workers you no longer need with ${STOP_WORKER_TOOL}.` +
       (settings.maxAgentSpawns !== undefined
-        ? `一次运行最多派 ${settings.maxAgentSpawns} 个。`
+        ? ` At most ${settings.maxAgentSpawns} workers can be spawned per run.`
         : ""),
-    "何时派：任务能拆成互不依赖的几块、并行能明显省时间时才派，通常 2 到 4 个就够；简单的活、前后依赖紧的活自己做。每个 worker 都要重新读代码，派得越多花得越多。",
-    `任务要写得能独立完成：目标、相关文件、完成的标准都写清楚。worker 不能向你提问${nestingClause(settings)}`,
+    "When to spawn: only when the task splits into independent pieces and running them in parallel clearly saves time; 2 to 4 workers is usually enough. Do simple work and tightly sequential work yourself. Every worker has to read the code again, so the more you spawn, the more it costs.",
+    `Write the task so it can be completed on its own: state the goal, the relevant files, and the criteria for done. A worker cannot ask you questions${nestingClause(settings)}`,
     rolesSentence(has),
     toolsSentence(has),
-    "worker 的改动不会自动并入你的分支：看过交回的分支与摘要后，由你决定合不合、怎么合。",
+    "A worker's changes are not merged into your branch automatically: after reviewing the returned branch and summary, you decide whether and how to merge them.",
   ].join("\n");
 }
 
 // label 参数的说明：任务清单开着时另带对应清单项的一句
 function labelDescription(taskList: boolean): string {
   return taskList
-    ? "可选的标签，原样出现在这个 worker 的通知与结果里，便于对应任务清单里的项"
-    : "可选的标签，原样出现在这个 worker 的通知与结果里";
+    ? "Optional label that appears as is in this worker's notices and results, to help match it to an item in the task list"
+    : "Optional label that appears as is in this worker's notices and results";
 }
 
 // 参数（说明为定稿原文）。role 为三个角色的枚举（定稿参数表的类型），写错时上游的参数校验先拒绝；工具自己仍按定稿文字
@@ -187,45 +202,55 @@ export function spawnWorkerParamsSchema(taskList: boolean) {
   return Type.Object({
     role: Type.Union(
       [Type.Literal("explorer"), Type.Literal("implementer"), Type.Literal("tester")],
-      { description: "worker 的角色，不给 tools 时决定它能用的工具，见工具说明" }
+      {
+        description:
+          "The worker's role; without tools, it decides which tools the worker can use (see the tool description)",
+      }
     ),
-    task: Type.String({ description: "子任务的完整说明：目标、相关文件、完成的标准" }),
+    task: Type.String({
+      description:
+        "The full description of the subtask: goal, relevant files, and criteria for done",
+    }),
     name: Type.Optional(
-      Type.String({ description: "worker 的名字，用于分支名与状态显示；不给即自动生成" })
+      Type.String({
+        description:
+          "The worker's name, used in the branch name and status display; generated automatically if omitted",
+      })
     ),
     attempts: Type.Optional(
       Type.Integer({
         minimum: 2,
         maximum: 4,
         description:
-          "同一任务并行派出的份数；给了即各做一份，全部做完后交回各份的改动与摘要，由你比较",
+          "How many copies of the same task to spawn in parallel; if given, each worker does its own copy, and when all are done the changes and summary of each are returned for you to compare",
       })
     ),
     label: Type.Optional(Type.String({ description: labelDescription(taskList) })),
     tools: Type.Optional(
       Type.Array(Type.String(), {
         minItems: 1,
-        description: "worker 能用的工具名单，只能从你现在能用的工具里选；不给即按角色的预设",
+        description:
+          "The tools the worker can use, chosen only from the tools you can use now; if omitted, the role's preset applies",
       })
     ),
     scopes: Type.Optional(
       Type.Array(
         Type.Object({
-          tool: Type.String({ description: "要收窄的工具，须是 worker 有的" }),
+          tool: Type.String({ description: "The tool to narrow; the worker must have it" }),
           paths: Type.Optional(
             Type.Array(Type.String(), {
               minItems: 1,
-              description: `${scopableOf("paths").join("、")} 用：相对 worker 工作树根的路径，须是不经符号链接的真实路径，目录含其下全部；不能用 .. 或绝对路径`,
+              description: `For ${scopableOf("paths").join(", ")}: paths relative to the worker's worktree root; they must be real paths that do not go through symbolic links, and a directory includes everything under it; .. and absolute paths are not allowed`,
             })
           ),
           commandPrefixes: Type.Optional(
             Type.Array(Type.String(), {
               minItems: 1,
-              description: `${scopableOf("commandPrefixes").join("、")} 用：允许的命令开头（按词比对），如 npm test`,
+              description: `For ${scopableOf("commandPrefixes").join(", ")}: the allowed beginnings of commands (compared word by word), such as npm test`,
             })
           ),
         }),
-        { description: "可选，把某几件工具的作用范围收窄，每件一项" }
+        { description: "Optional: narrow the scope of some tools, one item per tool" }
       )
     ),
   });
@@ -236,74 +261,100 @@ export type SpawnWorkerParams = Static<typeof SpawnWorkerParamsSchema>;
 // 摘要截断的补句、各情形的返回文字与通知文字（定稿原文）
 export const SPAWN_WORKER_TEXTS = {
   spawned: (w: { name: string; role: string; branch: string; label?: string }) =>
-    `已派出 worker ${w.name}（${w.role}），分支 ${w.branch}${
-      w.label !== undefined ? `，标签 ${w.label}` : ""
-    }。它结束时会有通知；需要结果才能往下做时用 ${WAIT_WORKERS_TOOL} 等。`,
+    `Spawned worker ${w.name} (${w.role}) on branch ${w.branch}${
+      w.label !== undefined ? `, label ${w.label}` : ""
+    }. You will get a notice when it finishes; when you need its result before you can continue, wait with ${WAIT_WORKERS_TOOL}.`,
   attemptsSpawned: (names: readonly string[]) =>
-    `已并行派出 ${names.length} 份：${names.join("、")}。全部结束后会有一条通知，交回各份的改动与摘要。`,
+    `Spawned ${names.length} copies in parallel: ${names.join(", ")}. When all of them finish, one notice will return the changes and summary of each.`,
   completed: (w: WorkerFacts) =>
-    `worker ${w.name}（${w.role}）已完成。分支：${w.branch}。改动的文件（${w.files.length}）：${fileList(w.files)}。摘要：${w.summary}`,
-  truncated: (sessionId: string) => `（摘要已截断，全文在 worker 会话 ${sessionId} 里）`,
-  limitHit: (w: WorkerFacts, limit: "轮数" | "时间") =>
-    `worker ${w.name}（${w.role}）撞上${limit}上限，没有做完。分支：${w.branch}。已改动的文件（${w.files.length}）：${fileList(w.files)}。摘要：${w.summary}`,
+    `Worker ${w.name} (${w.role}) completed. Branch: ${w.branch}. Changed files (${w.files.length}): ${fileList(w.files)}. Summary: ${w.summary}`,
+  truncated: (sessionId: string) =>
+    ` (summary truncated; the full text is in worker session ${sessionId})`,
+  limitHit: (w: WorkerFacts, limit: WorkerLimit) =>
+    `Worker ${w.name} (${w.role}) hit the ${limit} limit and did not finish. Branch: ${w.branch}. Files changed so far (${w.files.length}): ${fileList(w.files)}. Summary: ${w.summary}`,
   failed: (w: Pick<WorkerFacts, "name" | "role" | "branch">, reason: string) =>
-    `worker ${w.name}（${w.role}）失败：${reason}。分支 ${w.branch} 上可能有部分改动。`,
+    `Worker ${w.name} (${w.role}) failed: ${reason}. The branch ${w.branch} may have partial changes.`,
   cancelled: (w: Pick<WorkerFacts, "name" | "role" | "branch">) =>
-    `worker ${w.name}（${w.role}）被取消。分支 ${w.branch} 上可能有部分改动。`,
+    `Worker ${w.name} (${w.role}) was cancelled. The branch ${w.branch} may have partial changes.`,
   // 决策 298：卡住
   stalled: (w: Pick<WorkerFacts, "name" | "role" | "branch">, minutes: number) =>
-    `worker ${w.name}（${w.role}）卡住：${minutes} 分钟没有新的模型回复或工具结果，已中断。分支 ${w.branch} 上可能有部分改动。`,
+    `Worker ${w.name} (${w.role}) stalled: no new model reply or tool result for ${counted(minutes, "minute")}, so it was interrupted. The branch ${w.branch} may have partial changes.`,
   // 决策 303：停在等审批（时限取配置值）
   awaitingApproval: (
     w: Pick<WorkerFacts, "name" | "role" | "branch">,
     action: string,
     why: { kind: "timeout"; minutes: number } | { kind: "unattended" }
   ) =>
-    `worker ${w.name}（${w.role}）停在等审批：要${action}，${
-      why.kind === "timeout" ? `${why.minutes} 分钟内无人批准` : "无人值守运行没有人审批"
-    }。分支 ${w.branch} 上有已做的部分；人补批后它可以接着做。`,
-  attempt: (index: number) => `第 ${index} 份：`,
+    `Worker ${w.name} (${w.role}) stopped while waiting for approval of: ${action}; ${approvalWhy(why)}. The branch ${w.branch} has the work done so far; once a person approves, it can continue.`,
+  attempt: (index: number) => `Copy ${index}: `,
   // 多份尝试里已由 wait_workers 交回过的一份
-  attemptClaimed: (name: string) => `worker ${name} 的结果已由 ${WAIT_WORKERS_TOOL} 交回。`,
+  attemptClaimed: (name: string) =>
+    `The result of worker ${name} was already returned by ${WAIT_WORKERS_TOOL}.`,
   spawnLimit: (max: number) =>
-    `本次运行派出的 worker 已达 ${max} 个上限。不要再派；用已有的结果，或自己完成。`,
-  budgetExhausted: "本次运行的额度已用完，不能再派 worker；正在跑的 worker 已停止。",
-  notGit: "当前工作区不是 git 仓库，不能派 worker。",
+    `This run has reached the limit of ${max} spawned workers. Do not spawn more; use the results you have, or finish the work yourself.`,
+  budgetExhausted:
+    "This run's budget is used up, so no more workers can be spawned; the running workers have been stopped.",
+  notGit: "The current workspace is not a git repository, so workers cannot be spawned.",
   // 决策 360：工具清单或作用范围不合要求（理由来自编排器的校验）
-  badTools: (reason: string) => `没有派出：${reason}。`,
-  unknownRole: (role: string) => `没有角色 ${role}；可选：${WORKER_ROLES.join("、")}。`,
-  emptyTask: "task 不能为空：写清目标、相关文件与完成的标准。",
-  // 决策 279（271 修订）：另起一行写明起点快照与只取其自身改动的取用方式
-  start: (start: WorkerStartPoint, name: string) =>
-    workerStartLine(start, `调用 ${TAKE_WORKER_TOOL}（worker=${name}）`),
+  badTools: (reason: string) => `Not spawned: ${reason}.`,
+  unknownRole: (role: string) =>
+    `There is no role ${role}; choose from: ${WORKER_ROLES.join(", ")}.`,
+  emptyTask: "task cannot be empty: state the goal, the relevant files, and the criteria for done.",
+  // 决策 279（271 修订）：另起一行写明起点快照与只取其自身改动的取用方式（人看的 /workers 用 workers-commands.ts 的中文一行）
+  start: (start: WorkerStartPoint, name: string) => {
+    const commit = start.commit.slice(0, 12);
+    const origin = start.snapshot
+      ? `Start point: snapshot ${commit} (including ${start.files.length} uncommitted files at spawn time)`
+      : `Start point: commit ${commit} (no uncommitted files at spawn time)`;
+    return `${origin}; to apply its changes to your working directory, call ${TAKE_WORKER_TOOL} (worker=${name}).`;
+  },
   // 决策 377：只读的 explorer 不建分支、只交回摘要——各情形去掉分支与改动文件的那几句
   readOnly: {
     spawned: (w: { name: string; role: string; label?: string }) =>
-      `已派出 worker ${w.name}（${w.role}），只读你的工作区，不建分支${
-        w.label !== undefined ? `，标签 ${w.label}` : ""
-      }。它结束时会有通知；需要结果才能往下做时用 ${WAIT_WORKERS_TOOL} 等。`,
-    completed: (w: ReadOnlyFacts) => `worker ${w.name}（${w.role}）已完成。摘要：${w.summary}`,
-    limitHit: (w: ReadOnlyFacts, limit: "轮数" | "时间") =>
-      `worker ${w.name}（${w.role}）撞上${limit}上限，没有做完。摘要：${w.summary}`,
-    failed: (w: WorkerName, reason: string) => `worker ${w.name}（${w.role}）失败：${reason}。`,
-    cancelled: (w: WorkerName) => `worker ${w.name}（${w.role}）被取消。`,
+      `Spawned worker ${w.name} (${w.role}); it reads your workspace read-only and has no branch${
+        w.label !== undefined ? `, label ${w.label}` : ""
+      }. You will get a notice when it finishes; when you need its result before you can continue, wait with ${WAIT_WORKERS_TOOL}.`,
+    completed: (w: ReadOnlyFacts) =>
+      `Worker ${w.name} (${w.role}) completed. Summary: ${w.summary}`,
+    limitHit: (w: ReadOnlyFacts, limit: WorkerLimit) =>
+      `Worker ${w.name} (${w.role}) hit the ${limit} limit and did not finish. Summary: ${w.summary}`,
+    failed: (w: WorkerName, reason: string) => `Worker ${w.name} (${w.role}) failed: ${reason}.`,
+    cancelled: (w: WorkerName) => `Worker ${w.name} (${w.role}) was cancelled.`,
     stalled: (w: WorkerName, minutes: number) =>
-      `worker ${w.name}（${w.role}）卡住：${minutes} 分钟没有新的模型回复或工具结果，已中断。`,
+      `Worker ${w.name} (${w.role}) stalled: no new model reply or tool result for ${counted(minutes, "minute")}, so it was interrupted.`,
     awaitingApproval: (
       w: WorkerName,
       action: string,
       why: { kind: "timeout"; minutes: number } | { kind: "unattended" }
     ) =>
-      `worker ${w.name}（${w.role}）停在等审批：要${action}，${
-        why.kind === "timeout" ? `${why.minutes} 分钟内无人批准` : "无人值守运行没有人审批"
-      }。人补批后它可以接着做。`,
+      `Worker ${w.name} (${w.role}) stopped while waiting for approval of: ${action}; ${approvalWhy(why)}. Once a person approves, it can continue.`,
   },
 } as const;
+
+// 撞上的上限：轮数或时间
+export type WorkerLimit = "turn" | "time";
+
+// 停在等审批的原因
+function approvalWhy(why: { kind: "timeout"; minutes: number } | { kind: "unattended" }): string {
+  return why.kind === "timeout"
+    ? `nobody approved within ${counted(why.minutes, "minute")}`
+    : "an unattended run has nobody to approve";
+}
+
+// 条数与名词：1 minute、2 minutes
+function counted(count: number, noun: string): string {
+  return `${count} ${noun}${count === 1 ? "" : "s"}`;
+}
+
+// 跳过清单给模型的写法：路径（大小）以逗号相接（人看的写法见 snapshot-config.ts 的 skippedFilesText）
+export function skippedFilesForModel(skipped: readonly SkippedFile[]): string {
+  return skipped.map((file) => `${file.path} (${formatBytes(file.bytes)})`).join(", ");
+}
 
 // 决策 381：worker 新建却因过大不会写进交回的树的文件（附在交回文字之后；不属定稿原文）
 export function skippedFilesLine(skipped: readonly SkippedFile[] | undefined): string {
   return skipped !== undefined && skipped.length > 0
-    ? `\n没收进交回的大文件（${skipped.length}，未跟踪且过大，取用改动时不会叠入，留在工作树里）：${skippedFilesText(skipped)}`
+    ? `\nLarge files left out of the returned changes (${skipped.length}; untracked and too large, so taking the changes will not apply them, and they stay in the worktree): ${skippedFilesForModel(skipped)}`
     : "";
 }
 
@@ -324,9 +375,9 @@ interface WorkerFacts {
   summary: string;
 }
 
-// 文件列表：顿号相接；一个都没有时写"无"
+// 文件列表：逗号相接；一个都没有时写 none
 function fileList(files: readonly string[]): string {
-  return files.length > 0 ? files.join("、") : "无";
+  return files.length > 0 ? files.join(", ") : "none";
 }
 
 // 一次运行的派出额度（268、300）：不设总数上限；给了上限时 agent 派出的个数按运行计——运行标识变了（终端界面里每条输入是
@@ -465,7 +516,7 @@ export function workerOutcomeText(
   const text = workerOutcomeTextBase(outcome, budgetExhausted, settings);
   const outputs = outcome.hookOutputs ?? [];
   if (outputs.length === 0) return text;
-  return `${text}\n钩子输出：\n${outputs.map((line) => `  ${line}`).join("\n")}`;
+  return `${text}\nHook output:\n${outputs.map((line) => `  ${line}`).join("\n")}`;
 }
 
 function workerOutcomeTextBase(
@@ -511,9 +562,9 @@ function workerOutcomeTextBase(
     case "completed":
       return SPAWN_WORKER_TEXTS.completed(facts) + suffix + start;
     case "turn-limit":
-      return SPAWN_WORKER_TEXTS.limitHit(facts, "轮数") + suffix + start;
+      return SPAWN_WORKER_TEXTS.limitHit(facts, "turn") + suffix + start;
     case "wall-clock-limit":
-      return SPAWN_WORKER_TEXTS.limitHit(facts, "时间") + suffix + start;
+      return SPAWN_WORKER_TEXTS.limitHit(facts, "time") + suffix + start;
     case "stalled":
       return SPAWN_WORKER_TEXTS.stalled(base, minutesOf(settings.stallMs)) + start;
     case "cancelled":
@@ -523,9 +574,14 @@ function workerOutcomeTextBase(
         ? SPAWN_WORKER_TEXTS.budgetExhausted
         : SPAWN_WORKER_TEXTS.cancelled(base) + start;
     case "token-limit":
-      return SPAWN_WORKER_TEXTS.failed(base, "撞上 token 上限") + start;
+      return SPAWN_WORKER_TEXTS.failed(base, "it hit the token limit") + start;
     default:
-      return SPAWN_WORKER_TEXTS.failed(base, outcome.error ?? "运行以未知终态结束") + start;
+      return (
+        SPAWN_WORKER_TEXTS.failed(
+          base,
+          outcome.error ?? "the run ended in an unknown final state"
+        ) + start
+      );
   }
 }
 
@@ -555,18 +611,18 @@ function readOnlyOutcomeText(
     case "completed":
       return texts.completed(facts) + suffix;
     case "turn-limit":
-      return texts.limitHit(facts, "轮数") + suffix;
+      return texts.limitHit(facts, "turn") + suffix;
     case "wall-clock-limit":
-      return texts.limitHit(facts, "时间") + suffix;
+      return texts.limitHit(facts, "time") + suffix;
     case "stalled":
       return texts.stalled(who, minutesOf(settings.stallMs));
     case "cancelled":
     case "aborted":
       return budgetExhausted ? SPAWN_WORKER_TEXTS.budgetExhausted : texts.cancelled(who);
     case "token-limit":
-      return texts.failed(who, "撞上 token 上限");
+      return texts.failed(who, "it hit the token limit");
     default:
-      return texts.failed(who, outcome.error ?? "运行以未知终态结束");
+      return texts.failed(who, outcome.error ?? "the run ended in an unknown final state");
   }
 }
 
@@ -584,12 +640,30 @@ export function workerNoticeText(
   > = DEFAULT_SPAWN_WORKER_SETTINGS
 ): string {
   const text = workerOutcomeText(outcome, budgetExhausted, settings);
-  return `${outcome.label !== undefined ? `标签 ${outcome.label}：${text}` : text}\n${workerNoticeMarker(outcome.sessionId)}`;
+  return `${outcome.label !== undefined ? `${labelLead(outcome.label)}${text}` : text}\n${workerNoticeMarker(outcome.sessionId)}`;
+}
+
+// 带标签的通知开头
+function labelLead(label: string): string {
+  return `Label ${label}: `;
 }
 
 // 完成通知里可识别的 worker 会话号（权威链审计 ③）：续接时据主分支上的使用者消息里有没有它判定通知是否已递出
 export function workerNoticeMarker(sessionId: string): string {
+  return `(worker session ${sessionId})`;
+}
+
+// 决策 428 之前的说法：旧会话里递出的通知末行是中文的
+export function legacyWorkerNoticeMarker(sessionId: string): string {
   return `（worker 会话 ${sessionId}）`;
+}
+
+// 一段文字里有没有这个 worker 的通知末行：新旧两种说法都认
+export function hasWorkerNoticeMarker(text: string, sessionId: string): boolean {
+  return (
+    text.includes(workerNoticeMarker(sessionId)) ||
+    text.includes(legacyWorkerNoticeMarker(sessionId))
+  );
 }
 
 function reply(text: string, details: SpawnWorkerDetails): PigeonToolResult<SpawnWorkerDetails> {
@@ -671,7 +745,7 @@ export function createSpawnWorkerTool(
               role: params.role,
               branch: worktreeBranchFor(params.name ?? params.role),
             },
-            "本会话没有装配编排器"
+            "this session has no worker orchestrator set up"
           ),
           { sessionIds: [], rejected: "unbound" }
         );
@@ -776,12 +850,15 @@ async function spawnAttempts(
             `\n${workerNoticeMarker(outcome.sessionId)}`
         )
         .join("\n\n");
-      host.notices?.postGroup(spawnedIds, label !== undefined ? `标签 ${label}：${text}` : text);
+      host.notices?.postGroup(
+        spawnedIds,
+        label !== undefined ? `${labelLead(label)}${text}` : text
+      );
     },
     (error: unknown) => {
       host.notices?.postGroup(
         spawnedIds,
-        `多份尝试收尾异常：${error instanceof Error ? error.message : String(error)}\n` +
+        `The parallel attempts ended abnormally: ${error instanceof Error ? error.message : String(error)}\n` +
           spawnedIds.map(workerNoticeMarker).join("")
       );
     }

@@ -48,7 +48,7 @@ test("逐层拼接：用户级在前，项目级自仓库根往下到工作目�
       loaded.section,
       [
         "## 人写的说明（AGENTS.md）",
-        "以下内容在会话开始时读取；会话中这些文件被改动时，改后的内容会整段追加。",
+        "The following was read when the session started; if these files change during the session, the updated content is appended as a whole section.",
         "### ~/.pigeon/AGENTS.md\n用户",
         "### AGENTS.md\n根",
         "### packages/CLAUDE.md\npackages 的 CLAUDE",
@@ -123,11 +123,17 @@ test("合计 32 KiB 上限：跨过上限的那份只放入前面放得下的部
     assert.ok(loaded.section.includes(`### AGENTS.md\n${"汉".repeat(fit)}\n\n`));
     assert.ok(!loaded.section.includes("汉".repeat(fit + 1)));
     assert.ok(!loaded.section.includes("子目录"));
-    const overflow = `合计超出 32 KiB 上限，已截断：AGENTS.md 只放入前 ${fit * 3} 字节；sub/AGENTS.md 未放入`;
+    // 给模型的截断说明（英文，进「项目说明」一节）
     assert.ok(
-      loaded.section.endsWith(`（人写的说明${overflow}；需要时用 read_file 读取全文。）`),
+      loaded.section.endsWith(
+        "(The human-written instructions exceed the 32 KiB total limit and were truncated: " +
+          `AGENTS.md: only the first ${fit * 3} bytes are included; sub/AGENTS.md: not included. ` +
+          "Use read_file to read the full text when needed.)"
+      ),
       loaded.section.slice(-200)
     );
+    // 给人的终端提示（中文）
+    const overflow = `合计超出 32 KiB 上限，已截断：AGENTS.md 只放入前 ${fit * 3} 字节；sub/AGENTS.md 未放入`;
     assert.equal(loaded.notice, `[说明] AGENTS.md 等人写的说明${overflow}`);
     assert.deepEqual(
       loaded.manifest.map((entry) => [entry.path, entry.truncated, entry.included]),

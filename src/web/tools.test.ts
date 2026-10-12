@@ -91,9 +91,9 @@ test("web_fetch：网页原文只交给提炼，工具结果只有提炼结果�
   assert.doesNotMatch(text, new RegExp(RAW), "网页原文不进主对话");
   // 决策 379：提炼结果开头带外部内容标记
   assert.ok(text.startsWith(`${EXTERNAL_CONTENT_MARKER}\n`), text);
-  assert.match(text, /网页：文档/);
-  assert.match(text, /网址：https:\/\/docs\.example\/doc/);
-  assert.match(text, /提炼结果（针对：怎么安装）：\n提炼：安装步骤是 npm install/);
+  assert.match(text, /Page: 文档/);
+  assert.match(text, /URL: https:\/\/docs\.example\/doc/);
+  assert.match(text, /Distilled result \(for: 怎么安装\):\n提炼：安装步骤是 npm install/);
   assert.equal(inputs.length, 1);
   assert.equal(inputs[0]?.prompt, "怎么安装");
   assert.equal(inputs[0]?.title, "文档");
@@ -139,7 +139,7 @@ test("web_fetch：跨站跳转交回目标网站，不提炼；提炼结果撞�
     () => {}
   );
   const cappedText = capped.content.map((b) => (b.type === "text" ? b.text : "")).join("");
-  assert.match(cappedText, /半截\n（提炼结果撞上输出上限/);
+  assert.match(cappedText, /半截\n\(The distilled result hit the output limit/);
   assert.equal(capped.details.outputTruncated, true);
 });
 
@@ -157,7 +157,7 @@ test("web_fetch：内网网址被拒绝，报错为域错误；注册为 network
       undefined as unknown as AbortSignal,
       () => {}
     ),
-    /只能访问公网/
+    /Only public http\(s\) URLs/
   );
   const registration = webFetchRegistration();
   assert.equal(registration.tier, "network");
@@ -196,10 +196,10 @@ test("web_search：查询词与条数交给后端（条数缺省取配置），�
     text,
     [
       EXTERNAL_CONTENT_MARKER,
-      "搜索：pigeon harness（后端 fake，2 条结果）",
-      "答案：",
+      "Search: pigeon harness (backend fake, 2 results)",
+      "Answer:",
       "答案在此",
-      "结果：",
+      "Results:",
       "1. 甲",
       "   https://a.example/1",
       "   摘要甲",
@@ -254,8 +254,11 @@ test("web_fetch：正文超过字符上限时保留开头，提炼请求与交�
   const text = result.content.map((b) => (b.type === "text" ? b.text : "")).join("");
   assert.equal(inputs[0]?.content.length, 1_200);
   assert.equal(inputs[0]?.truncated, true);
-  assert.match(distillUserText(inputs[0] as DistillInput), /（原文过长，只看了前 1200 字符）/);
-  assert.match(text, /（原文过长，只看了前 1200 字符）/);
+  assert.match(
+    distillUserText(inputs[0] as DistillInput),
+    /\(The page text was too long; only the first 1200 characters were read\.\)/
+  );
+  assert.match(text, /\(The page text was too long; only the first 1200 characters were read\.\)/);
   assert.equal(result.details.truncated, true);
 
   await tool.execute(
@@ -265,5 +268,5 @@ test("web_fetch：正文超过字符上限时保留开头，提炼请求与交�
     () => {}
   );
   assert.equal(inputs[1]?.truncated, false);
-  assert.doesNotMatch(distillUserText(inputs[1] as DistillInput), /原文过长/);
+  assert.doesNotMatch(distillUserText(inputs[1] as DistillInput), /too long/);
 });

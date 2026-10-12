@@ -305,7 +305,7 @@ test("/reload 后系统提示逐字节不变；中途改的 AGENTS.md、两层�
     await s.bundle().adapter.run("开始");
     const first = statusTextOf(streamFn.calls[0]);
     assert.match(first, /开局写下的约定/);
-    assert.match(first, /alpha：开局的技能/);
+    assert.match(first, /alpha: 开局的技能/);
     assert.match(first, /开局学到的一条/);
     assert.match(first, /用户级开局的一条/);
     assert.doesNotMatch(first, /name="External tools"/);
@@ -328,7 +328,7 @@ test("/reload 后系统提示逐字节不变；中途改的 AGENTS.md、两层�
     const update = statusTextOf(call).split("<pigeon-status-update>").at(-1) ?? "";
     const lead = (name: string) => `This replaces the earlier "${name}" section in full:`;
     assert.match(update, new RegExp(`${lead("Project instructions")}[\\s\\S]*中途改过的约定`));
-    assert.match(update, new RegExp(`${lead("Skill catalog")}[\\s\\S]*中途的技能`));
+    assert.match(update, new RegExp(`${lead("Skill catalog")}[\\s\\S]*beta: 中途的技能`));
     assert.match(
       update,
       new RegExp(`${lead("Memory")}[\\s\\S]*中途学到的一条[\\s\\S]*用户级中途的一条`)

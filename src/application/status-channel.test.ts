@@ -256,7 +256,7 @@ test("Skill 文件改动后：load_skill 按重新登记的内容读取，不再
     }
     const result = JSON.stringify(streamFn.calls.at(-1)?.context.messages.at(-1));
     assert.match(result, /新步骤/);
-    assert.doesNotMatch(result, /已变更/);
+    assert.doesNotMatch(result, /Skill has changed/);
   } finally {
     r.cleanup();
   }
@@ -304,7 +304,7 @@ test("Skill 在两次请求之间被改（不经写档、命令档工具）：�
     }
     const result = JSON.stringify(streamFn.calls.at(-1)?.context.messages.at(-1));
     assert.match(result, /新步骤，多写一句/);
-    assert.doesNotMatch(result, /已变更/);
+    assert.doesNotMatch(result, /Skill has changed/);
   } finally {
     r.cleanup();
   }

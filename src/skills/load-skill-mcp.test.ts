@@ -67,7 +67,7 @@ test("load_skill 读 MCP prompt：重取正文、details 带读取摘要；正�
       assert.equal(calls, 1);
       const output = textOf(result);
       assert.ok(output.includes(text), output);
-      assert.ok(output.includes("MCP server fx 的 prompt greet"), output);
+      assert.ok(output.includes("prompt greet from MCP server fx"), output);
       assert.deepEqual(loaded, [
         {
           name: "mcp__fx__greet",
@@ -91,7 +91,8 @@ test("load_skill 读 MCP prompt：重取正文、details 带读取摘要；正�
       const tool = createLoadSkillTool({ catalog });
       await assert.rejects(
         tool.execute("call-3", { name: "mcp__fx__greet" }),
-        (error: unknown) => error instanceof LoadSkillError && /下个会话生效/.test(error.message)
+        (error: unknown) =>
+          error instanceof LoadSkillError && /takes effect next session/.test(error.message)
       );
     }
   );
@@ -105,7 +106,7 @@ test("load_skill 读 MCP prompt：超上限可见截断，哈希按全文；serv
     async (catalog) => {
       const { tool, loaded } = recording(createLoadSkillTool({ catalog, maxBytes: 30 }));
       const output = textOf(await tool.execute("call-1", { name: "mcp__fx__greet" }));
-      assert.ok(output.includes("已截断"), output);
+      assert.ok(output.includes("(Truncated:"), output);
       assert.equal(loaded[0]?.truncated, true);
       assert.equal(loaded[0]?.hash, sha256(text));
     }

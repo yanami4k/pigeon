@@ -182,10 +182,10 @@ test("决策 339 ①⑥：装配出的检索工具排除本次运行自己的会
     );
     assert.equal(outputs.length, 2);
     const [searched = "", listed = ""] = outputs;
-    assert.match(searched, /^命中 1 个会话/);
+    assert.match(searched, /^Matches in 1 session /);
     assert.ok(searched.includes(earlier.result.sessionId) && searched.includes("needle 以前"));
     assert.ok(!searched.includes(current.result.sessionId), searched);
-    assert.match(listed, /^以前的会话 1 个/);
+    assert.match(listed, /^Earlier sessions: 1 /);
     assert.ok(listed.includes(earlier.result.sessionId));
     assert.ok(!listed.includes(current.result.sessionId), listed);
     assert.ok(
@@ -253,7 +253,7 @@ test("决策 339 ①：worker 运行面的检索排除派出它的会话（父�
           : []
       )
       .join("");
-    assert.match(output, /^命中 1 个会话/);
+    assert.match(output, /^Matches in 1 session /);
     assert.ok(output.includes(earlier.sessionId), output);
     assert.ok(!output.includes(parent.sessionId), output);
   } finally {

@@ -45,21 +45,23 @@ import {
 import { type NoticeTarget, WORKER_NOTICE_PREFIX, WorkerNotices } from "./worker-notices.ts";
 
 // 定稿原文（含 297 起的改写）：缺省设定（同时 8 个、不设总数上限、层数 1）
-const FINAL_DESCRIPTION = `派一个 worker 去完成一项独立的子任务。派出后立即返回它的名字，不等它做完；它结束时会有一条通知进入你的对话，交回它的分支、改动过的文件与工作摘要（explorer 只交回摘要）。
-implementer 与 tester 从派出时主工作目录的快照开工（含未提交的改动与未被忽略的新文件），在自己的 git 工作树与分支里干活；explorer 不建工作树，直接只读你当前的工作区，读到的是正在变的内容，可能读到正在修改的文件。worker 都看不到本会话的对话。
-要并行，就多次调用本工具，每次派一个（可在同一次回复里连续调用）；同时最多跑 8 个，多的排队。派出后可以接着做自己的事，但不要把派出去的活自己再做一遍。需要结果才能往下做时用 wait_workers 等；worker_status 查看进度，message_worker 给在跑的 worker 补充说明，stop_worker 停掉不再需要的。
-何时派：任务能拆成互不依赖的几块、并行能明显省时间时才派，通常 2 到 4 个就够；简单的活、前后依赖紧的活自己做。每个 worker 都要重新读代码，派得越多花得越多。
-任务要写得能独立完成：目标、相关文件、完成的标准都写清楚。worker 不能向你提问，也不能再派 worker。
-不给 tools 时，角色决定 worker 能用的工具：explorer 只能读代码与检索历史会话，适合调查与定位；implementer 能读写文件、不能跑命令，适合按明确的方案改代码；tester 能读文件与跑命令、不能改文件，适合运行与诊断测试；三种角色另外都能用 web_search 与 web_fetch 查资料。
-要别的组合就给 tools：只能从你自己现在能用的工具里选（派 worker、写记忆、任务清单一类除外），没列的工具 worker 没有。还可以用 scopes 收窄某件工具：read_file、edit_file、write_file、grep、glob 限在给定的路径之内，run_command 只能运行以给定前缀开头、不经 shell 的单条命令；越出范围的调用会被拒绝。worker 跑命令与你同一套审批规则。
-worker 的改动不会自动并入你的分支：看过交回的分支与摘要后，由你决定合不合、怎么合。`;
+const FINAL_DESCRIPTION = `Spawn a worker to complete an independent subtask. It returns the worker's name right after spawning, without waiting for it to finish; when the worker finishes, a notice enters your conversation with its branch, the files it changed, and a summary of its work (an explorer returns only the summary).
+implementer and tester start from a snapshot of the main working directory at spawn time (including uncommitted changes and new files that are not ignored) and work in their own git worktree and branch; explorer gets no worktree and reads your current workspace directly, read-only, so it sees content that is still changing and may read files that are being modified. No worker can see this session's conversation.
+To work in parallel, call this tool several times, one worker per call (you can make several calls in the same reply); at most 8 run at once, and the rest queue. After spawning you can go on with your own work, but do not redo the work you handed off. When you need a result before you can continue, wait with wait_workers; check progress with worker_status, give a running worker more instructions with message_worker, and stop workers you no longer need with stop_worker.
+When to spawn: only when the task splits into independent pieces and running them in parallel clearly saves time; 2 to 4 workers is usually enough. Do simple work and tightly sequential work yourself. Every worker has to read the code again, so the more you spawn, the more it costs.
+Write the task so it can be completed on its own: state the goal, the relevant files, and the criteria for done. A worker cannot ask you questions, and it cannot spawn workers of its own.
+Without tools, the role decides which tools a worker can use: explorer can only read code and search past sessions, suited to investigating and locating things; implementer can read and write files but cannot run commands, suited to changing code by a clear plan; tester can read files and run commands but cannot change files, suited to running and diagnosing tests; all three roles can also use web_search and web_fetch to look things up.
+For a different combination, give tools: you can choose only from the tools you can use now (except tools for spawning workers, writing memory, and the task list), and a worker does not have any tool you leave out. You can also narrow a tool with scopes: read_file, edit_file, write_file, grep, glob are limited to the given paths, and run_command can only run single commands that start with a given prefix and do not go through a shell; calls outside the scope are rejected. A worker's commands follow the same approval rules as yours.
+A worker's changes are not merged into your branch automatically: after reviewing the returned branch and summary, you decide whether and how to merge them.`;
 
 const FINAL_PARAMS = {
-  role: "worker 的角色，不给 tools 时决定它能用的工具，见工具说明",
-  task: "子任务的完整说明：目标、相关文件、完成的标准",
-  name: "worker 的名字，用于分支名与状态显示；不给即自动生成",
-  attempts: "同一任务并行派出的份数；给了即各做一份，全部做完后交回各份的改动与摘要，由你比较",
-  label: "可选的标签，原样出现在这个 worker 的通知与结果里，便于对应任务清单里的项",
+  role: "The worker's role; without tools, it decides which tools the worker can use (see the tool description)",
+  task: "The full description of the subtask: goal, relevant files, and criteria for done",
+  name: "The worker's name, used in the branch name and status display; generated automatically if omitted",
+  attempts:
+    "How many copies of the same task to spawn in parallel; if given, each worker does its own copy, and when all are done the changes and summary of each are returned for you to compare",
+  label:
+    "Optional label that appears as is in this worker's notices and results, to help match it to an item in the task list",
 };
 
 const roots: string[] = [];
@@ -387,7 +389,7 @@ test("spawn_worker 的说明与参数说明逐字为定稿原文；执行模式�
   // 任务清单关着时 label 的说明不提清单
   assert.equal(
     (spawnWorkerParamsSchema(false).properties.label as { description?: string }).description,
-    "可选的标签，原样出现在这个 worker 的通知与结果里"
+    "Optional label that appears as is in this worker's notices and results"
   );
 });
 
@@ -397,32 +399,51 @@ test("说明随配置变化：同时在跑的上限、给了才出现的总数�
     maxConcurrent: 2,
     maxAgentSpawns: 5,
   });
-  assert.ok(text.includes("同时最多跑 2 个，多的排队"), text);
-  assert.ok(text.includes("一次运行最多派 5 个。"), text);
+  assert.ok(text.includes("at most 2 run at once, and the rest queue"), text);
+  assert.ok(text.includes(" At most 5 workers can be spawned per run."), text);
   // 不给总数上限（缺省）时不提这一句
-  assert.ok(!spawnWorkerDescription(DEFAULT_SPAWN_WORKER_SETTINGS).includes("一次运行最多派"));
+  assert.ok(
+    !spawnWorkerDescription(DEFAULT_SPAWN_WORKER_SETTINGS).includes("can be spawned per run")
+  );
   const nested = spawnWorkerDescription({ ...DEFAULT_SPAWN_WORKER_SETTINGS, maxDepth: 3 });
-  assert.ok(nested.includes("worker 不能向你提问；它还能往下再派 2 层 worker。"), nested);
+  assert.ok(
+    nested.includes(
+      "A worker cannot ask you questions; it can itself spawn workers up to 2 more levels down."
+    ),
+    nested
+  );
   // 第二层的 worker 再派：新 worker 在第三层，已到底
   const second = spawnWorkerDescription({
     ...DEFAULT_SPAWN_WORKER_SETTINGS,
     maxDepth: 3,
     depth: 2,
   });
-  assert.ok(second.includes("worker 不能向你提问，也不能再派 worker。"), second);
+  assert.ok(
+    second.includes("A worker cannot ask you questions, and it cannot spawn workers of its own."),
+    second
+  );
   assert.throws(() => new SpawnWorkerSlot({ ...DEFAULT_SPAWN_WORKER_SETTINGS, maxConcurrent: 0 }));
 });
 
 test("另外四件工具的说明逐字为定稿原文；wait_workers 的最长等待跟着 worker 的时间上限配置", () => {
   assert.equal(
     waitWorkersDescription(DEFAULT_SPAWN_WORKER_SETTINGS),
-    "等 worker 结束并交回结果。workers 给出要等的 worker 名字，不给即等所有还在跑的；mode 为 any 时任一个结束就返回，为 all 时全部结束才返回；到 timeout_seconds 仍未结束即返回当时的状态，没结束的 worker 继续跑。已经结束的 worker 立即交回。每个结果写明状态（完成、失败、超时、撞上限、取消、卡住）、错误类型、最后一段输出、改动的文件与会话记录位置。"
+    "Wait for workers to finish and return their results. workers gives the names of the workers to wait for; if omitted, waits for all that are still running. With mode any, returns as soon as any one finishes; with all, returns only when all have finished. If they have not finished by timeout_seconds, returns their status at that point, and unfinished workers keep running. Workers that have already finished are returned immediately. Each result states the status (completed, failed, timed out, hit a limit, cancelled, stalled), the error kind, the last output, the changed files, and where the session record is."
   );
   const params = waitWorkersParamsSchema(DEFAULT_SPAWN_WORKER_SETTINGS)
     .properties as unknown as Record<string, { description?: string }>;
-  assert.equal(params.workers?.description, "要等的 worker 名字；不给即所有还在跑的");
-  assert.equal(params.mode?.description, "any：任一个结束即返回；all：全部结束才返回（缺省）");
-  assert.equal(params.timeout_seconds?.description, "最多等多少秒（缺省 300，最多 1800）");
+  assert.equal(
+    params.workers?.description,
+    "Names of the workers to wait for; if omitted, all that are still running"
+  );
+  assert.equal(
+    params.mode?.description,
+    "any: return as soon as any one finishes; all: return only when all have finished (default)"
+  );
+  assert.equal(
+    params.timeout_seconds?.description,
+    "Maximum seconds to wait (default 300, at most 1800)"
+  );
   assert.equal(
     (
       waitWorkersParamsSchema({ workerWallClockMs: 600_000 }).properties.timeout_seconds as {
@@ -433,41 +454,41 @@ test("另外四件工具的说明逐字为定稿原文；wait_workers 的最长�
   );
   assert.equal(
     WORKER_STATUS_DESCRIPTION,
-    "查看 worker 的状态：名字、角色、标签、状态、已用轮数与时间；已结束的附结果摘要。workers 不给即列出全部。要等结果用 wait_workers，不要反复调用本工具轮询。"
+    "Show worker status: name, role, label, state, and the turns and time used; finished workers include a summary of the result. If workers is omitted, lists all. To wait for results, use wait_workers; do not poll by calling this tool repeatedly."
   );
   assert.equal(
     MESSAGE_WORKER_DESCRIPTION,
-    "给一个还在跑的 worker 发一段补充说明或更正，它在下一轮看到。已结束的 worker 收不到。"
+    "Send a running worker additional instructions or a correction; it sees them in its next turn. Finished workers cannot receive messages."
   );
   assert.equal(
     STOP_WORKER_DESCRIPTION,
-    "停掉一个还在跑或排队的 worker；它已做的改动留在分支上，结果照常交回。"
+    "Stop a running or queued worker; the changes it has made stay on its branch, and its result is returned as usual."
   );
 });
 
 test("固定情形的返回文字逐字为定稿原文", () => {
   assert.equal(
     SPAWN_WORKER_TEXTS.spawned({ name: "w", role: "explorer", branch: "pigeon/w", label: "T1" }),
-    "已派出 worker w（explorer），分支 pigeon/w，标签 T1。它结束时会有通知；需要结果才能往下做时用 wait_workers 等。"
+    "Spawned worker w (explorer) on branch pigeon/w, label T1. You will get a notice when it finishes; when you need its result before you can continue, wait with wait_workers."
   );
   // 决策 377：只读的 explorer 不提分支与改动文件
   assert.equal(
     SPAWN_WORKER_TEXTS.readOnly.spawned({ name: "w", role: "explorer" }),
-    "已派出 worker w（explorer），只读你的工作区，不建分支。它结束时会有通知；需要结果才能往下做时用 wait_workers 等。"
+    "Spawned worker w (explorer); it reads your workspace read-only and has no branch. You will get a notice when it finishes; when you need its result before you can continue, wait with wait_workers."
   );
   assert.equal(
     SPAWN_WORKER_TEXTS.readOnly.awaitingApproval({ name: "w", role: "explorer" }, "读 x", {
       kind: "unattended",
     }),
-    "worker w（explorer）停在等审批：要读 x，无人值守运行没有人审批。人补批后它可以接着做。"
+    "Worker w (explorer) stopped while waiting for approval of: 读 x; an unattended run has nobody to approve. Once a person approves, it can continue."
   );
   assert.equal(
     SPAWN_WORKER_TEXTS.attemptsSpawned(["a-1", "a-2"]),
-    "已并行派出 2 份：a-1、a-2。全部结束后会有一条通知，交回各份的改动与摘要。"
+    "Spawned 2 copies in parallel: a-1, a-2. When all of them finish, one notice will return the changes and summary of each."
   );
   assert.equal(
     SPAWN_WORKER_TEXTS.stalled({ name: "w", role: "tester", branch: "pigeon/w" }, 10),
-    "worker w（tester）卡住：10 分钟没有新的模型回复或工具结果，已中断。分支 pigeon/w 上可能有部分改动。"
+    "Worker w (tester) stalled: no new model reply or tool result for 10 minutes, so it was interrupted. The branch pigeon/w may have partial changes."
   );
   assert.equal(
     SPAWN_WORKER_TEXTS.awaitingApproval(
@@ -475,7 +496,7 @@ test("固定情形的返回文字逐字为定稿原文", () => {
       "跑命令 npm test",
       { kind: "timeout", minutes: 7 }
     ),
-    "worker w（tester）停在等审批：要跑命令 npm test，7 分钟内无人批准。分支 pigeon/w 上有已做的部分；人补批后它可以接着做。"
+    "Worker w (tester) stopped while waiting for approval of: 跑命令 npm test; nobody approved within 7 minutes. The branch pigeon/w has the work done so far; once a person approves, it can continue."
   );
   assert.equal(
     SPAWN_WORKER_TEXTS.awaitingApproval(
@@ -483,22 +504,28 @@ test("固定情形的返回文字逐字为定稿原文", () => {
       "跑命令 npm test",
       { kind: "unattended" }
     ),
-    "worker w（tester）停在等审批：要跑命令 npm test，无人值守运行没有人审批。分支 pigeon/w 上有已做的部分；人补批后它可以接着做。"
+    "Worker w (tester) stopped while waiting for approval of: 跑命令 npm test; an unattended run has nobody to approve. The branch pigeon/w has the work done so far; once a person approves, it can continue."
   );
   assert.equal(
     SPAWN_WORKER_TEXTS.spawnLimit(16),
-    "本次运行派出的 worker 已达 16 个上限。不要再派；用已有的结果，或自己完成。"
+    "This run has reached the limit of 16 spawned workers. Do not spawn more; use the results you have, or finish the work yourself."
   );
   assert.equal(
     SPAWN_WORKER_TEXTS.budgetExhausted,
-    "本次运行的额度已用完，不能再派 worker；正在跑的 worker 已停止。"
+    "This run's budget is used up, so no more workers can be spawned; the running workers have been stopped."
   );
-  assert.equal(SPAWN_WORKER_TEXTS.notGit, "当前工作区不是 git 仓库，不能派 worker。");
+  assert.equal(
+    SPAWN_WORKER_TEXTS.notGit,
+    "The current workspace is not a git repository, so workers cannot be spawned."
+  );
   assert.equal(
     SPAWN_WORKER_TEXTS.unknownRole("reviewer"),
-    "没有角色 reviewer；可选：explorer、implementer、tester。"
+    "There is no role reviewer; choose from: explorer, implementer, tester."
   );
-  assert.equal(SPAWN_WORKER_TEXTS.emptyTask, "task 不能为空：写清目标、相关文件与完成的标准。");
+  assert.equal(
+    SPAWN_WORKER_TEXTS.emptyTask,
+    "task cannot be empty: state the goal, the relevant files, and the criteria for done."
+  );
 });
 
 test("派出立即返回：worker 还在跑时工具已交回名字与分支，不等它做完", async () => {
@@ -540,7 +567,7 @@ test("完成通知：worker 结束时一条带标签的通知递给派出方并�
   // 末行为可识别的 worker 会话号（续接时据它判定通知是否已递出）
   assert.equal(
     h.target.queue[0]?.text,
-    `${WORKER_NOTICE_PREFIX}标签 T1：${completed}\n${workerNoticeMarker(fixA ?? "")}`
+    `${WORKER_NOTICE_PREFIX}Label T1: ${completed}\n${workerNoticeMarker(fixA ?? "")}`
   );
   assert.equal(h.wakes, 1);
   await call(h, { role: "explorer", task: "看看", name: "long" });
@@ -548,7 +575,7 @@ test("完成通知：worker 结束时一条带标签的通知递给派出方并�
   const id = h.orchestrator.status().find((worker) => worker.name === "long")?.sessionId;
   assert.ok(
     h.target.queue[1]?.text.endsWith(
-      `（摘要已截断，全文在 worker 会话 ${id} 里）\n（worker 会话 ${id}）`
+      ` (summary truncated; the full text is in worker session ${id})\n(worker session ${id})`
     )
   );
   // 人派的（human）与程序派的（program）不发通知
@@ -568,7 +595,7 @@ test("各种结束状态：撞上限、超时、失败、取消各有通知；�
   await until(() => turns.target.pendingNotices() === 1);
   const limitHit = SPAWN_WORKER_TEXTS.limitHit(
     { name: "w", role: "tester", branch: "pigeon/w", files: ["x.ts"], summary: "做了一半" },
-    "轮数"
+    "turn"
   );
   assert.equal(
     turns.target.queue[0]?.text,
@@ -578,22 +605,22 @@ test("各种结束状态：撞上限、超时、失败、取消各有通知；�
   await call(clock, { role: "tester", task: "跑", name: "t" });
   const timedOut = await wait(clock, { workers: ["t"] });
   assert.ok(
-    timedOut.startsWith("worker t（tester）：状态 超时；错误类型 wall-clock-limit。"),
+    timedOut.startsWith("Worker t (tester): status timed out; error kind wall-clock-limit."),
     timedOut
   );
   const failed = harness({ scriptFor: () => ({ behavior: "fail" }) });
   await call(failed, { role: "implementer", task: "改", name: "bad" });
   const failedText = await wait(failed, { workers: ["bad"] });
   assert.ok(
-    failedText.startsWith("worker bad（implementer）：状态 失败；错误类型 run-failed（炸了）。"),
+    failedText.startsWith("Worker bad (implementer): status failed; error kind run-failed (炸了)."),
     failedText
   );
-  assert.ok(failedText.includes("会话记录：/virtual/sessions/worker.jsonl"), failedText);
+  assert.ok(failedText.includes("Session record: /virtual/sessions/worker.jsonl"), failedText);
   const cancelled = harness({ scriptFor: () => ({ behavior: "hang" }) });
   await call(cancelled, { role: "implementer", task: "改", name: "slow" });
   assert.equal(
     textOf(await cancelled.stop.execute("s", { worker: "slow" })),
-    "已停掉 worker slow；它已做的改动留在分支上，结果照常交回。"
+    "Stopped worker slow; the changes it has made stay on its branch, and its result is returned as usual."
   );
   await until(() => cancelled.target.pendingNotices() === 1);
   const cancelledText = SPAWN_WORKER_TEXTS.cancelled({
@@ -607,7 +634,7 @@ test("各种结束状态：撞上限、超时、失败、取消各有通知；�
   );
   assert.equal(
     textOf(await cancelled.stop.execute("s", { worker: "slow" })),
-    "worker slow 已结束，不需要停。"
+    "Worker slow has already finished; there is no need to stop it."
   );
 });
 
@@ -617,9 +644,12 @@ test("wait_workers：all 等全部、any 等任一、超时交回当时状态且
   await call(h, { role: "tester", task: "二", name: "two" });
   // 超时：两个都没结束
   const timedOut = await wait(h, { timeout_seconds: 1 });
-  assert.ok(timedOut.startsWith("等了 1 秒，仍有 worker 没结束。"), timedOut);
-  assert.ok(timedOut.includes("worker one（tester）还没结束（进行中，0 轮，"), timedOut);
-  assert.ok(timedOut.includes("继续在跑。"), timedOut);
+  assert.ok(timedOut.startsWith("Waited 1 second; some workers have not finished."), timedOut);
+  assert.ok(
+    timedOut.includes("Worker one (tester) has not finished yet (running, 0 turns, "),
+    timedOut
+  );
+  assert.ok(timedOut.includes("and is still running."), timedOut);
   assert.equal(h.orchestrator.status().filter((worker) => worker.state === "running").length, 2);
   // any：放行 one 即返回 one 的完整结果
   const anyWait = wait(h, { mode: "any" });
@@ -627,20 +657,23 @@ test("wait_workers：all 等全部、any 等任一、超时交回当时状态且
   const anyText = await anyWait;
   assert.ok(
     anyText.startsWith(
-      "worker one（tester），标签 A：状态 完成。\n分支：pigeon/one。改动的文件（1）：a.ts。\n最后一段输出：好了"
+      "Worker one (tester), label A: status completed.\nBranch: pigeon/one. Changed files (1): a.ts.\nLast output: 好了"
     ),
     anyText
   );
-  assert.ok(anyText.includes("worker two（tester）还没结束"), anyText);
+  assert.ok(anyText.includes("Worker two (tester) has not finished yet"), anyText);
   // all：放行 two 后返回
   const allWait = wait(h, { workers: ["two"] });
   h.runtimes.get("two")?.release();
-  assert.ok((await allWait).startsWith("worker two（tester）：状态 完成。"));
+  assert.ok((await allWait).startsWith("Worker two (tester): status completed."));
   // 没有要等的
-  assert.equal(await wait(h, {}), "没有要等的 worker：都已结束或还没派出。");
+  assert.equal(
+    await wait(h, {}),
+    "No workers to wait for: all have finished or none have been spawned."
+  );
   assert.equal(
     await wait(h, { workers: ["nope"] }),
-    "没有名为 nope 的 worker；用 spawn_worker 交回的名字。"
+    "There is no worker named nope; use the name that spawn_worker returned."
   );
 });
 
@@ -650,7 +683,7 @@ test("同一结果不出现两遍：等着的 worker 结束不另发通知；已
   // ① 等待期间结束：不发通知，等待交回完整结果
   const pending = wait(h, { workers: ["awaited"] });
   h.runtimes.get("awaited")?.release();
-  assert.ok((await pending).startsWith("worker awaited（explorer）：状态 完成。"));
+  assert.ok((await pending).startsWith("Worker awaited (explorer): status completed."));
   assert.equal(h.target.pendingNotices(), 0);
   assert.equal(h.wakes, 0);
   // ② 已结束、通知还没递出：等待撤回通知、交回完整结果
@@ -658,7 +691,9 @@ test("同一结果不出现两遍：等着的 worker 结束不另发通知；已
   h.runtimes.get("queued")?.release();
   await until(() => h.target.pendingNotices() === 1);
   assert.ok(
-    (await wait(h, { workers: ["queued"] })).startsWith("worker queued（explorer）：状态 完成。")
+    (await wait(h, { workers: ["queued"] })).startsWith(
+      "Worker queued (explorer): status completed."
+    )
   );
   assert.equal(h.target.pendingNotices(), 0);
   // ③ 通知已递出：等待照常交回，但只写一句
@@ -668,7 +703,7 @@ test("同一结果不出现两遍：等着的 worker 结束不另发通知；已
   assert.equal(h.target.deliverAll().length, 1);
   assert.equal(
     await wait(h, { workers: ["told"] }),
-    "worker told（explorer）已结束（完成），结果见此前的通知。"
+    "Worker told (explorer) has finished (completed); see the earlier notice for its result."
   );
 });
 
@@ -684,17 +719,19 @@ test("worker_status 与 message_worker：列出状态与标签、已结束的附
   await call(h, { role: "explorer", task: "二", name: "done" });
   await until(() => settled(h, "done"));
   const status = textOf(await h.status.execute("st", {}));
-  assert.ok(status.includes("busy（explorer），标签 L：进行中，0 轮，已用 "), status);
-  assert.ok(status.includes("done（explorer）：完成，1 轮，用时 "), status);
-  assert.ok(status.includes("结果摘要：结论在此"), status);
+  assert.ok(status.includes("busy (explorer), label L: running, 0 turns, "), status);
+  assert.ok(status.includes("done (explorer): completed, 1 turn, took "), status);
+  assert.ok(status.includes("Result summary: 结论在此"), status);
   assert.equal(
     textOf(await h.message.execute("m", { worker: "busy", message: "顺便看看 b.ts" })),
-    "已把话递给 worker busy，它在下一轮看到。"
+    "Delivered the message to worker busy; it will see it in its next turn."
   );
-  assert.deepEqual(h.runtimes.get("busy")?.notes, ["[来自派出方的消息] 顺便看看 b.ts"]);
+  assert.deepEqual(h.runtimes.get("busy")?.notes, [
+    "[Message from the agent that spawned you] 顺便看看 b.ts",
+  ]);
   assert.equal(
     textOf(await h.message.execute("m", { worker: "done", message: "x" })),
-    "worker done 已结束，收不到消息。"
+    "Worker done has finished and cannot receive messages."
   );
   h.runtimes.get("busy")?.release();
 });
@@ -721,7 +758,7 @@ test("同时在跑缺省 8 个：多派的排队不拒绝，人派的一并计�
   for (let i = 1; i <= 8; i += 1) {
     assert.ok(
       (await call(h, { role: "explorer", task: `agent ${i}`, name: `agent-${i}` })).startsWith(
-        "已派出"
+        "Spawned worker"
       )
     );
   }
@@ -738,7 +775,7 @@ test("同时在跑缺省 8 个：多派的排队不拒绝，人派的一并计�
   for (let i = 9; i <= 38; i += 1) {
     assert.ok(
       (await call(h, { role: "explorer", task: `agent ${i}`, name: `agent-${i}` })).startsWith(
-        "已派出"
+        "Spawned worker"
       )
     );
   }
@@ -765,14 +802,16 @@ test("给了总数上限（--worker-limit）：满了按定稿文字拒绝；人
   });
   h.orchestrator.spawn({ role: "explorer", task: "人派", name: "human-1", origin: "human" });
   for (let i = 1; i <= 3; i += 1) {
-    assert.ok((await call(h, { role: "explorer", task: `第 ${i} 个` })).startsWith("已派出"));
+    assert.ok(
+      (await call(h, { role: "explorer", task: `第 ${i} 个` })).startsWith("Spawned worker")
+    );
   }
   assert.equal(
     await call(h, { role: "explorer", task: "第 4 个" }),
     SPAWN_WORKER_TEXTS.spawnLimit(3)
   );
   run = "run-2";
-  assert.ok((await call(h, { role: "explorer", task: "新一次运行" })).startsWith("已派出"));
+  assert.ok((await call(h, { role: "explorer", task: "新一次运行" })).startsWith("Spawned worker"));
   assert.equal(h.budget.spawned(), 1);
 });
 
@@ -847,11 +886,11 @@ test("多份尝试：派出即返回名单，后台跑完交回各份汇总一�
   assert.equal(
     h.target.queue[0]?.text,
     WORKER_NOTICE_PREFIX +
-      "标签 T2：" +
+      "Label T2: " +
       [
-        `${SPAWN_WORKER_TEXTS.attempt(1)}${SPAWN_WORKER_TEXTS.completed(facts(1))}\n钩子输出：\n  还差错误路径用例\n${workerNoticeMarker(ids[0] as SessionId)}`,
-        `第 2 份：worker implementer-2 的结果已由 wait_workers 交回。\n${workerNoticeMarker(ids[1] as SessionId)}`,
-        `${SPAWN_WORKER_TEXTS.attempt(3)}${SPAWN_WORKER_TEXTS.limitHit(facts(3), "轮数")}\n${workerNoticeMarker(ids[2] as SessionId)}`,
+        `${SPAWN_WORKER_TEXTS.attempt(1)}${SPAWN_WORKER_TEXTS.completed(facts(1))}\nHook output:\n  还差错误路径用例\n${workerNoticeMarker(ids[0] as SessionId)}`,
+        `Copy 2: The result of worker implementer-2 was already returned by wait_workers.\n${workerNoticeMarker(ids[1] as SessionId)}`,
+        `${SPAWN_WORKER_TEXTS.attempt(3)}${SPAWN_WORKER_TEXTS.limitHit(facts(3), "turn")}\n${workerNoticeMarker(ids[2] as SessionId)}`,
       ].join("\n\n")
   );
   assert.equal(h.budget.spawned(), 3);
@@ -866,7 +905,7 @@ test("message_worker 未送达：worker 在下一轮之前结束（最后一轮�
   const result = await pending;
   assert.equal(
     textOf(result),
-    "未送达：worker closing 已结束或正在收尾。要这段话生效，另派一个 worker 或自己做。"
+    "Not delivered: worker closing has finished or is wrapping up. For this message to take effect, spawn another worker or do it yourself."
   );
   assert.equal(result.details.delivered, false);
   assert.deepEqual(h.runtimes.get("closing")?.withdrawn, ["note-1"]);

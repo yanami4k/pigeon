@@ -105,7 +105,7 @@ test("读 SKILL.md 与 references 资源；每次读取的 details 带摘要（�
 test("来源约束：未登记的 Skill 名拒绝，什么都不返回也不留读取记录", async () => {
   const { tool, loaded, cleanup } = makeSkill();
   try {
-    await assert.rejects(tool.execute("t1", { name: "ghost" }), /未登记的 Skill：ghost/);
+    await assert.rejects(tool.execute("t1", { name: "ghost" }), /Unregistered Skill: ghost/);
     assert.deepEqual(loaded, []);
   } finally {
     cleanup();
@@ -119,11 +119,11 @@ test("路径约束：../ 与目录联接逃逸出 Skill 目录一律拒绝（去
   try {
     await assert.rejects(
       tool.execute("t1", { name: "deploy", resource: "../../../../outside/secret.md" }),
-      /越出 Skill 目录/
+      /escapes the Skill directory/
     );
     await assert.rejects(
       tool.execute("t2", { name: "deploy", resource: "linked/secret.md" }),
-      /越出 Skill 目录/
+      /escapes the Skill directory/
     );
     assert.deepEqual(loaded, []);
   } finally {
@@ -142,11 +142,11 @@ test("路径约束：名字以 .. 开头的合法资源（..notes.md）照常读
     assert.equal(notes.details.resourcePath, "..notes.md");
     await assert.rejects(
       tool.execute("t2", { name: "deploy", resource: "../../../../outside/secret.md" }),
-      /越出 Skill 目录/
+      /escapes the Skill directory/
     );
     await assert.rejects(
       tool.execute("t3", { name: "deploy", resource: "linked/secret.md" }),
-      /越出 Skill 目录/
+      /escapes the Skill directory/
     );
     assert.deepEqual(
       loaded.map((entry) => entry.resourcePath),
@@ -167,7 +167,7 @@ test("大小约束：单文件超 64 KiB 可见截断并带全文哈希（去大
     const result = await tool.execute("t1", { name: "deploy", resource: "references/big.md" });
     const text = textOf(result);
     assert.equal(result.details.truncated, true);
-    assert.match(text, /已截断/);
+    assert.match(text, /\(Truncated:/);
     assert.ok(text.includes(sha256(big)));
     assert.ok(Buffer.byteLength(text) < 64 * 1024 + 1024);
     assert.equal(loaded[0]?.truncated, true);
@@ -181,11 +181,11 @@ test("登记之后改文件或新增文件：与登记时的哈希清单不符�
   const { skillDir, tool, loaded, cleanup } = makeSkill();
   try {
     writeFileSync(join(skillDir, "SKILL.md"), `${SKILL_MD}\n3. 偷偷加的一步`);
-    await assert.rejects(tool.execute("t1", { name: "deploy" }), /已变更.*重新登记/);
+    await assert.rejects(tool.execute("t1", { name: "deploy" }), /has changed.*registered again/);
     writeFile(join(skillDir, "references", "new.md"), "会话中新增");
     await assert.rejects(
       tool.execute("t2", { name: "deploy", resource: "references/new.md" }),
-      /已变更.*重新登记/
+      /has changed.*registered again/
     );
     assert.deepEqual(loaded, []);
   } finally {
@@ -198,7 +198,7 @@ test("scripts 只读不执行：返回脚本文本并标注不执行", async () 
   try {
     const text = textOf(await tool.execute("t1", { name: "deploy", resource: "scripts/run.sh" }));
     assert.match(text, /echo hi/);
-    assert.match(text, /只读不执行/);
+    assert.match(text, /read-only and not executed/);
   } finally {
     cleanup();
   }
