@@ -8,13 +8,14 @@ import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, test } from "vitest";
-import type { WorkerOrchestrator } from "../orchestration/workers.ts";
+import type { WorkerOrchestrator, WorkerStatus } from "../orchestration/workers.ts";
 import { loadSessionView } from "../persistence/session-catalog.ts";
 import { createFakeStreamFn, type FakeStreamBehavior } from "../pi-runtime/fixtures.ts";
 import type { StreamFn } from "../pi-runtime/index.ts";
 import { newSessionId, type SessionId } from "../state/ids.ts";
 import { DEFAULT_ORCHESTRATION_SETTINGS } from "../state/orchestration-config.ts";
 import { sessionsDirOf } from "../state/paths.ts";
+import type { SessionView } from "../state/session-view.ts";
 import { noMcpSession } from "./mcp.ts";
 import {
   previousWorkersOf,
@@ -26,7 +27,12 @@ import { disposeRuntime } from "./runtime.ts";
 import { type OpenedSessionRuntime, openSessionRuntime } from "./session-runtime.ts";
 import { childFamilySink } from "./session-store.ts";
 import { bindSpawnWorkers } from "./spawn-worker-host.ts";
-import { SpawnWorkerSlot, spawnWorkerSettingsOf } from "./spawn-worker-tool.ts";
+import {
+  legacyWorkerNoticeMarker,
+  SpawnWorkerSlot,
+  spawnWorkerSettingsOf,
+  workerNoticeMarker,
+} from "./spawn-worker-tool.ts";
 import { isStatusText } from "./status-fixtures.ts";
 import { TAKE_WORKER_TEXTS, takeWorkerChanges } from "./take-worker-tool.ts";
 import type { WorkerNotices } from "./worker-notices.ts";
@@ -230,7 +236,9 @@ test("续接：之前的运行收尾未取用的 worker 照常可取，中断的
       "w1"
     );
     assert.ok(
-      taken.text.startsWith("已把 worker w1 的改动叠进工作目录。叠入的文件（1）：b.txt。"),
+      taken.text.startsWith(
+        "Applied the changes of worker w1 to the working directory. Files applied (1): b.txt. "
+      ),
       taken.text
     );
     assert.equal(readFileSync(join(root, "b.txt"), "utf8"), "worker\n");
@@ -260,7 +268,7 @@ test("续接：之前的运行收尾未取用的 worker 照常可取，中断的
   const notices = view.messages.filter(
     (message) =>
       message.role === "user" &&
-      JSON.stringify(message.raw.content).includes(`（worker 会话 ${w1}）`)
+      JSON.stringify(message.raw.content).includes(workerNoticeMarker(w1 as SessionId))
   );
   assert.equal(notices.length, 1);
   assert.ok(JSON.stringify(notices[0]?.raw.content).includes(REDELIVERED_NOTICE_LEAD));
@@ -331,4 +339,38 @@ test("补递的判定：等待工具已交回结果的、人派的、中断的�
     ]
   );
   assert.deepEqual(undeliveredWorkerOutcomes(view, previous), []);
+});
+
+// 决策 428：通知末行改成英文；旧会话主分支上的通知末行是中文，续接时两种都要认作已递出，否则旧会话会重复补递
+test("补递的判定：通知末行新旧两种说法（英文与 428 之前的中文）都算已递出", () => {
+  const sessionId = "sess_01JW0RKERN0T1CE000000000000" as SessionId;
+  const worker = {
+    sessionId,
+    name: "w",
+    role: "implementer",
+    state: "completed",
+    previousRun: "settled",
+    origin: "agent",
+    outcome: { sessionId, name: "w", role: "implementer", status: "completed", turns: 1 },
+  } as unknown as WorkerStatus;
+  const viewWith = (text: string) =>
+    ({
+      messages: [{ role: "user", raw: { role: "user", content: [{ type: "text", text }] } }],
+    }) as unknown as SessionView;
+  assert.equal(legacyWorkerNoticeMarker(sessionId), `（worker 会话 ${sessionId}）`);
+  assert.deepEqual(
+    undeliveredWorkerOutcomes(viewWith(`[worker 通知] 旧通知\n（worker 会话 ${sessionId}）`), [
+      worker,
+    ]),
+    []
+  );
+  assert.deepEqual(
+    undeliveredWorkerOutcomes(
+      viewWith(`[Worker notice] new notice\n${workerNoticeMarker(sessionId)}`),
+      [worker]
+    ),
+    []
+  );
+  // 没有末行：照旧补递
+  assert.equal(undeliveredWorkerOutcomes(viewWith("别的话"), [worker]).length, 1);
 });

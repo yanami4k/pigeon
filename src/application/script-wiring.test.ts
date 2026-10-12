@@ -189,9 +189,18 @@ test("斜杠命令点名：交给模型的文字带关键词；额度照写；�
   );
   assert.ok(open.allowed());
   assert.deepEqual(open.budget(), { unit: "usd", amount: 2 });
-  assert.match(orchestrateDescription({ modelDecides: false }), /只在人点名时用/);
-  assert.match(orchestrateDescription({ modelDecides: true }), /由你判断|任务要派很多个 worker/);
-  assert.doesNotMatch(orchestrateDescription({ modelDecides: true }), /只在人点名时用/);
+  assert.match(
+    orchestrateDescription({ modelDecides: false }),
+    /Use it only when the user asks for it by name/
+  );
+  assert.match(
+    orchestrateDescription({ modelDecides: true }),
+    /Use it when a task needs many workers/
+  );
+  assert.doesNotMatch(
+    orchestrateDescription({ modelDecides: true }),
+    /Use it only when the user asks for it by name/
+  );
   // 额度写法
   assert.deepEqual(parseScriptBudget("额度：￥1.5"), { unit: "cny", amount: 1.5 });
   assert.deepEqual(parseScriptBudget("额度 2m"), { unit: "tokens", amount: 2_000_000 });
@@ -260,14 +269,14 @@ test("pigeon run：任务描述算作点名；脚本的汇总作为新的一轮�
     },
   });
   assert.equal(result.status, "completed");
-  assert.match(texts[0] ?? "", /^已开跑脚本 一步，运行号 s[0-9a-f]+。/);
+  assert.match(texts[0] ?? "", /^Started script 一步, run ID s[0-9a-f]+\./);
   // 第三次主 agent 请求带着 [脚本通知]
   const last = main.calls.at(-1);
   const users = (last?.context.messages ?? []).filter((message) => message.role === "user");
   const noticeText = JSON.stringify(users.at(-1)?.content ?? "");
   assert.match(
     noticeText,
-    /\[Script notice\] 脚本 一步（运行号 s[0-9a-f]+）已完成。worker 1 个：成功 1/
+    /\[Script notice\] Script 一步 \(run ID s[0-9a-f]+\) completed\. Workers: 1; succeeded 1/
   );
   assert.equal(worker.calls.length, 1);
 });

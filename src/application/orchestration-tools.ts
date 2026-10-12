@@ -5,12 +5,7 @@
 // 同一结果不在对话里出现两遍（297）：等待期间结束的 worker 不另发通知；已结束、通知还没递出的撤回通知、交回完整结果；
 // 通知已递出的只交回一句。
 import { type Static, Type } from "typebox";
-import {
-  previousRunWorkerText,
-  type WaitResult,
-  type WorkerOutcome,
-  type WorkerStatus,
-} from "../orchestration/workers.ts";
+import type { WaitResult, WorkerOutcome, WorkerStatus } from "../orchestration/workers.ts";
 import type { SessionId } from "../state/ids.ts";
 import type { ToolRegistration } from "../tools/registry.ts";
 import type { PigeonAgentTool, PigeonToolResult } from "../tools/wrap.ts";
@@ -24,7 +19,6 @@ import {
   WAIT_WORKERS_TOOL,
   WORKER_STATUS_TOOL,
 } from "./spawn-worker-tool.ts";
-import { previousRunNote, workerStateLabel } from "./workers-commands.ts";
 
 export { MESSAGE_WORKER_TOOL, STOP_WORKER_TOOL, WAIT_WORKERS_TOOL, WORKER_STATUS_TOOL };
 
@@ -39,54 +33,57 @@ export function waitMaxSeconds(settings: Pick<SpawnWorkerSettings, "workerWallCl
 export function waitWorkersDescription(
   _settings: Pick<SpawnWorkerSettings, "workerWallClockMs">
 ): string {
-  return `等 worker 结束并交回结果。workers 给出要等的 worker 名字，不给即等所有还在跑的；mode 为 any 时任一个结束就返回，为 all 时全部结束才返回；到 timeout_seconds 仍未结束即返回当时的状态，没结束的 worker 继续跑。已经结束的 worker 立即交回。每个结果写明状态（完成、失败、超时、撞上限、取消、卡住）、错误类型、最后一段输出、改动的文件与会话记录位置。`;
+  return "Wait for workers to finish and return their results. workers gives the names of the workers to wait for; if omitted, waits for all that are still running. With mode any, returns as soon as any one finishes; with all, returns only when all have finished. If they have not finished by timeout_seconds, returns their status at that point, and unfinished workers keep running. Workers that have already finished are returned immediately. Each result states the status (completed, failed, timed out, hit a limit, cancelled, stalled), the error kind, the last output, the changed files, and where the session record is.";
 }
 
 export function waitWorkersParamsSchema(settings: Pick<SpawnWorkerSettings, "workerWallClockMs">) {
   const max = waitMaxSeconds(settings);
   return Type.Object({
     workers: Type.Optional(
-      Type.Array(Type.String(), { description: "要等的 worker 名字；不给即所有还在跑的" })
+      Type.Array(Type.String(), {
+        description: "Names of the workers to wait for; if omitted, all that are still running",
+      })
     ),
     mode: Type.Optional(
       Type.Union([Type.Literal("any"), Type.Literal("all")], {
-        description: "any：任一个结束即返回；all：全部结束才返回（缺省）",
+        description:
+          "any: return as soon as any one finishes; all: return only when all have finished (default)",
       })
     ),
     timeout_seconds: Type.Optional(
       Type.Integer({
         minimum: 1,
         maximum: max,
-        description: `最多等多少秒（缺省 ${WAIT_DEFAULT_SECONDS}，最多 ${max}）`,
+        description: `Maximum seconds to wait (default ${WAIT_DEFAULT_SECONDS}, at most ${max})`,
       })
     ),
   });
 }
 export type WaitWorkersParams = Static<ReturnType<typeof waitWorkersParamsSchema>>;
 
-export const WORKER_STATUS_DESCRIPTION = `查看 worker 的状态：名字、角色、标签、状态、已用轮数与时间；已结束的附结果摘要。workers 不给即列出全部。要等结果用 ${WAIT_WORKERS_TOOL}，不要反复调用本工具轮询。`;
+export const WORKER_STATUS_DESCRIPTION = `Show worker status: name, role, label, state, and the turns and time used; finished workers include a summary of the result. If workers is omitted, lists all. To wait for results, use ${WAIT_WORKERS_TOOL}; do not poll by calling this tool repeatedly.`;
 
 export const WorkerStatusParamsSchema = Type.Object({
   workers: Type.Optional(
-    Type.Array(Type.String(), { description: "要查看的 worker 名字；不给即全部" })
+    Type.Array(Type.String(), { description: "Names of the workers to show; if omitted, all" })
   ),
 });
 export type WorkerStatusParams = Static<typeof WorkerStatusParamsSchema>;
 
 export const MESSAGE_WORKER_DESCRIPTION =
-  "给一个还在跑的 worker 发一段补充说明或更正，它在下一轮看到。已结束的 worker 收不到。";
+  "Send a running worker additional instructions or a correction; it sees them in its next turn. Finished workers cannot receive messages.";
 
 export const MessageWorkerParamsSchema = Type.Object({
-  worker: Type.String({ description: "worker 的名字" }),
-  message: Type.String({ description: "要告诉它的话" }),
+  worker: Type.String({ description: "The worker's name" }),
+  message: Type.String({ description: "What to tell it" }),
 });
 export type MessageWorkerParams = Static<typeof MessageWorkerParamsSchema>;
 
 export const STOP_WORKER_DESCRIPTION =
-  "停掉一个还在跑或排队的 worker；它已做的改动留在分支上，结果照常交回。";
+  "Stop a running or queued worker; the changes it has made stay on its branch, and its result is returned as usual.";
 
 export const StopWorkerParamsSchema = Type.Object({
-  worker: Type.String({ description: "worker 的名字" }),
+  worker: Type.String({ description: "The worker's name" }),
 });
 export type StopWorkerParams = Static<typeof StopWorkerParamsSchema>;
 
@@ -96,47 +93,94 @@ export type StopWorkerParams = Static<typeof StopWorkerParamsSchema>;
 export function outcomeStatusWord(outcome: Pick<WorkerOutcome, "status">): string {
   switch (outcome.status) {
     case "completed":
-      return "完成";
+      return "completed";
     case "wall-clock-limit":
-      return "超时";
+      return "timed out";
     case "turn-limit":
     case "token-limit":
-      return "撞上限";
+      return "hit a limit";
     case "cancelled":
     case "aborted":
-      return "取消";
+      return "cancelled";
     case "stalled":
-      return "卡住";
+      return "stalled";
     default:
-      return "失败";
+      return "failed";
   }
 }
 
+// worker 状态给模型的说法（人看的 /workers 与面板用 workers-commands.ts 的 workerStateLabel）
+const STATE_WORDS: Readonly<Record<string, string>> = {
+  queued: "queued",
+  running: "running",
+  completed: "completed",
+  failed: "failed",
+  aborted: "aborted",
+  cancelled: "cancelled",
+  "turn-limit": "reached the turn limit",
+  "wall-clock-limit": "reached the wall-clock limit",
+  "token-limit": "reached the token limit",
+  "spawn-failed": "failed to spawn",
+  stalled: "stalled",
+};
+
+function stateWord(state: string): string {
+  return STATE_WORDS[state] ?? state;
+}
+
+// 续接后找回的之前运行的 worker 在状态里的标注（给模型；人看的见 workers-commands.ts 的 previousRunNote）
+function previousRunNote(status: Pick<WorkerStatus, "previousRun">): string {
+  return status.previousRun === "settled"
+    ? " (from an earlier run)"
+    : status.previousRun === "interrupted"
+      ? " (from an earlier run; interrupted when that process exited, so it cannot be taken)"
+      : "";
+}
+
+// 对之前运行的 worker 发消息、停掉时的说明（给模型；人看的见 orchestration/workers.ts 的 previousRunWorkerText）
+export function previousRunWorkerReply(
+  status: Pick<WorkerStatus, "name" | "previousRun">,
+  action: "cancel" | "send"
+): string {
+  const base =
+    status.previousRun === "interrupted"
+      ? `Worker ${status.name} was spawned by an earlier run and was interrupted when that process exited`
+      : `Worker ${status.name} was spawned by an earlier run and already finished in that run`;
+  return action === "cancel"
+    ? `${base}; it is not running, so there is nothing to stop.`
+    : `${base}; it is not running, so it cannot receive messages.`;
+}
+
+// 条数与名词：1 turn、2 turns
+function counted(count: number, noun: string): string {
+  return `${count} ${noun}${count === 1 ? "" : "s"}`;
+}
+
 function fileList(files: readonly string[]): string {
-  return files.length > 0 ? files.join("、") : "无";
+  return files.length > 0 ? files.join(", ") : "none";
 }
 
 // 一个 worker 的结构化结果
 export function structuredOutcomeText(outcome: WorkerOutcome): string {
   const branch =
     outcome.result?.branch ??
-    (outcome.workspace.kind === "git-worktree" ? outcome.workspace.branch : "无");
+    (outcome.workspace.kind === "git-worktree" ? outcome.workspace.branch : "none");
   const files = outcome.result?.changedFiles ?? [];
   const lines = [
-    `worker ${outcome.name}（${outcome.role}）${
-      outcome.label !== undefined ? `，标签 ${outcome.label}` : ""
-    }：状态 ${outcome.status === "completed" ? "完成" : outcomeStatusWord(outcome)}${
-      outcome.errorKind !== undefined ? `；错误类型 ${outcome.errorKind}` : ""
-    }${outcome.error !== undefined ? `（${outcome.error}）` : ""}${
-      outcome.recoverable === true ? "；可恢复：人补批后它可以接着做" : ""
-    }。`,
-    `分支：${branch}。改动的文件（${files.length}）：${fileList(files)}。`,
-    `最后一段输出：${outcome.result?.summary ?? ""}${
+    `Worker ${outcome.name} (${outcome.role})${
+      outcome.label !== undefined ? `, label ${outcome.label}` : ""
+    }: status ${outcomeStatusWord(outcome)}${
+      outcome.errorKind !== undefined ? `; error kind ${outcome.errorKind}` : ""
+    }${outcome.error !== undefined ? ` (${outcome.error})` : ""}${
+      outcome.recoverable === true ? "; recoverable: once a person approves, it can continue" : ""
+    }.`,
+    `Branch: ${branch}. Changed files (${files.length}): ${fileList(files)}.`,
+    `Last output: ${outcome.result?.summary ?? ""}${
       outcome.result?.summaryTruncated === true
         ? SPAWN_WORKER_TEXTS.truncated(outcome.sessionId)
         : ""
     }`,
-    `会话记录：${outcome.transcript ?? `worker 会话 ${outcome.sessionId}`}`,
+    `Session record: ${outcome.transcript ?? `worker session ${outcome.sessionId}`}`,
   ];
   if (outcome.start !== undefined && outcome.workspace.kind === "git-worktree") {
     lines.push(SPAWN_WORKER_TEXTS.start(outcome.start, outcome.name));
@@ -146,45 +190,51 @@ export function structuredOutcomeText(outcome: WorkerOutcome): string {
 
 export const ORCHESTRATION_TEXTS = {
   alreadyNotified: (outcome: WorkerOutcome) =>
-    `worker ${outcome.name}（${outcome.role}）已结束（${outcomeStatusWord(outcome)}），结果见此前的通知。`,
+    `Worker ${outcome.name} (${outcome.role}) has finished (${outcomeStatusWord(outcome)}); see the earlier notice for its result.`,
   stillRunning: (status: WorkerStatus, seconds: number) =>
-    `worker ${status.name}（${status.role}）还没结束（${workerStateLabel(status.state)}，${status.turns} 轮，已用 ${seconds} 秒），继续在跑。`,
-  timedOut: (seconds: number) => `等了 ${seconds} 秒，仍有 worker 没结束。`,
-  nothingToWait: "没有要等的 worker：都已结束或还没派出。",
-  unknown: (name: string) => `没有名为 ${name} 的 worker；用 spawn_worker 交回的名字。`,
-  noWorkers: "还没有派出 worker。",
-  messageSent: (name: string) => `已把话递给 worker ${name}，它在下一轮看到。`,
+    `Worker ${status.name} (${status.role}) has not finished yet (${stateWord(status.state)}, ${counted(status.turns, "turn")}, ${counted(seconds, "second")} so far) and is still running.`,
+  timedOut: (seconds: number) =>
+    `Waited ${counted(seconds, "second")}; some workers have not finished.`,
+  nothingToWait: "No workers to wait for: all have finished or none have been spawned.",
+  unknown: (name: string) =>
+    `There is no worker named ${name}; use the name that spawn_worker returned.`,
+  noWorkers: "No workers have been spawned yet.",
+  messageSent: (name: string) =>
+    `Delivered the message to worker ${name}; it will see it in its next turn.`,
   // 验收修订：它在下一轮之前结束（最后一轮之后才递到、正在收尾），如实交回
   messageUndelivered: (name: string) =>
-    `未送达：worker ${name} 已结束或正在收尾。要这段话生效，另派一个 worker 或自己做。`,
-  messageSettled: (name: string) => `worker ${name} 已结束，收不到消息。`,
-  stopRequested: (name: string) => `已停掉 worker ${name}；它已做的改动留在分支上，结果照常交回。`,
-  stopSettled: (name: string) => `worker ${name} 已结束，不需要停。`,
-  unbound: "本会话没有装配编排器。",
+    `Not delivered: worker ${name} has finished or is wrapping up. For this message to take effect, spawn another worker or do it yourself.`,
+  messageSettled: (name: string) => `Worker ${name} has finished and cannot receive messages.`,
+  stopRequested: (name: string) =>
+    `Stopped worker ${name}; the changes it has made stay on its branch, and its result is returned as usual.`,
+  stopSettled: (name: string) =>
+    `Worker ${name} has already finished; there is no need to stop it.`,
+  unbound: "This session has no worker orchestrator set up.",
 } as const;
 
 // worker_status 的一行
 export function statusLine(status: WorkerStatus, now: number): string {
   const seconds = Math.max(0, Math.round((now - status.startedAt) / 1000));
-  const head = `${status.name}（${status.role}）${
-    status.label !== undefined ? `，标签 ${status.label}` : ""
-  }：${
-    status.outcome !== undefined
-      ? outcomeStatusWord(status.outcome)
-      : workerStateLabel(status.state)
-  }，${status.turns} 轮，${
+  const head = `${status.name} (${status.role})${
+    status.label !== undefined ? `, label ${status.label}` : ""
+  }: ${
+    status.outcome !== undefined ? outcomeStatusWord(status.outcome) : stateWord(status.state)
+  }, ${counted(status.turns, "turn")}, ${
     status.outcome?.durationMs !== undefined
-      ? `用时 ${Math.round(status.outcome.durationMs / 1000)} 秒`
-      : `已用 ${seconds} 秒`
+      ? `took ${counted(Math.round(status.outcome.durationMs / 1000), "second")}`
+      : `${counted(seconds, "second")} so far`
   }`;
   if (status.outcome === undefined) {
-    return `${head}。`;
+    return `${head}.`;
   }
   const summary = status.outcome.result?.summary ?? "";
-  return `${head}${previousRunNote(status)}。结果摘要：${summary.length > 200 ? `${summary.slice(0, 200)}…` : summary}`;
+  return `${head}${previousRunNote(status)}. Result summary: ${summary.length > 200 ? `${summary.slice(0, 200)}…` : summary}`;
 }
 
 // ---- 执行 ----
+
+// message_worker 递给 worker 的话的开头
+export const PARENT_MESSAGE_PREFIX = "[Message from the agent that spawned you] ";
 
 function reply<T>(text: string, details: T): PigeonToolResult<T> {
   return { content: [{ type: "text", text }], details };
@@ -359,7 +409,7 @@ export function createMessageWorkerTool(
         });
       }
       if (worker.previousRun !== undefined) {
-        return reply(previousRunWorkerText(worker, "send"), {
+        return reply(previousRunWorkerReply(worker, "send"), {
           worker: worker.name,
           delivered: false,
         });
@@ -372,7 +422,7 @@ export function createMessageWorkerTool(
       }
       const sent = await host.orchestrator.send(
         worker.sessionId,
-        `[来自派出方的消息] ${params.message}`
+        `${PARENT_MESSAGE_PREFIX}${params.message}`
       );
       return sent === "delivered"
         ? reply(ORCHESTRATION_TEXTS.messageSent(worker.name), {
@@ -409,7 +459,7 @@ export function createStopWorkerTool(
         });
       }
       if (worker.previousRun !== undefined) {
-        return reply(previousRunWorkerText(worker, "cancel"), {
+        return reply(previousRunWorkerReply(worker, "cancel"), {
           worker: worker.name,
           stopped: false,
         });

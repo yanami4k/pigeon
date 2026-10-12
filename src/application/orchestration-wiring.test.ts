@@ -224,7 +224,7 @@ test("任务清单：新建、按 id 更新、查看整份；一批里有不成�
   });
   assert.equal(
     renderTaskList(list.items()),
-    "1. [完成] 调查 a\n2. [进行中] 改 a（依赖 1）（worker 标签 T-a）"
+    "1. [done] 调查 a\n2. [in progress] 改 a (depends on 1) (worker label T-a)"
   );
   assert.throws(
     () =>
@@ -236,9 +236,9 @@ test("任务清单：新建、按 id 更新、查看整份；一批里有不成�
       }),
     TaskListError
   );
-  assert.throws(() => list.update({ tasks: [{ status: "done" }] }), /新建的项要有标题/);
+  assert.throws(() => list.update({ tasks: [{ status: "done" }] }), /A new item needs a title/);
   assert.equal(list.items()[1]?.status, "in_progress");
-  assert.equal(renderTaskList([]), "任务清单是空的。");
+  assert.equal(renderTaskList([]), "The task list is empty.");
 });
 
 test("任务清单存进会话：更新随工具结果写进会话文件，续聊时从会话里最后一次更新还原", async () => {
@@ -273,7 +273,7 @@ test("任务清单存进会话：更新随工具结果写进会话文件，续�
   await first.bundle.adapter.run("拆一下");
   assert.equal(
     renderTaskList(first.bundle.taskList?.items() ?? []),
-    "1. [完成] 查 a\n2. [进行中] 改 b"
+    "1. [done] 查 a\n2. [in progress] 改 b"
   );
   await disposeRuntime(first.bundle);
   const resumed = await openSessionRuntime({
@@ -288,7 +288,7 @@ test("任务清单存进会话：更新随工具结果写进会话文件，续�
   try {
     assert.equal(
       renderTaskList(resumed.bundle.taskList?.items() ?? []),
-      "1. [完成] 查 a\n2. [进行中] 改 b"
+      "1. [done] 查 a\n2. [in progress] 改 b"
     );
     // 新建的项接着编号
     assert.equal(resumed.bundle.taskList?.update({ tasks: [{ title: "新" }] }).at(-1)?.id, "3");

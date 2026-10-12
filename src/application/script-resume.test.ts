@@ -67,10 +67,13 @@ test("机器重启式中断后续跑：只重派没做完的，做完的直接�
   try {
     const notice = await resume(second, runId);
     assert.deepEqual(tasks(second), ["一", "二", "二"]);
-    assert.match(notice, /已完成。worker 2 个：成功 2，失败 0，其中复用上次结果 1/);
+    assert.match(
+      notice,
+      /completed\. Workers: 2; succeeded 2, failed 0, of which 1 reused results from the last run/
+    );
     assert.equal(sink.spawned[2]?.name, "s1-3");
     // 复用的是原来那个 worker 的分支
-    assert.match(notice, /收回：叠入 一\.txt、二\.txt/);
+    assert.match(notice, /Collected: applied 一\.txt, 二\.txt/);
     assert.equal(firstA, "s1-1");
   } finally {
     // 旧进程里挂着的 worker 停掉（记录冻结，不影响断言）
@@ -94,11 +97,11 @@ test("单个失败后续跑只重派失败的；改脚本后只重派受影响�
     script: 'await agent("一"); await agent("二"); await agent("三"); return 1;',
   };
   const { runId, notice } = await start(harness, spec);
-  assert.match(notice, /成功 2，失败 1/);
+  assert.match(notice, /succeeded 2, failed 1/);
   broken = false;
   const again = await resume(harness, runId);
   assert.deepEqual(tasks(harness), ["一", "二", "三", "二"]);
-  assert.match(again, /成功 3，失败 0，其中复用上次结果 2/);
+  assert.match(again, /succeeded 3, failed 0, of which 2 reused results from the last run/);
   // 改了第三个调用的任务文字：只重派它
   const changed = await resume(harness, runId, {
     spec: {
@@ -107,7 +110,7 @@ test("单个失败后续跑只重派失败的；改脚本后只重派受影响�
     },
   });
   assert.deepEqual(tasks(harness), ["一", "二", "三", "二", "三改"]);
-  assert.match(changed, /其中复用上次结果 2/);
+  assert.match(changed, /of which 2 reused results from the last run/);
 });
 
 test("流水线派出顺序变化不影响复用；同内容的调用按出现序号区分", async () => {
@@ -121,7 +124,7 @@ test("流水线派出顺序变化不影响复用；同内容的调用按出现�
     spec: { name: "t", phases: [], script, args: ["y", "x"] },
   });
   assert.equal(harness.sink.spawned.length, 4);
-  assert.match(notice, /其中复用上次结果 4/);
+  assert.match(notice, /of which 4 reused results from the last run/);
 });
 
 test("续跑沿用开跑时的快照：主目录之后又改了、提交了，重派的 worker 仍从原快照开工", async () => {
@@ -164,7 +167,7 @@ test("接力上游重做时下游随之重做", async () => {
   const notice = await resume(harness, runId);
   assert.deepEqual(tasks(harness), ["上", "下", "旁", "上", "下"]);
   assert.equal(harness.sink.spawned[4]?.script?.relayFrom, harness.sink.spawned[3]?.childSessionId);
-  assert.match(notice, /其中复用上次结果 1/);
+  assert.match(notice, /of which 1 reused results from the last run/);
 });
 
 test("调高额度后续跑：复用已做完的，接着派没做的", async () => {
@@ -175,11 +178,14 @@ test("调高额度后续跑：复用已做完的，接着派没做的", async ()
     script: 'await agent("一"); await agent("二"); await agent("三"); await agent("四"); return 1;',
   };
   const { runId, notice } = await start(harness, spec, { unit: "usd", amount: 0.15 });
-  assert.match(notice, /额度用完/);
+  assert.match(notice, /ran out of budget/);
   assert.equal(harness.sink.spawned.length, 2);
   const again = await resume(harness, runId, { budget: { unit: "usd", amount: 1 } });
   assert.deepEqual(tasks(harness), ["一", "二", "三", "四"]);
-  assert.match(again, /已完成。worker 4 个：成功 4，失败 0，其中复用上次结果 2。花费 \$0\.40/);
+  assert.match(
+    again,
+    /completed\. Workers: 4; succeeded 4, failed 0, of which 2 reused results from the last run\. Spent \$0\.40/
+  );
 });
 
 test("等审批超时：补批做完后续跑即复用，不再重派", async () => {
@@ -193,7 +199,7 @@ test("等审批超时：补批做完后续跑即复用，不再重派", async ()
     phases: [],
     script: 'await agent("跑测试"); await agent("别的"); return 1;',
   });
-  assert.match(notice, /等审批超时/);
+  assert.match(notice, /Waiting for approval timed out/);
   const blocked = harness.sink.spawned[0]?.childSessionId;
   assert.ok(blocked !== undefined);
   // 人进入 worker 会话补批：它重新发起同一个调用（只放行一次）并做完
@@ -202,5 +208,8 @@ test("等审批超时：补批做完后续跑即复用，不再重派", async ()
   assert.equal(outcome.status, "completed");
   const again = await resume(harness, runId);
   assert.equal(harness.sink.spawned.length, 2);
-  assert.match(again, /已完成。worker 2 个：成功 2，失败 0，其中复用上次结果 2/);
+  assert.match(
+    again,
+    /completed\. Workers: 2; succeeded 2, failed 0, of which 2 reused results from the last run/
+  );
 });

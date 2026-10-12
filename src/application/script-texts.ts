@@ -1,5 +1,7 @@
 // 脚本编排的说明与返回文字（决策 309–314；按 271 定稿文字的风格拟稿、过目后定稿）：工具说明、参数说明、各情形的返回文字、
 // worker 附言与改正、开跑计划行、log 行、结束汇总、收回请示与审批新键的回显。数值与名字由调用方填入。
+// 决策 428：给模型看的（工具说明与参数说明、返回文字、worker 附言与改正、斜杠命令交给模型的话、结束汇总）为英文；
+// 只给人看的（开跑计划行、log 行、收回请示的来源行、审批新键与回显）照旧中文。
 import { SCRIPT_COMMAND, SCRIPT_KEYWORD } from "./script-naming.ts";
 
 export const ORCHESTRATE_TOOL = "orchestrate";
@@ -12,67 +14,70 @@ export const LEGACY_SCRIPT_NOTICE_PREFIX = "[脚本通知] ";
 // 工具说明；modelDecides 为项目配置打开"由模型判断何时用"时的第 2 句
 export function orchestrateDescription(options: { modelDecides: boolean }): string {
   return [
-    "提交一段编排脚本，由程序在隔离容器里执行，批量派 worker 并按脚本把它们串起来。提交后立即返回运行号，不等它跑完；脚本结束时有一条通知交回汇总。",
+    "Submit an orchestration script for the program to run in an isolated container, spawning workers in batches and chaining them as the script directs. It returns a run ID right after submission, without waiting for the script to finish; when the script ends, a notice returns a summary.",
     options.modelDecides
-      ? "任务要派很多个 worker、分几个阶段，或要按固定流程批量处理时用；两三个独立子任务用 spawn_worker 就够。"
-      : `只在人点名时用：人本次输入里写了"${SCRIPT_KEYWORD}"，或用 /${SCRIPT_COMMAND} 发起。人没点名时不要用，调用会被拒绝；派几个 worker 用 spawn_worker。`,
-    "脚本是 JavaScript 函数体（可用 await 与 return），积木六个：agent(任务, 选项) 派一个 worker 并等它结束，返回 {ok, status, name, branch, files, summary, output, error, errorKind}；选项 label、phase、role（explorer、implementer、tester，缺省 implementer）、schema（JSON Schema：worker 最后按它交回数据，放在 output；不合格式时程序让它在原会话改正，至多两次）、relay（先前某次 agent 的结果：新 worker 从那个 worker 的分支接着开工）。parallel([() => agent(…), …]) 全部结束才返回，结果按顺序。pipeline(items, 步骤1, 步骤2, …) 每项各自依次走完各步骤、不等其他项，步骤为 (上一步结果, 项, 序号) => …，第一步收到的上一步结果就是该项本身；某步失败即跳过该项后面的步骤。phase(名) 之后的 agent 归入这个阶段；log(文字) 在人的消息区写一行；args 为提交时给的参数。",
+      ? "Use it when a task needs many workers, several phases, or batch processing along a fixed flow; for two or three independent subtasks, spawn_worker is enough."
+      : `Use it only when the user asks for it by name: the user's current input contains "${SCRIPT_KEYWORD}", or the user started it with /${SCRIPT_COMMAND}. Do not use it when the user has not asked for it; the call will be rejected. To spawn a few workers, use spawn_worker.`,
+    "The script is a JavaScript function body (await and return are allowed) with six building blocks. agent(task, options) spawns a worker and waits for it to finish, returning {ok, status, name, branch, files, summary, output, error, errorKind}; the options are label, phase, role (explorer, implementer, or tester; default implementer), schema (a JSON Schema: at the end the worker returns data in that shape, placed in output; if it does not match, the program has the worker correct it in the same session, at most twice), and relay (the result of an earlier agent call: the new worker continues from that worker's branch). parallel([() => agent(…), …]) returns only when all have finished, with the results in order. pipeline(items, step1, step2, …) takes each item through the steps in order without waiting for other items; a step is (previousResult, item, index) => …, and the previous result the first step receives is the item itself; if a step fails, the remaining steps for that item are skipped. agent calls after phase(name) belong to that phase; log(text) writes a line in the user's message area; args holds the arguments given at submission.",
     [
-      "例：",
-      'phase("调查");',
-      'const scan = await agent("列出 src/ 下没有单元测试的模块", { role: "explorer", schema: { type: "object", properties: { modules: { type: "array", items: { type: "string" } } }, required: ["modules"] } });',
-      'phase("补测试");',
+      "Example:",
+      'phase("Survey");',
+      'const scan = await agent("List the modules under src/ that have no unit tests", { role: "explorer", schema: { type: "object", properties: { modules: { type: "array", items: { type: "string" } } }, required: ["modules"] } });',
+      'phase("Add tests");',
       // biome-ignore lint/suspicious/noTemplateCurlyInString: 这是脚本原文（容器里执行的 JavaScript），不是本文件的模板字符串
-      "const written = await parallel((scan.output?.modules ?? []).map((m) => () => agent(`给 ${m} 写单元测试`, { label: m })));",
+      "const written = await parallel((scan.output?.modules ?? []).map((m) => () => agent(`Write unit tests for ${m}`, { label: m })));",
       "return { collect: written.filter((r) => r.ok) };",
     ].join("\n"),
-    "脚本只做调度：不能读写文件、跑命令、联网，没有 require、import 与 process；读时间（Date.now、new Date()）与取随机数（Math.random）会报错。要的信息让 worker 查回来，或经 args 传入。worker 看不到本会话的对话，任务要写全。",
-    "worker 缺省从脚本开跑时拍的主工作目录快照开工，给了 relay 即从那个 worker 的分支接着做；脚本运行期间主工作目录不动。脚本最后 return { collect: [要收回的结果] }：结束后程序按先后把这些 worker 各自的改动以三方叠加并入主工作目录，整批请示一次；冲突与 worker 删除的文件列在汇总里。不给 collect 即不收回。",
-    "单个 worker 失败不中断脚本：agent 照常返回，ok 为 false，带状态与原因，由脚本决定怎么办；框架不自动重试。",
-    '人点名时可能给了花费上限：到上限即不再派新 worker，在跑的做完，脚本以"额度用完"结束。续跑：resume_run 给上一次的运行号，脚本从头重跑，和上次相同的调用直接复用结果，只重派没做完、失败或改过的；接力的上游重做时下游也重做。',
+    "The script only schedules: it cannot read or write files, run commands, or access the network, and it has no require, import, or process; reading the time (Date.now, new Date()) or generating random numbers (Math.random) throws an error. Have workers look up the information you need, or pass it in through args. Workers cannot see this session's conversation, so write complete tasks.",
+    "By default, workers start from a snapshot of the main working directory taken when the script starts; with relay, a worker continues from that worker's branch. The main working directory stays untouched while the script runs. End the script with return { collect: [results to collect] }: after the script finishes, the program applies each of those workers' changes to the main working directory in order with a three-way merge, asking for approval once for the whole batch; conflicts and files deleted by workers are listed in the summary. Without collect, nothing is collected.",
+    "A single worker's failure does not stop the script: agent returns as usual with ok set to false, plus the status and reason, and the script decides what to do; the framework does not retry automatically.",
+    'When the user asks for it, they may have set a spending limit: once it is reached, no new workers are spawned, running ones finish, and the script ends with "ran out of budget". To resume, give the previous run ID in resume_run: the script reruns from the start, calls identical to last time reuse their results directly, and only unfinished, failed, or changed calls are spawned again; when a relayed upstream call is redone, its downstream calls are redone too.',
   ].join("\n");
 }
 
 export const ORCHESTRATE_PARAM_TEXTS = {
-  name: "脚本名，显示在开跑的计划行与树形视图里",
-  phases: "各阶段名，按先后，显示在计划行",
-  script: "脚本正文（JavaScript 函数体，可用 await 与 return）",
-  args: "传给脚本的参数，脚本里用 args 读",
-  resumeRun: "续跑时给上一次的脚本运行号；不给即新开一次",
+  name: "Script name, shown in the start plan line and the tree view",
+  phases: "Phase names, in order, shown in the plan line",
+  script: "The script body (a JavaScript function body; await and return are allowed)",
+  args: "Arguments passed to the script, read in the script as args",
+  resumeRun: "To resume, give the previous script run ID; omit it to start a new run",
 } as const;
 
-// 模型没有价格却给了金额额度
+// 模型没有价格却给了金额额度（工具的拒绝原样交回模型，/orchestrate resume 时给人看）
 export const SCRIPT_BUDGET_NO_PRICE =
-  "这个模型没有价格，金额额度算不出来；请改用 token 写额度（如 300k），或不设额度";
+  "This model has no price, so a money budget cannot be calculated; write the budget in tokens instead (such as 300k), or set no budget";
 
 export const ORCHESTRATE_TEXTS = {
   started: (name: string, runId: string) =>
-    `已开跑脚本 ${name}，运行号 ${runId}。结束时会有通知交回汇总；运行期间主工作目录不动。`,
+    `Started script ${name}, run ID ${runId}. A notice will return the summary when it finishes; the main working directory stays untouched while it runs.`,
   resumed: (name: string, runId: string) =>
-    `已续跑脚本 ${name}，运行号 ${runId}，沿用上次开跑时的快照，上次做完的调用直接复用。结束时会有通知交回汇总。`,
-  notNamed: `人本次输入没有点名脚本编排，不能提交脚本。需要时请人在输入里写"${SCRIPT_KEYWORD}"或用 /${SCRIPT_COMMAND} 发起；几个独立子任务用 spawn_worker。`,
-  unknownRun: (runId: string) => `没有运行号为 ${runId} 的脚本（续跑只限本会话）。`,
-  stillRunning: (runId: string) => `脚本 ${runId} 还在跑，不能续跑；等它结束或请人先停下。`,
-  noDocker: (reason: string) => `Docker 不可用，脚本编排跑不了：${reason}。`,
+    `Resumed script ${name}, run ID ${runId}, using the snapshot from when it first started; calls finished last time are reused directly. A notice will return the summary when it finishes.`,
+  notNamed: `The user's current input did not ask for script orchestration, so a script cannot be submitted. If needed, ask the user to write "${SCRIPT_KEYWORD}" in their input or to start it with /${SCRIPT_COMMAND}; for a few independent subtasks, use spawn_worker.`,
+  unknownRun: (runId: string) =>
+    `There is no script with run ID ${runId} (resuming is limited to this session).`,
+  stillRunning: (runId: string) =>
+    `Script ${runId} is still running and cannot be resumed; wait for it to finish or ask the user to stop it first.`,
+  noDocker: (reason: string) =>
+    `Docker is unavailable, so script orchestration cannot run: ${reason}.`,
   // 以下为装配与前置检查的失败（不在定稿清单内的兜底，沿用 spawn_worker 的"不是 git 仓库"说法）
-  notGit: "当前工作区不是 git 仓库，不能跑编排脚本。",
-  unbound: "本会话没有装配脚本编排。",
-  failed: (reason: string) => `脚本没有开跑：${reason}。`,
+  notGit: "The current workspace is not a git repository, so orchestration scripts cannot run.",
+  unbound: "This session has no script orchestration set up.",
+  failed: (reason: string) => `The script did not start: ${reason}.`,
 } as const;
 
 // 给了输出格式时附在任务后面的话
 export function schemaAppendix(schema: unknown): string {
-  return `\n\n完成后，最后一条回复只给一个符合下面 JSON Schema 的 JSON 对象（可放在 \`\`\`json 代码块里），不要别的文字：\n${JSON.stringify(schema, null, 2)}`;
+  return `\n\nWhen you finish, your last reply must contain only one JSON object that conforms to the JSON Schema below (it may be inside a \`\`\`json code block), with no other text:\n${JSON.stringify(schema, null, 2)}`;
 }
 
 // 让 worker 在原会话里改正
 export function schemaCorrection(problems: readonly string[], schema: unknown): string {
-  return `你最后交回的内容不合要求的格式：${problems.join("；")}。请在最后一条回复里只给一个符合下面 JSON Schema 的 JSON 对象，不要别的文字：\n${JSON.stringify(schema, null, 2)}`;
+  return `What you returned last does not match the required format: ${problems.join("; ")}. In your last reply, give only one JSON object that conforms to the JSON Schema below, with no other text:\n${JSON.stringify(schema, null, 2)}`;
 }
 
-// /orchestrate 发起时交给模型的文字
+// /orchestrate 发起时交给模型的文字：带着点名关键词（点名判定看人的输入里有没有它，见 script-naming.ts）
 export function commandInputText(task: string): string {
-  return `（人用 /${SCRIPT_COMMAND} 点名用${SCRIPT_KEYWORD}做这件事）\n${task}`;
+  return `(The user started this with /${SCRIPT_COMMAND}, asking for it to be done with script orchestration, "${SCRIPT_KEYWORD}".)\n${task}`;
 }
 
 // 开跑计划行
@@ -104,15 +109,15 @@ export type ScriptEnding =
 export function endingText(ending: ScriptEnding): string {
   switch (ending.kind) {
     case "completed":
-      return "已完成";
+      return "completed";
     case "budget":
-      return "额度用完";
+      return "ran out of budget";
     case "stopped":
-      return "已停止";
+      return "was stopped";
     case "stalled":
-      return `卡住：${ending.minutes} 分钟没有 worker 在跑或排队，脚本也没有结束，已停掉`;
+      return `stalled: no worker was running or queued for ${counted(ending.minutes, "minute")} and the script had not finished, so it was stopped`;
     default:
-      return `出错：${ending.reason}`;
+      return `failed with an error: ${ending.reason}`;
   }
 }
 
@@ -133,45 +138,61 @@ export interface SummaryInput {
   done?: ReadonlyArray<{ name: string; branch: string }>;
   collection:
     | { kind: "done"; applied: string[]; conflicts: string[]; deletedByWorker: string[] }
-    | { kind: "skipped"; reason: "脚本没有正常结束" | "人没有批准" | "没有要收回的" };
+    | { kind: "skipped"; reason: CollectionSkip };
   returned?: unknown;
 }
 
-function list(items: readonly string[]): string {
-  return items.length > 0 ? items.join("、") : "无";
+// 没有收回的原因：调用方（script-runner.ts）给的键沿用中文写法，汇总里写成英文
+export type CollectionSkip = "脚本没有正常结束" | "人没有批准" | "没有要收回的";
+const COLLECTION_SKIP_TEXTS: Readonly<Record<CollectionSkip, string>> = {
+  脚本没有正常结束: "the script did not finish normally",
+  人没有批准: "the user did not approve",
+  没有要收回的: "there was nothing to collect",
+};
+
+// 条数与名词：1 minute、2 minutes
+function counted(count: number, noun: string): string {
+  return `${count} ${noun}${count === 1 ? "" : "s"}`;
 }
+
+function list(items: readonly string[]): string {
+  return items.length > 0 ? items.join(", ") : "none";
+}
+
+// 汇总里脚本返回值那一行的开头
+export const SCRIPT_RETURNED_LEAD = "Script returned: ";
 
 export function summaryText(input: SummaryInput): string {
   const lines = [
-    `脚本 ${input.name}（运行号 ${input.runId}）${endingText(input.ending)}。worker ${input.workers} 个：成功 ${input.succeeded}，失败 ${input.failed}，其中复用上次结果 ${input.reused}。花费 ${input.spent}。`,
+    `Script ${input.name} (run ID ${input.runId}) ${endingText(input.ending)}. Workers: ${input.workers}; succeeded ${input.succeeded}, failed ${input.failed}, of which ${input.reused} reused results from the last run. Spent ${input.spent}.`,
   ];
   if (input.failures.length > 0) {
     lines.push(
-      `失败：${input.failures.map((item) => `${item.who}：${item.status}，${item.reason}`).join("；")}`
+      `Failed: ${input.failures.map((item) => `${item.who}: ${item.status}, ${item.reason}`).join("; ")}`
     );
   }
   if (input.awaitingApproval.length > 0) {
     lines.push(
-      `等审批超时（补批后用 resume_run=${input.runId} 续跑）：${input.awaitingApproval
-        .map((item) => `${item.who}：要${item.action}`)
-        .join("；")}`
+      `Waiting for approval timed out (after approval, resume with resume_run=${input.runId}): ${input.awaitingApproval
+        .map((item) => `${item.who}: ${item.action}`)
+        .join("; ")}`
     );
   }
   if (input.notStarted !== undefined) {
     lines.push(
-      `额度用完未做：${input.notStarted} 个调用没有派出；调高额度后用 resume_run=${input.runId} 续跑。`
+      `Not done because the budget ran out: ${input.notStarted === 1 ? "1 call was" : `${input.notStarted} calls were`} not spawned; raise the budget and resume with resume_run=${input.runId}.`
     );
   }
   if (input.done !== undefined && input.done.length > 0) {
     lines.push(
-      `已做完：${input.done.map((item) => `${item.name}（分支 ${item.branch}）`).join("、")}。可用 /take 逐个取用，或调高额度后续跑，已做完的会复用。`
+      `Already done: ${input.done.map((item) => `${item.name} (branch ${item.branch})`).join(", ")}. They can be taken one by one with /take, or raise the budget and resume; finished work will be reused.`
     );
   }
   const collection = input.collection;
   lines.push(
     collection.kind === "done"
-      ? `收回：叠入 ${list(collection.applied)}；冲突未写入 ${list(collection.conflicts)}；worker 删除未删 ${list(collection.deletedByWorker)}。`
-      : `未收回：${collection.reason}。`
+      ? `Collected: applied ${list(collection.applied)}; conflicts, not written: ${list(collection.conflicts)}; deleted by workers, not deleted here: ${list(collection.deletedByWorker)}.`
+      : `Not collected: ${COLLECTION_SKIP_TEXTS[collection.reason]}.`
   );
   if (input.returned !== undefined && input.returned !== null) {
     let text: string;
@@ -180,7 +201,7 @@ export function summaryText(input: SummaryInput): string {
     } catch {
       text = String(input.returned);
     }
-    lines.push(`脚本返回：${text.slice(0, 1000)}`);
+    lines.push(`${SCRIPT_RETURNED_LEAD}${text.slice(0, 1000)}`);
   }
   return lines.join("\n");
 }

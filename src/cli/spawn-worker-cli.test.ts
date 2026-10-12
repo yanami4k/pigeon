@@ -154,10 +154,10 @@ test.skipIf(process.platform === "win32" ? "合并命令用 sh 的通配与串�
     const waited = calls.find((call) => call.toolName === "wait_workers");
     assert.ok(waited !== undefined);
     const waitedText = textOf(waited);
-    assert.ok(waitedText.includes("worker fix-a（implementer）：状态 完成。"), waitedText);
-    assert.ok(waitedText.includes("最后一段输出：A 改好了（并行）"), waitedText);
-    assert.ok(waitedText.includes("worker fix-b（implementer）：状态 完成。"), waitedText);
-    assert.ok(waitedText.includes("改动的文件（1）：b.txt。"), waitedText);
+    assert.ok(waitedText.includes("Worker fix-a (implementer): status completed."), waitedText);
+    assert.ok(waitedText.includes("Last output: A 改好了（并行）"), waitedText);
+    assert.ok(waitedText.includes("Worker fix-b (implementer): status completed."), waitedText);
+    assert.ok(waitedText.includes("Changed files (1): b.txt."), waitedText);
     const merge = calls.find((call) => call.toolName === "run_command");
     assert.ok(merge !== undefined);
     assert.notEqual(merge.result?.isError, true, textOf(merge));

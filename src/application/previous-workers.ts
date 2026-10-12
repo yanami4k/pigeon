@@ -11,10 +11,10 @@ import { loadSessionView } from "../persistence/session-catalog.ts";
 import type { SessionId } from "../state/ids.ts";
 import type { SessionView, ViewChild, ViewMessage } from "../state/session-view.ts";
 import {
+  hasWorkerNoticeMarker,
   SPAWN_WORKER_TOOL,
   type SpawnWorkerSettings,
   WAIT_WORKERS_TOOL,
-  workerNoticeMarker,
   workerNoticeText,
 } from "./spawn-worker-tool.ts";
 import type { WorkerNotices } from "./worker-notices.ts";
@@ -139,8 +139,8 @@ export function undeliveredWorkerOutcomes(
     ) {
       return [];
     }
-    const marker = workerNoticeMarker(worker.sessionId);
-    if (userTexts.some((text) => text.includes(marker))) return [];
+    // 决策 428：新通知末行是英文，旧会话里是中文，两种都认
+    if (userTexts.some((text) => hasWorkerNoticeMarker(text, worker.sessionId))) return [];
     if (waitTexts.some((text) => text.includes(worker.sessionId))) return [];
     return [worker.outcome];
   });

@@ -55,25 +55,36 @@ test("起点一行：快照起点写带入的未提交文件数，HEAD 起点写
   );
 });
 
+// 决策 428：交给模型的起点一行为英文（人看的 /spawn 收尾摘要照旧用上面的中文一行）
+test("spawn_worker 交回的起点一行（给模型）：快照起点写带入的未提交文件数，HEAD 起点写明派出时没有未提交的文件，取用方式写 take_worker 的调法", () => {
+  assert.equal(
+    SPAWN_WORKER_TEXTS.start({ commit: COMMIT, snapshot: true, files: ["a", "b"] }, "fix-a"),
+    "Start point: snapshot 0123456789ab (including 2 uncommitted files at spawn time); to apply its changes to your working directory, call take_worker (worker=fix-a)."
+  );
+  assert.equal(
+    SPAWN_WORKER_TEXTS.start({ commit: COMMIT, snapshot: false, files: [] }, "fix-a"),
+    "Start point: commit 0123456789ab (no uncommitted files at spawn time); to apply its changes to your working directory, call take_worker (worker=fix-a)."
+  );
+});
+
 test("spawn_worker 的返回：完成、撞上限、取消、失败各情形都另起一行写起点与 take_worker 的调法；额度用完的文字不加；没有起点不加", () => {
   // 起点行的格式在上一条核对；这里只看它随各情形另起一行接在末尾，取用方式写 take_worker 的调法
-  const takeHint = "调用 take_worker（worker=fix-a）";
-  const line = `\n${workerStartLine(SNAPSHOT_START, takeHint)}`;
+  const line = `\n${SPAWN_WORKER_TEXTS.start(SNAPSHOT_START, "fix-a")}`;
   assert.equal(
     workerOutcomeText(outcome()),
-    `worker fix-a（implementer）已完成。分支：pigeon/fix-a。改动的文件（1）：a.ts。摘要：改好了${line}`
+    `Worker fix-a (implementer) completed. Branch: pigeon/fix-a. Changed files (1): a.ts. Summary: 改好了${line}`
   );
   assert.equal(
     workerOutcomeText(outcome({ status: "turn-limit" })),
-    `worker fix-a（implementer）撞上轮数上限，没有做完。分支：pigeon/fix-a。已改动的文件（1）：a.ts。摘要：改好了${line}`
+    `Worker fix-a (implementer) hit the turn limit and did not finish. Branch: pigeon/fix-a. Files changed so far (1): a.ts. Summary: 改好了${line}`
   );
   assert.equal(
     workerOutcomeText(outcome({ status: "cancelled" })),
-    `worker fix-a（implementer）被取消。分支 pigeon/fix-a 上可能有部分改动。${line}`
+    `Worker fix-a (implementer) was cancelled. The branch pigeon/fix-a may have partial changes.${line}`
   );
   assert.equal(
     workerOutcomeText(outcome({ status: "failed", error: "炸了" })),
-    `worker fix-a（implementer）失败：炸了。分支 pigeon/fix-a 上可能有部分改动。${line}`
+    `Worker fix-a (implementer) failed: 炸了. The branch pigeon/fix-a may have partial changes.${line}`
   );
   // 摘要截断的补句在起点行之前
   const truncated = outcome({
@@ -90,11 +101,11 @@ test("spawn_worker 的返回：完成、撞上限、取消、失败各情形都�
   );
   const plain = outcome();
   delete plain.start;
-  assert.ok(!workerOutcomeText(plain).includes("起点："));
+  assert.ok(!workerOutcomeText(plain).includes("Start point:"));
   // HEAD 起点
   assert.ok(
     workerOutcomeText(outcome({ start: HEAD_START })).endsWith(
-      `\n${workerStartLine(HEAD_START, takeHint)}`
+      `\n${SPAWN_WORKER_TEXTS.start(HEAD_START, "fix-a")}`
     )
   );
 });
@@ -107,7 +118,7 @@ test("explorer 的交回不提分支、改动与起点；没收进交回的大�
     result: { summary: "查清了", summaryTruncated: false },
   });
   delete explorer.start;
-  assert.equal(workerOutcomeText(explorer), "worker fix-a（explorer）已完成。摘要：查清了");
+  assert.equal(workerOutcomeText(explorer), "Worker fix-a (explorer) completed. Summary: 查清了");
   const withSkipped = outcome({
     result: {
       branch: "pigeon/fix-a",
@@ -117,7 +128,7 @@ test("explorer 的交回不提分支、改动与起点；没收进交回的大�
       skippedFiles: [{ path: "dump.bin", bytes: 30 * 1024 * 1024 }],
     },
   });
-  assert.ok(workerOutcomeText(withSkipped).includes("dump.bin（30.0 MiB）"));
+  assert.ok(workerOutcomeText(withSkipped).includes("dump.bin (30.0 MiB)"));
   assert.ok(renderWorkerOutcome(withSkipped).includes("dump.bin（30.0 MiB）"));
 });
 

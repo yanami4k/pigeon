@@ -8,6 +8,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "vitest";
 import { git, type PlanInput, scriptHarness, type WorkerPlan } from "./script-fixtures.ts";
+import { SCRIPT_RETURNED_LEAD } from "./script-texts.ts";
 
 const objectSchema = {
   type: "object",
@@ -38,8 +39,8 @@ async function runToEnd(
 }
 
 function returned(notice: string): unknown {
-  const line = notice.split("\n").find((entry) => entry.startsWith("脚本返回："));
-  return line === undefined ? undefined : JSON.parse(line.slice("脚本返回：".length));
+  const line = notice.split("\n").find((entry) => entry.startsWith(SCRIPT_RETURNED_LEAD));
+  return line === undefined ? undefined : JSON.parse(line.slice(SCRIPT_RETURNED_LEAD.length));
 }
 
 test("agent 与结构化输出：合格、改正后合格、两次仍不合（改正在原会话里，至多两次）", async () => {
@@ -76,8 +77,11 @@ test("agent 与结构化输出：合格、改正后合格、两次仍不合（�
   assert.deepEqual([...runsBySession.values()], [1, 2, 3]);
   // 给了格式时任务后面附上格式要求
   const spawnedTask = harness.sink.spawned[0]?.task ?? "";
-  assert.match(spawnedTask, /最后一条回复只给一个符合下面 JSON Schema 的 JSON 对象/);
-  assert.match(notice, /成功 2，失败 1/);
+  assert.match(
+    spawnedTask,
+    /your last reply must contain only one JSON object that conforms to the JSON Schema below/
+  );
+  assert.match(notice, /succeeded 2, failed 1/);
   assert.match(notice, /输出不合格式（已让它改正 2 次）/);
 });
 
@@ -141,7 +145,7 @@ test("parallel 为屏障：全部结束才返回；pipeline 每项各自走完�
   assert.equal(
     harness.lines[0],
     "[脚本] t（运行号 " +
-      text.match(/运行号 (\w+)/)?.[1] +
+      text.match(/run ID (\w+)/)?.[1] +
       "）开跑：阶段 并行 → 流水线；已知 2 项；额度 不限。"
   );
   // 树形视图：脚本与阶段两层，worker 按阶段列出
@@ -193,7 +197,7 @@ test("接力与收回：接力起点看得到上游的改动；按清单三方�
   assert.equal(readFileSync(join(harness.repo, "a.txt"), "utf8"), "one\n");
   assert.match(
     notice,
-    /收回：叠入 x\.txt、y\.txt、a\.txt；冲突未写入 a\.txt；worker 删除未删 无。/
+    /Collected: applied x\.txt, y\.txt, a\.txt; conflicts, not written: a\.txt; deleted by workers, not deleted here: none\./
   );
   // 收回之后快照引用删掉
   assert.equal(git(harness.repo, "for-each-ref", "refs/pigeon/scripts/"), "");
@@ -205,10 +209,10 @@ test("收回：人没批准即不写主目录；脚本没有给 collect 即不�
     collectDecision: () => ({ approved: false }),
   });
   const first = await runToEnd(harness, 'const r = await agent("做"); return { collect: [r] };');
-  assert.match(first.notice, /未收回：人没有批准。/);
+  assert.match(first.notice, /Not collected: the user did not approve\./);
   assert.ok(!existsSync(join(harness.repo, "z.txt")));
   const second = await runToEnd(harness, 'await agent("做"); return 1;');
-  assert.match(second.notice, /未收回：没有要收回的。/);
+  assert.match(second.notice, /Not collected: there was nothing to collect\./);
   assert.equal(harness.collectRequests.length, 1);
 });
 
@@ -239,8 +243,8 @@ test("单个失败不中断：agent 照常返回原因；pipeline 跳过该项�
   // 坏的那项第二步跳过，其余照常
   assert.ok(!seen.includes("二 坏"));
   assert.ok(seen.includes("二 好") && seen.includes("最后"));
-  assert.match(notice, /已完成。worker 4 个：成功 3，失败 1/);
-  assert.match(notice, /失败：\S+：失败，编译不过/);
+  assert.match(notice, /completed\. Workers: 4; succeeded 3, failed 1/);
+  assert.match(notice, /Failed: \S+: 失败, 编译不过/);
 });
 
 test("等审批超时单独标出（补批后可续跑）", async () => {
@@ -255,9 +259,11 @@ test("等审批超时单独标出（补批后可续跑）", async () => {
   );
   assert.match(
     notice,
-    new RegExp(`等审批超时（补批后用 resume_run=${runId} 续跑）：${runId}-1：要跑命令 npm test`)
+    new RegExp(
+      `Waiting for approval timed out \\(after approval, resume with resume_run=${runId}\\): ${runId}-1: 跑命令 npm test`
+    )
   );
-  assert.ok(!/失败：/.test(notice));
+  assert.ok(!/Failed: /.test(notice));
 });
 
 test("花费上限：到限即不再派、在跑的做完、汇总写明做完与未做；无价格的模型按 token", async () => {
@@ -274,10 +280,13 @@ test("花费上限：到限即不再派、在跑的做完、汇总写明做完�
   );
   // 两个并行的都做完（到限时它们已在跑），之后的不再派
   assert.deepEqual(returned(notice), { r: [true, true, false, false] });
-  assert.match(notice, /额度用完。worker 2 个：成功 2，失败 0/);
-  assert.match(notice, /额度用完未做：2 个调用没有派出；调高额度后用 resume_run=/);
-  assert.match(notice, /花费 \$0\.20/);
-  assert.match(notice, /未收回：脚本没有正常结束。/);
+  assert.match(notice, /ran out of budget\. Workers: 2; succeeded 2, failed 0/);
+  assert.match(
+    notice,
+    /Not done because the budget ran out: 2 calls were not spawned; raise the budget and resume with resume_run=/
+  );
+  assert.match(notice, /Spent \$0\.20/);
+  assert.match(notice, /Not collected: the script did not finish normally\./);
   assert.equal(harness.sink.spawned.length, 2);
   // 无价格：按 token 计
   const tokens = scriptHarness({ planner: () => ({ tokens: 600 }) });
@@ -287,8 +296,8 @@ test("花费上限：到限即不再派、在跑的做完、汇总写明做完�
     { budget: { unit: "tokens", amount: 1000 } }
   );
   assert.equal(tokens.sink.spawned.length, 2);
-  assert.match(byTokens.notice, /额度用完未做：1 个调用没有派出/);
-  assert.match(byTokens.notice, /花费 1200 token（无价格）/);
+  assert.match(byTokens.notice, /Not done because the budget ran out: 1 call was not spawned/);
+  assert.match(byTokens.notice, /Spent 1200 token（无价格）/);
 });
 
 test("脚本出错与 worker 名：脚本抛错即以出错结束；角色写错的调用照常返回失败", async () => {
@@ -302,6 +311,6 @@ test("脚本出错与 worker 名：脚本抛错即以出错结束；角色写错
     e: "没有角色 boss；可选：explorer、implementer、tester",
   });
   const thrown = await runToEnd(harness, 'await agent("做"); throw new Error("不对");');
-  assert.match(thrown.notice, /出错：Error: 不对。/);
-  assert.match(thrown.notice, /未收回：脚本没有正常结束。/);
+  assert.match(thrown.notice, /failed with an error: Error: 不对\./);
+  assert.match(thrown.notice, /Not collected: the script did not finish normally\./);
 });

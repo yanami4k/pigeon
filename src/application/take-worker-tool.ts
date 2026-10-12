@@ -18,63 +18,72 @@ import {
 } from "../execution/worker-overlay.ts";
 import type { WorkerOrchestrator } from "../orchestration/workers.ts";
 import { isUnderPigeonDir } from "../state/paths.ts";
-import { skippedFilesText } from "../state/snapshot-config.ts";
 import type { ToolRegistration } from "../tools/registry.ts";
 import type { PigeonAgentTool, PigeonToolResult } from "../tools/wrap.ts";
-import { type SpawnWorkerSlot, TAKE_WORKER_TOOL } from "./spawn-worker-tool.ts";
+import {
+  type SpawnWorkerSlot,
+  skippedFilesForModel,
+  TAKE_WORKER_TOOL,
+} from "./spawn-worker-tool.ts";
 
 export { TAKE_WORKER_TOOL };
 
 // 工具说明（定稿原文）
 export const TAKE_WORKER_DESCRIPTION = [
-  "把一个已收尾的 worker 自己的改动叠进你的工作目录。worker 从派出时拍的快照开工；本工具只取快照之后它改过的文件，以快照里的版本为共同祖先逐文件三方合并，写进你的工作目录。",
-  "只写入 worker 改过的文件，它没碰的文件一律不动；不删除、不回退你工作目录里的任何文件。worker 删除的文件不自动删，只在结果里列出，由你决定删不删。",
-  "叠不上的文件（你在同一处也改了）不写入，列在冲突清单里；worker 的分支与工作树原样保留，查看它在这些文件上的改动：git -C <工作树路径> diff <快照号> -- <文件>。叠加没有撤销：叠之前先看清交回的摘要与改动文件。",
-  "多个 worker 的改动按需要逐个取，前一个取完再取下一个；后取的若和先取的改了同一处，会列为冲突。",
-  "返回三份清单：已叠入的文件、有冲突未写入的文件、worker 删除的文件。",
+  "Apply a finished worker's own changes to your working directory. A worker starts from a snapshot taken at spawn time; this tool takes only the files it changed after that snapshot and merges them file by file with a three-way merge, using the snapshot version as the common ancestor, into your working directory.",
+  "Only files the worker changed are written; files it did not touch are left alone. Nothing in your working directory is deleted or reverted. Files the worker deleted are not deleted automatically; they are only listed in the result, and you decide whether to delete them.",
+  "Files that cannot be merged (you also changed the same spot) are not written and are listed as conflicts; the worker's branch and worktree are kept as they are, and you can see its changes to those files with: git -C <worktree path> diff <snapshot> -- <file>. Applying cannot be undone: review the returned summary and changed files before applying.",
+  "Take the changes of several workers one at a time as needed, finishing one before taking the next; if a later one changed the same spot as an earlier one, it is listed as a conflict.",
+  "Returns three lists: files applied, files with conflicts that were not written, and files the worker deleted.",
 ].join("\n");
 
 // 参数（说明为定稿原文）
 export const TakeWorkerParamsSchema = Type.Object({
   worker: Type.String({
-    description: "worker 的名字，即 spawn_worker 交回结果里的名字（分支 pigeon/<名>）",
+    description:
+      "The worker's name, as given in the result returned by spawn_worker (branch pigeon/<name>)",
   }),
 });
 export type TakeWorkerParams = Static<typeof TakeWorkerParamsSchema>;
 
-// 文件列表：顿号相接；一个都没有时写"无"
+// 文件列表：逗号相接；一个都没有时写 none
 function fileList(files: readonly string[]): string {
-  return files.length > 0 ? files.join("、") : "无";
+  return files.length > 0 ? files.join(", ") : "none";
 }
 
 // 各情形的返回文字（定稿原文）
 export const TAKE_WORKER_TEXTS = {
   taken: (name: string, result: OverlayResult, view: { worktree: string; base: string }) =>
-    `已把 worker ${name} 的改动叠进工作目录。叠入的文件（${result.applied.length}）：${fileList(result.applied)}。` +
-    `冲突未写入的文件（${result.conflicts.length}）：${fileList(result.conflicts)}` +
+    `Applied the changes of worker ${name} to the working directory. Files applied (${result.applied.length}): ${fileList(result.applied)}. ` +
+    `Files with conflicts, not written (${result.conflicts.length}): ${fileList(result.conflicts)}` +
     (result.conflicts.length > 0
-      ? `；查看 worker 在这些文件上的改动：git -C ${view.worktree} diff ${view.base.slice(0, 12)} -- <文件>`
+      ? `; to see the worker's changes to these files: git -C ${view.worktree} diff ${view.base.slice(0, 12)} -- <file>`
       : "") +
-    `。worker 删除的文件（${result.deletedByWorker.length}，未删）：${fileList(result.deletedByWorker)}。`,
-  noChanges: (name: string) => `worker ${name} 相对起点快照没有改动，工作目录未变。`,
-  running: (name: string) => `worker ${name} 还没收尾，等它交回后再取。`,
-  unknown: (name: string) => `没有名为 ${name} 的 worker；用 spawn_worker 交回结果里的名字。`,
-  worktreeGone: (name: string) => `worker ${name} 的工作树已清理，改动无法取用。`,
-  noStart: (name: string) => `worker ${name} 没有记录起点快照，改动无法取用。`,
+    `. Files deleted by the worker (${result.deletedByWorker.length}, not deleted here): ${fileList(result.deletedByWorker)}.`,
+  noChanges: (name: string) =>
+    `Worker ${name} has no changes relative to its start snapshot; the working directory is unchanged.`,
+  running: (name: string) =>
+    `Worker ${name} has not finished yet; take its changes after it returns.`,
+  unknown: (name: string) =>
+    `There is no worker named ${name}; use the name given in the result returned by spawn_worker.`,
+  worktreeGone: (name: string) =>
+    `The worktree of worker ${name} has been cleaned up, so its changes cannot be taken.`,
+  noStart: (name: string) =>
+    `Worker ${name} has no recorded start snapshot, so its changes cannot be taken.`,
   // 续接后从会话记录找回的、只有派出没有收尾的（权威链审计 ②）
   interrupted: (name: string) =>
-    `worker ${name} 是之前的运行派出的，随上次进程退出而中断、没有交回结果，改动不可取用；它的分支与工作树留在原处。`,
+    `Worker ${name} was spawned by an earlier run and was interrupted when that process exited without returning a result, so its changes cannot be taken; its branch and worktree are left where they are.`,
   failed: (name: string, reason: string, applied: readonly string[]) =>
-    `取用 worker ${name} 的改动失败：${reason}。已叠入的文件（${applied.length}）：${fileList(applied)}。`,
+    `Taking the changes of worker ${name} failed: ${reason}. Files applied (${applied.length}): ${fileList(applied)}.`,
   // 决策 377：只读的 explorer 不建工作树、不交改动
   readOnly: (name: string) =>
-    `worker ${name} 是只读的 explorer，没有改动可取用；它的结论在交回的摘要里。`,
+    `Worker ${name} is a read-only explorer and has no changes to take; its conclusions are in the returned summary.`,
 } as const;
 
 // 决策 381：worker 新建却因过大没写进树、因而没叠入的文件（附在叠入结果之后；不属定稿原文）
 export function overlaySkippedLine(result: OverlayResult): string {
   return result.skipped !== undefined && result.skipped.length > 0
-    ? `\n未叠入的大文件（${result.skipped.length}，worker 新建、未跟踪且过大，留在它的工作树里）：${skippedFilesText(result.skipped)}`
+    ? `\nLarge files not applied (${result.skipped.length}; created by the worker, untracked and too large, so they stay in its worktree): ${skippedFilesForModel(result.skipped)}`
     : "";
 }
 
@@ -167,7 +176,7 @@ export function takeWorkerChanges(
   }
   if (status.workspace.kind !== "git-worktree") {
     return {
-      text: TAKE_WORKER_TEXTS.failed(name, "这个 worker 没有工作树", []),
+      text: TAKE_WORKER_TEXTS.failed(name, "this worker has no worktree", []),
       details: { worker: name, rejected: "failed" },
     };
   }
@@ -248,10 +257,14 @@ export function createTakeWorkerTool(slot: SpawnWorkerSlot): PigeonAgentTool<
     async execute(_toolCallId, params): Promise<PigeonToolResult<TakeWorkerDetails>> {
       const host = slot.host;
       if (host === undefined) {
-        return reply(TAKE_WORKER_TEXTS.failed(params.worker, "本会话没有装配编排器", []), {
-          worker: params.worker,
-          rejected: "unbound",
-        });
+        return reply(
+          TAKE_WORKER_TEXTS.failed(
+            params.worker,
+            "this session has no worker orchestrator set up",
+            []
+          ),
+          { worker: params.worker, rejected: "unbound" }
+        );
       }
       const { text, details } = takeWorkerChanges(host, params.worker);
       return reply(text, details);

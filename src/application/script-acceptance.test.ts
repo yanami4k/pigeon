@@ -30,7 +30,7 @@ test("模型没有价格：金额额度开跑即拒绝，token 额度与不设�
     unit: "tokens",
     amount: 10_000,
   });
-  assert.match(await notice, /已完成/);
+  assert.match(await notice, /\) completed\./);
   await harness.runs.settled(runId);
   await assert.rejects(
     harness.runs.resume(runId, { budget: { unit: "usd", amount: 1 } }),
@@ -40,7 +40,7 @@ test("模型没有价格：金额额度开跑即拒绝，token 额度与不设�
   const priced = scriptHarness({ planner: () => ({ cost: 0.01 }), pricing: () => "usd" });
   const pricedNotice = priced.nextNotice();
   await priced.runs.start(spec('await agent("一");'), { unit: "usd", amount: 1 });
-  assert.match(await pricedNotice, /已完成/);
+  assert.match(await pricedNotice, /\) completed\./);
 });
 
 test("工具把拒绝原样交回；计价口径：DeepSeek 按人民币、回复自带价格按美元、价格为 0 即没有价格、还没有回复即看不出来", async () => {
@@ -83,9 +83,9 @@ test("额度用完不自动收回：汇总列出已做完的 worker 与分支，
   const text = await notice;
   assert.match(
     text,
-    /已做完：s9-1（分支 pigeon\/s9-1）、s9-2（分支 pigeon\/s9-2）。可用 \/take 逐个取用，或调高额度后续跑，已做完的会复用。/
+    /Already done: s9-1 \(branch pigeon\/s9-1\), s9-2 \(branch pigeon\/s9-2\)\. They can be taken one by one with \/take, or raise the budget and resume; finished work will be reused\./
   );
-  assert.match(text, /未收回：脚本没有正常结束。/);
+  assert.match(text, /Not collected: the script did not finish normally\./);
 });
 
 test("脚本卡住监控：没有 worker 在跑或排队、脚本又没结束（脚本自身死循环），到判定时长即停掉、以卡住结束", async () => {
@@ -100,8 +100,11 @@ test("脚本卡住监控：没有 worker 在跑或排队、脚本又没结束（
   await harness.runs.start(spec('await agent("一"); while (true) {}'), undefined);
   const text = await notice;
   assert.ok(Date.now() - startedAt < 8000, "宿主侧计时停掉，不等执行器自己的同步时限");
-  assert.match(text, /卡住：1 分钟没有 worker 在跑或排队，脚本也没有结束，已停掉/);
-  assert.match(text, /已做完：s7-1（分支 pigeon\/s7-1）/);
+  assert.match(
+    text,
+    /stalled: no worker was running or queued for 1 minute and the script had not finished, so it was stopped/
+  );
+  assert.match(text, /Already done: s7-1 \(branch pigeon\/s7-1\)/);
   await harness.runs.settled("s7");
   const [node] = harness.runs.nodes();
   assert.equal(node?.state, "stalled");
@@ -120,7 +123,7 @@ test("等 worker 的脚本不被误停：worker 跑得比判定时长久，脚�
     spec('const a = agent("一"); const b = agent("二"); await a; await b; return 1;'),
     undefined
   );
-  assert.match(await notice, /已完成。worker 2 个：成功 2，失败 0/);
+  assert.match(await notice, /completed\. Workers: 2; succeeded 2, failed 0/);
 });
 
 test("卡住的判定时长可在编排配置里改（script.stallMinutes，缺省 10 分钟）", () => {
