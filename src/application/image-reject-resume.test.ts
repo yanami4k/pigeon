@@ -85,7 +85,7 @@ test("拒收的图换成占位写进会话记录：重试成功，续跑恢复�
     await disposeRuntime(resumed.bundle);
     const replayed = readResult(second, 0);
     assert.equal(replayed.image, false);
-    assert.match(replayed.text, /a\.png[\s\S]*未被服务方接受/);
+    assert.match(replayed.text, /a\.png[\s\S]*did not accept this image/);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

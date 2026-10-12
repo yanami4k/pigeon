@@ -129,7 +129,7 @@ for (const kind of ["local", "container"] as const) {
           () => EDITORS.hashline(host),
           (error: unknown) =>
             error instanceof WorkspaceWriteRefusedError &&
-            /符号链接/.test(error.message) &&
+            /symbolic link/.test(error.message) &&
             error.message.includes(target)
         );
         assert.equal(readFileSync(target, "utf8"), "outside\n");

@@ -139,7 +139,7 @@ test("Run 开始条目记下本次的模型信息与每一项的来源（设置�
       name: string;
       description: string;
     }>;
-    assert.match(tools.find((tool) => tool.name === "read_file")?.description ?? "", /图片.*PNG/);
+    assert.match(tools.find((tool) => tool.name === "read_file")?.description ?? "", /Images.*PNG/);
   }));
 
 test("自带的 DeepSeek 接入：声明官方人民币非高峰价与服务方，模型对象价格仍为 0", () => {

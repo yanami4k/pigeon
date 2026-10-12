@@ -139,7 +139,10 @@ describe.skipIf(SKIP)("容器辅助命令的超时（本机执行的假 docker�
       const startedAt = Date.now();
       await assert.rejects(f.host.readText(target), (error: unknown) => {
         assert.ok(error instanceof ContainerHostError);
-        assert.match(error.message, /辅助命令超过 1 秒，已在容器内终止/);
+        assert.match(
+          error.message,
+          /A helper command ran longer than 1s and was terminated inside the container/
+        );
         return true;
       });
       // 在容器内限时到点即收尾，不等客户端兜底
@@ -179,7 +182,10 @@ describe.skipIf(SKIP)("容器辅助命令的超时（本机执行的假 docker�
       const target = await f.host.resolveExisting("stuck.fifo");
       await assert.rejects(f.host.readText(target), (error: unknown) => {
         assert.ok(error instanceof ContainerHostError);
-        assert.match(error.message, /辅助命令超过 1 秒，已在容器内终止/);
+        assert.match(
+          error.message,
+          /A helper command ran longer than 1s and was terminated inside the container/
+        );
         return true;
       });
       assert.equal(readersOf(f.fifo), "", "卡住的辅助命令已不在");
@@ -203,7 +209,10 @@ describe.skipIf(SKIP)("容器辅助命令的超时（本机执行的假 docker�
       const target = await f.host.resolveExisting("stuck.fifo");
       await assert.rejects(f.host.readText(target), (error: unknown) => {
         assert.ok(error instanceof ContainerHostError);
-        assert.match(error.message, /辅助命令超过 1 秒未结束，已重启容器/);
+        assert.match(
+          error.message,
+          /A helper command did not finish within 1s, so the container was restarted/
+        );
         return true;
       });
       const calls = f.calls();

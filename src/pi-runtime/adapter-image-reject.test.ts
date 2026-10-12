@@ -107,7 +107,7 @@ test("400 且带新加的图：换成拒收占位并先写进会话记录，去�
     record?.items.map((item) => [item.toolCallId, item.reason]),
     [["a", "rejected"]]
   );
-  assert.match(record?.items[0]?.placeholder ?? "", /截图一张[\s\S]*未被服务方接受/);
+  assert.match(record?.items[0]?.placeholder ?? "", /截图一张[\s\S]*did not accept this image/);
   // 记录写在重试那条回复之前；出错消息照实留在会话里
   const recordAt = h.stored.findIndex(isPrune);
   const replyAt = h.stored.findIndex((item) => isReply(item, "stop"));

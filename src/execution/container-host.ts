@@ -1576,11 +1576,11 @@ export async function containerHelperExec(input: {
   );
   if (result.timedOut === true) {
     // 客户端被杀：容器内的命令可能还在，重启容器杀干净
-    let note = `A helper command did not finish within ${Math.round(clientTimeoutMs / 1000)} seconds, so the container was restarted`;
+    let note = `A helper command did not finish within ${Math.round(clientTimeoutMs / 1000)}s, so the container was restarted`;
     try {
       await restartContainer(input.docker, input.container);
     } catch (error) {
-      note = `A helper command did not finish within ${Math.round(clientTimeoutMs / 1000)} seconds; ${error instanceof Error ? error.message : String(error)}`;
+      note = `A helper command did not finish within ${Math.round(clientTimeoutMs / 1000)}s; ${error instanceof Error ? error.message : String(error)}`;
     }
     return { ...result, stderr: `${result.stderr}${result.stderr === "" ? "" : "\n"}${note}` };
   }
@@ -1594,7 +1594,7 @@ export async function containerHelperExec(input: {
     return {
       ...result,
       timedOut: true,
-      stderr: `${result.stderr}${result.stderr === "" ? "" : "\n"}A helper command ran longer than ${seconds} seconds and was terminated inside the container`,
+      stderr: `${result.stderr}${result.stderr === "" ? "" : "\n"}A helper command ran longer than ${seconds}s and was terminated inside the container`,
     };
   }
   return result;

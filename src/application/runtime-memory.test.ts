@@ -63,7 +63,10 @@ test("AGENTS.md 一段随开工状态块发出、不在系统提示里；中途�
       await bundle.adapter.run("再来");
       const second = streamFn.calls[1];
       const update = statusTextOf(second).split("<pigeon-status-update>").at(-1) ?? "";
-      assert.match(update, /以下整段取代此前的「项目说明」/);
+      assert.ok(
+        update.includes('This replaces the earlier "Project instructions" section in full:'),
+        update
+      );
       assert.ok(update.includes("改用 npm"));
       assert.equal(second?.context.systemPrompt, streamFn.calls[0]?.context.systemPrompt);
       assert.deepEqual(bundle.adapter.snapshot().memory, snapshot.memory);
