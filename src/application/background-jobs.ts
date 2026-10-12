@@ -37,7 +37,7 @@ import { commandLabel } from "../tools/command-echo.ts";
 import { escapeStatusText } from "./status-block.ts";
 import type { DrainTarget, NoticeTarget } from "./worker-notices.ts";
 
-export const JOB_NOTICE_PREFIX = "[后台作业通知] ";
+export const JOB_NOTICE_PREFIX = "[Background job notice] ";
 // 通知里带的输出末尾
 const NOTICE_TAIL_BYTES = 2048;
 

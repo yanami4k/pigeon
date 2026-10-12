@@ -120,7 +120,7 @@ test("分支会话只画自己的部分；未收尾的 Run 没有结束标记；
     ]);
   }));
 
-test("回看历史：打转提醒与 worker 通知显示成系统行（同实时），人输入的话照旧带 > 前缀", () => {
+test("回看历史：打转提醒与 worker 通知显示成系统行（同实时），人输入的话照旧带 > 前缀；决策 428 之前的中文前缀照样认", () => {
   const message = (text: string): ViewMessage => ({
     entryId: "e",
     runId: newRunId(),
@@ -130,11 +130,17 @@ test("回看历史：打转提醒与 worker 通知显示成系统行（同实时
     blocks: [{ type: "text", text }],
     raw: {},
   });
-  assert.deepEqual(messageLines(message("[打转提醒] 最近连续 5 轮……")), [
-    { kind: "notice", text: "[打转提醒] 最近连续 5 轮……" },
-  ]);
-  assert.deepEqual(messageLines(message("[worker 通知] worker a（explorer）已完成。")), [
-    { kind: "notice", text: "[worker 通知] worker a（explorer）已完成。" },
-  ]);
+  for (const text of [
+    "[Loop reminder] The last 5 rounds……",
+    "[Worker notice] Worker a (explorer) finished.",
+    "[打转提醒] 最近连续 5 轮……",
+    "[worker 通知] worker a（explorer）已完成。",
+  ]) {
+    assert.deepEqual(messageLines(message(text)), [{ kind: "notice", text }]);
+  }
   assert.deepEqual(messageLines(message("继续")), [{ kind: "user", text: "> 继续" }]);
+  // 只是像通知的人话（没有方括号前缀）照旧算人说的
+  assert.deepEqual(messageLines(message("Loop reminder: 继续")), [
+    { kind: "user", text: "> Loop reminder: 继续" },
+  ]);
 });

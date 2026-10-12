@@ -17,9 +17,9 @@ import {
 import type { ViewMessage } from "../state/session-view.ts";
 import { isStatusMessage, statusSummary } from "../state/status-text.ts";
 import { failureBadge, summarizeArgs } from "./format.ts";
-import { LOOP_REMINDER_PREFIX } from "./loop-guard.ts";
-import { SCRIPT_NOTICE_PREFIX } from "./script-texts.ts";
-import { WORKER_NOTICE_PREFIX } from "./worker-notices.ts";
+import { LEGACY_LOOP_REMINDER_PREFIX, LOOP_REMINDER_PREFIX } from "./loop-guard.ts";
+import { LEGACY_SCRIPT_NOTICE_PREFIX, SCRIPT_NOTICE_PREFIX } from "./script-texts.ts";
+import { LEGACY_WORKER_NOTICE_PREFIX, WORKER_NOTICE_PREFIX } from "./worker-notices.ts";
 
 export const DEFAULT_HISTORY_LIMIT = 500;
 // 单条正文的渲染上限（字符）：超出折叠并标注，原文用 /search 与读原文工具取
@@ -50,13 +50,19 @@ function clip(text: string, chars: number): string {
     : `${text.slice(0, chars)}…（已截断显示，共 ${text.length} 字符）`;
 }
 
-// 进模型上下文的程序通知（打转提醒、worker 通知、脚本通知）以用户消息存下；回看时同实时一样显示成系统行
+// 进模型上下文的程序通知（打转提醒、worker 通知、脚本通知）以用户消息存下；回看时同实时一样显示成系统行。
+// 决策 428：新通知是英文前缀，旧会话里是中文前缀，两种都认
+const PROGRAM_NOTICE_PREFIXES = [
+  LOOP_REMINDER_PREFIX,
+  WORKER_NOTICE_PREFIX,
+  SCRIPT_NOTICE_PREFIX,
+  LEGACY_LOOP_REMINDER_PREFIX,
+  LEGACY_WORKER_NOTICE_PREFIX,
+  LEGACY_SCRIPT_NOTICE_PREFIX,
+];
+
 function isProgramNotice(text: string): boolean {
-  return (
-    text.startsWith(LOOP_REMINDER_PREFIX) ||
-    text.startsWith(WORKER_NOTICE_PREFIX) ||
-    text.startsWith(SCRIPT_NOTICE_PREFIX)
-  );
+  return PROGRAM_NOTICE_PREFIXES.some((prefix) => text.startsWith(prefix));
 }
 
 // 撞上限续跑时运行面追加过的提示（现行两种加此前各版）

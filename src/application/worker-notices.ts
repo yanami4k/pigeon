@@ -22,7 +22,9 @@ export interface NoticeTarget {
   pendingNotices(): number;
 }
 
-export const WORKER_NOTICE_PREFIX = "[worker 通知] ";
+export const WORKER_NOTICE_PREFIX = "[Worker notice] ";
+// 决策 428 之前的说法：回看旧会话时据此认出程序通知
+export const LEGACY_WORKER_NOTICE_PREFIX = "[worker 通知] ";
 
 export interface WorkerNoticesOptions {
   orchestrator: Pick<WorkerOrchestrator, "subscribe">;

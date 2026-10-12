@@ -257,9 +257,9 @@ test("主 agent 还在跑时结束的 worker：通知进它这次运行的下一
   assert.equal(view?.runs.length, 1);
   assert.equal(contexts.length, 3);
   // 第二轮还看不到通知，第三轮（read_file 之后的下一轮）看到
-  assert.ok(!contexts[1]?.some((text) => text.includes("worker 通知")));
+  assert.ok(!contexts[1]?.some((text) => text.includes(WORKER_NOTICE_PREFIX)));
   assert.ok(
-    contexts[2]?.some((text) => text.includes("worker 通知")),
+    contexts[2]?.some((text) => text.includes(WORKER_NOTICE_PREFIX)),
     contexts[2]?.join("\n")
   );
 });

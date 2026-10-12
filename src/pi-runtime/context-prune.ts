@@ -23,6 +23,7 @@ import { createHash } from "node:crypto";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { estimateTokens } from "@earendil-works/pi-agent-core";
 import type { ToolResultMessage } from "@earendil-works/pi-ai";
+import { lastFileChangesAt } from "../state/model-markers.ts";
 import { VIRTUAL_PATH_HINT } from "../state/paths.ts";
 import type { ContextPruneSettings } from "../state/prune-config.ts";
 import { type PruneData, SessionEntryType } from "../state/session-entries.ts";
@@ -72,8 +73,6 @@ const FREE_TRIGGERS: ReadonlySet<PruneTrigger> = new Set([
 // 估算占位大小时代替还没落盘的虚拟路径（与真路径长度相当）
 const URI_STAND_IN = "pigeon://outputs/sess_00000000000000000000000000/000";
 const CLIP_CHARS = 160;
-// run_command 结果正文里文件变化一段的开头（tools/run-command.ts 的 resultText）
-const FILE_CHANGES_HEAD = "\n文件变化：";
 
 interface Candidate {
   index: number;
@@ -747,7 +746,8 @@ function fileChangesOf(candidate: Pick<Candidate, "toolName" | "result">): strin
   const text = candidate.result.content
     .map((block) => (block.type === "text" ? block.text : ""))
     .join("");
-  const at = text.lastIndexOf(FILE_CHANGES_HEAD);
+  // 决策 428：新结果是英文，旧会话记录里是中文，两种都认
+  const at = lastFileChangesAt(text);
   return at >= 0 ? text.slice(at) : "";
 }
 

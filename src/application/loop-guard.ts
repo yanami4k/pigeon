@@ -7,7 +7,9 @@ import { type ComparedRound, LoopDetector, type LoopVerdict } from "../state/loo
 import type { LoopGuardSettings } from "../state/loop-guard-config.ts";
 import { summarizeArgs } from "./format.ts";
 
-export const LOOP_REMINDER_PREFIX = "[打转提醒] ";
+export const LOOP_REMINDER_PREFIX = "[Loop reminder] ";
+// 决策 428 之前的说法：回看旧会话时据此认出程序通知
+export const LEGACY_LOOP_REMINDER_PREFIX = "[打转提醒] ";
 
 // 结果摘要取前几行，每行至多多少字符
 const RESULT_HEAD_LINES = 3;

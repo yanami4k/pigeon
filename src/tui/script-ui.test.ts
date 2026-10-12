@@ -197,7 +197,7 @@ test("开跑的计划行、log 行与结束汇总进消息区；树形视图接�
     assert.ok(after.includes(`script t (${runId})  done`), after);
     assert.ok(after.includes("phase 修改  done"), after);
     await type(term, CTRL_X);
-    assert.ok(screenFlat(term).includes(`[脚本通知] 脚本 t（运行号 ${runId}）已完成。`));
+    assert.ok(screenFlat(term).includes(`[Script notice] 脚本 t（运行号 ${runId}）已完成。`));
   } finally {
     await close();
   }

@@ -20,6 +20,7 @@ import type {
 import { type BreakerScope, breakerCountKey, InterceptStreak } from "../state/breaker.ts";
 import type { ConfigGrantRule } from "../state/grants.ts";
 import type { ToolSettledPayload } from "../state/runtime-events.ts";
+import { FAIL_CLOSED_APPROVAL_REASON } from "../state/session-judge.ts";
 import type { ToolScope } from "../state/session-payloads.ts";
 import {
   advanceToolExecution,
@@ -431,8 +432,8 @@ class GovernedToolCalls implements ToolGovernance {
       // 决策 355：读工作区以外的文件在无人值守时拒绝，理由点明路径
       const reason =
         outsidePath !== undefined
-          ? `读工作区以外的文件须经人批准，本次运行没有审批通道，拒绝：${outsidePath}`
-          : "策略要求人工审批但未配置审批通道";
+          ? `Reading files outside the workspace requires human approval, and this run has no approval channel; refused: ${outsidePath}`
+          : FAIL_CLOSED_APPROVAL_REASON;
       record = recordDecision(record, {
         outcome: "rejected",
         approvedBy: "policy:deny",

@@ -124,10 +124,12 @@ test("终端界面：提醒显示成系统消息；第 20 轮叫停并在消息�
     assert.equal(runtime.notes.length, 1);
     const screen = screenFlat(term);
     assert.ok(
-      screen.includes("[打转提醒] 最近连续 5 轮，你的工具调用和得到的结果都与上一轮完全相同："),
+      screen.includes(
+        "[Loop reminder] 最近连续 5 轮，你的工具调用和得到的结果都与上一轮完全相同："
+      ),
       screen
     );
-    assert.ok(!screen.includes("> [打转提醒]"), screen);
+    assert.ok(!screen.includes("> [Loop reminder]"), screen);
     assert.ok(screen.includes("> 修测试"), screen);
     runtime.rounds(15);
     await settle();

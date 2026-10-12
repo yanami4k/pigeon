@@ -5,7 +5,9 @@ import { SCRIPT_COMMAND, SCRIPT_KEYWORD } from "./script-naming.ts";
 export const ORCHESTRATE_TOOL = "orchestrate";
 
 // 结束汇总进主 agent 下一轮时的前缀（与 worker 通知同一样式显示成系统行）
-export const SCRIPT_NOTICE_PREFIX = "[脚本通知] ";
+export const SCRIPT_NOTICE_PREFIX = "[Script notice] ";
+// 决策 428 之前的说法：回看旧会话时据此认出程序通知
+export const LEGACY_SCRIPT_NOTICE_PREFIX = "[脚本通知] ";
 
 // 工具说明；modelDecides 为项目配置打开"由模型判断何时用"时的第 2 句
 export function orchestrateDescription(options: { modelDecides: boolean }): string {

@@ -6,6 +6,7 @@ import { Type } from "typebox";
 import { test } from "vitest";
 import type { GovernanceHost, ToolGovernance } from "../pi-runtime/governance.ts";
 import type { RunId } from "../state/ids.ts";
+import { FAIL_CLOSED_APPROVAL_REASON } from "../state/session-judge.ts";
 import type { ToolExecution } from "../state/tool-execution.ts";
 import type { ToolPolicyLike } from "../tools/policy.ts";
 import { ToolRegistry } from "../tools/registry.ts";
@@ -100,7 +101,7 @@ test("ask：无审批通道一律 fail-closed（block）；有审批通道则走
     preToolUseHooks: async () => ({ decision: "ask", reason: "钩子要人看一眼" }),
   });
   const blocked = await denied.governance.decide(call("read_file", { path: "a.ts" }));
-  assert.deepEqual(blocked, { kind: "block", reason: "策略要求人工审批但未配置审批通道" });
+  assert.deepEqual(blocked, { kind: "block", reason: FAIL_CLOSED_APPROVAL_REASON });
   const deniedDecision = denied.governance.decisionOf("tc-1");
   assert.equal(deniedDecision?.outcome, "rejected");
   assert.equal(deniedDecision?.approvedBy, "policy:deny");
@@ -136,7 +137,7 @@ test("allow 不免除受保护路径：命中 protectedPath 时仍走审批，�
     protectedPath,
   });
   const blocked = await denied.governance.decide(call("edit_file", protectedArgs));
-  assert.deepEqual(blocked, { kind: "block", reason: "策略要求人工审批但未配置审批通道" });
+  assert.deepEqual(blocked, { kind: "block", reason: FAIL_CLOSED_APPROVAL_REASON });
   assert.equal(denied.governance.decisionOf("tc-1")?.approvedBy, "policy:deny");
   // 有审批通道时进人工审批（钩子放行不生效）
   const asked: string[] = [];
@@ -179,7 +180,7 @@ test("updatedInput 不带放行含义：write 档只改参数不给结论时仍�
     preToolUseHooks: async () => ({ updatedInput: { path: "b.ts" } }),
   });
   const blocked = await noChannel.governance.decide(call("edit_file", { path: "a.ts" }));
-  assert.deepEqual(blocked, { kind: "block", reason: "策略要求人工审批但未配置审批通道" });
+  assert.deepEqual(blocked, { kind: "block", reason: FAIL_CLOSED_APPROVAL_REASON });
 
   // 有审批通道：请求里是人要看的新参数；批准后按新参数执行
   const requests: unknown[] = [];
@@ -281,6 +282,6 @@ test("钩子自身抛错不拦只记（不改变治理结论），也不影响�
   assert.deepEqual(h.errors, [error]);
   // write 档仍按 prompt 走：无审批通道 fail-closed
   const denied = await h.governance.decide(call("edit_file", { path: "a.ts" }, "tc-2"));
-  assert.deepEqual(denied, { kind: "block", reason: "策略要求人工审批但未配置审批通道" });
+  assert.deepEqual(denied, { kind: "block", reason: FAIL_CLOSED_APPROVAL_REASON });
   assert.equal(h.errors.length, 2);
 });

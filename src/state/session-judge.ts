@@ -109,7 +109,14 @@ export interface ToolResultMark {
 }
 
 // 审批闸在 prompt 档而没有审批通道时的固定拒绝理由（application/governance.ts 用它，工具级分类据它认出策略拒绝）
-export const FAIL_CLOSED_APPROVAL_REASON = "策略要求人工审批但未配置审批通道";
+export const FAIL_CLOSED_APPROVAL_REASON =
+  "The policy requires human approval, but no approval channel is configured";
+// 决策 428 之前的说法：旧会话记录里的工具结果是这一句
+export const LEGACY_FAIL_CLOSED_APPROVAL_REASON = "策略要求人工审批但未配置审批通道";
+
+function isFailClosedReason(text: string): boolean {
+  return text === FAIL_CLOSED_APPROVAL_REASON || text === LEGACY_FAIL_CLOSED_APPROVAL_REASON;
+}
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -512,7 +519,7 @@ function upstreamIntercepted(call: ToolCallBlock, text: string): boolean {
 
 // 审批闸的策略拒绝（治理闭环，不是失败）：工具在 deny 清单上，或 prompt 档无审批通道时的固定拒绝理由（无标记时的判据）
 function policyRejected(call: ToolCallBlock, text: string, start: RunStartData): boolean {
-  return start.policy.deny.includes(call.name) || text === FAIL_CLOSED_APPROVAL_REASON;
+  return start.policy.deny.includes(call.name) || isFailClosedReason(text);
 }
 
 function resultsOf(run: StoreRun): Map<string, StoreMessage> {
@@ -605,7 +612,7 @@ function neededApproval(
     return (
       approvedBy === "policy:yolo" ||
       approvedBy === "human" ||
-      (approvedBy === "policy:deny" && textOf(result) === FAIL_CLOSED_APPROVAL_REASON)
+      (approvedBy === "policy:deny" && isFailClosedReason(textOf(result)))
     );
   }
   // 没有标记：只能认出 yolo 档下通过了审批闸的调用（不在 deny 清单、没被上游拦截）

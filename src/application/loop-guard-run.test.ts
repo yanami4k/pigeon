@@ -109,12 +109,12 @@ test("pigeon run：第 5 轮提醒、第 10 轮再提醒、第 20 轮叫停；�
     assert.equal(first.length, 1);
     assert.match(
       first[0] ?? "",
-      /^\[打转提醒\] [^\n]*5 轮[^\n]*\n- read_file \{"path":"a\.ts"\}\n {4}结果：/
+      /^\[Loop reminder\] [^\n]*5 轮[^\n]*\n- read_file \{"path":"a\.ts"\}\n {4}结果：/
     );
     assert.match(first[0] ?? "", /重复同样的调用不会带来新信息。请换一个思路/);
     const second = reminders(userTexts(streamFn.calls[11]));
     assert.equal(second.length, 2);
-    assert.match(second[1] ?? "", /^\[打转提醒\] 这是第二次提醒。最近连续 10 轮/);
+    assert.match(second[1] ?? "", /^\[Loop reminder\] 这是第二次提醒。最近连续 10 轮/);
     assert.match(second[1] ?? "", /如果再重复 10 轮，本次运行将被叫停。/);
     // 会话记录里留作用户消息；Run 收尾的结束方式为打转
     const view = sessionOf(repo.root, result.sessionId);
@@ -123,14 +123,16 @@ test("pigeon run：第 5 轮提醒、第 10 轮再提醒、第 20 轮叫停；�
         .filter((ref) => ref.message.role === "user")
         .map((ref) => JSON.stringify(ref.message.content))
     );
-    assert.equal(stored.filter((text) => text.includes("[打转提醒]")).length, 2);
+    assert.equal(stored.filter((text) => text.includes("[Loop reminder]")).length, 2);
     assert.equal(view.runs.at(-1)?.end?.ending, "looping");
     assert.equal(view.runs.length, 1, "照常结束，不多开 Run");
     // /resume 回看历史：两次提醒都是系统行，不显示成人输入的话
     const history = loadSessionHistory(repo.root, result.sessionId);
-    const shown = history.filter((line) => line.text.includes("[打转提醒]"));
+    const shown = history.filter((line) => line.text.includes("[Loop reminder]"));
     assert.equal(shown.length, 2);
-    assert.ok(shown.every((line) => line.kind === "notice" && line.text.startsWith("[打转提醒]")));
+    assert.ok(
+      shown.every((line) => line.kind === "notice" && line.text.startsWith("[Loop reminder]"))
+    );
     assert.ok(history.some((line) => line.kind === "user" && line.text === "> 看看 a.ts"));
   } finally {
     repo.cleanup();

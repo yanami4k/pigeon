@@ -267,7 +267,7 @@ test("pigeon run：任务描述算作点名；脚本的汇总作为新的一轮�
   const noticeText = JSON.stringify(users.at(-1)?.content ?? "");
   assert.match(
     noticeText,
-    /\[脚本通知\] 脚本 一步（运行号 s[0-9a-f]+）已完成。worker 1 个：成功 1/
+    /\[Script notice\] 脚本 一步（运行号 s[0-9a-f]+）已完成。worker 1 个：成功 1/
   );
   assert.equal(worker.calls.length, 1);
 });
@@ -339,11 +339,14 @@ test("回看历史：[脚本通知] 与 [worker 通知] 同样显示成系统行
     blocks: [{ type: "text", text }],
     raw: {},
   });
-  assert.deepEqual(messageLines(message("[脚本通知] 脚本 t（运行号 s1）已完成。")), [
-    { kind: "notice", text: "[脚本通知] 脚本 t（运行号 s1）已完成。" },
-  ]);
-  assert.deepEqual(messageLines(message("[worker 通知] worker a 已完成。")), [
-    { kind: "notice", text: "[worker 通知] worker a 已完成。" },
-  ]);
+  // 决策 428：新的英文前缀与旧会话里的中文前缀都认
+  for (const text of [
+    "[Script notice] Script t (run s1) finished.",
+    "[Worker notice] Worker a finished.",
+    "[脚本通知] 脚本 t（运行号 s1）已完成。",
+    "[worker 通知] worker a 已完成。",
+  ]) {
+    assert.deepEqual(messageLines(message(text)), [{ kind: "notice", text }]);
+  }
   assert.deepEqual(messageLines(message("你好")), [{ kind: "user", text: "> 你好" }]);
 });

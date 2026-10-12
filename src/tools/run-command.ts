@@ -16,6 +16,7 @@
 // 设置的 commands 一节的短名在此展开，角色允许清单在场时只接受清单内的短名或其展开命令；它不是 shell 授权来源。
 import { type Static, Type } from "typebox";
 import { Value } from "typebox/value";
+import { FILE_CHANGES_HEAD } from "../state/model-markers.ts";
 import { PIGEON_DIR, VIRTUAL_PATH_HINT } from "../state/paths.ts";
 import {
   DEFAULT_RUN_COMMAND_OUTPUT_HEAD_BYTES,
@@ -1039,20 +1040,21 @@ function resultText(evidence: ExecEvidence, headBytes: number): string {
   }
   const listed = (label: string, files: string[]) =>
     files.length > 0
-      ? `${label}：${files.slice(0, 20).join("、")}${files.length > 20 ? " 等" : ""}`
+      ? `${label}: ${files.slice(0, 20).join(", ")}${files.length > 20 ? ", ..." : ""}`
       : "";
+  // 决策 428：这一段的开头由上下文裁剪认回（state/model-markers.ts）
   lines.push(
-    `文件变化：新增 ${changes.added.length} / 删除 ${changes.removed.length} / 修改 ${changes.modified.length}` +
+    `${FILE_CHANGES_HEAD} added ${changes.added.length} / removed ${changes.removed.length} / modified ${changes.modified.length}` +
       (changes.note !== undefined
-        ? `（${changes.note}）`
+        ? ` (${changes.note})`
         : changes.truncated
-          ? "（文件过多，差异不完整）"
+          ? " (too many files; the diff is incomplete)"
           : "")
   );
   for (const line of [
-    listed("新增", changes.added),
-    listed("删除", changes.removed),
-    listed("修改", changes.modified),
+    listed("Added", changes.added),
+    listed("Removed", changes.removed),
+    listed("Modified", changes.modified),
   ]) {
     if (line !== "") {
       lines.push(line);

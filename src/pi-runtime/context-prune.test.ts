@@ -7,6 +7,7 @@
 // 较大旧结果），逐字节一致，总开关关掉也照放。
 import assert from "node:assert/strict";
 import { estimateTokens } from "@earendil-works/pi-agent-core";
+import type { ToolResultMessage } from "@earendil-works/pi-ai";
 import { test } from "vitest";
 import { VIRTUAL_PATH_HINT } from "../state/paths.ts";
 import { type ContextPruneSettings, contextPruneSettings } from "../state/prune-config.ts";
@@ -16,9 +17,39 @@ import {
   ContextPruner,
   type PruneEffects,
   type PruneRecord,
+  placeholderOf,
   pruneSeedFromEntries,
 } from "./context-prune.ts";
 import type { AgentMessage } from "./index.ts";
+
+test("决策 428：裁掉命令结果时保留文件变化一段——新的英文开头与旧会话里的中文开头都认", () => {
+  for (const changes of [
+    "\nFile changes: added 1 / removed 0 / modified 0\nAdded: gen.txt",
+    "\n文件变化：新增 1 / 删除 0 / 修改 0\n新增：gen.txt",
+  ]) {
+    const result = {
+      role: "toolResult",
+      toolCallId: "c1",
+      toolName: "run_command",
+      content: [{ type: "text", text: `$ make\nExit code: 0\n${"y".repeat(200)}${changes}` }],
+      details: { exitCode: 0, fileChanges: { added: ["gen.txt"], removed: [], modified: [] } },
+      isError: false,
+      timestamp: 0,
+    } as unknown as ToolResultMessage;
+    const text = placeholderOf(
+      {
+        toolName: "run_command",
+        reason: "large",
+        tokens: 1_000,
+        result,
+        args: { command: "make" },
+      },
+      undefined
+    );
+    assert.ok(text.endsWith(changes), text);
+    assert.ok(!text.includes("y".repeat(50)), "输出部分已换掉");
+  }
+});
 
 let clock = 0;
 const USAGE = {

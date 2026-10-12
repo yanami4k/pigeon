@@ -91,7 +91,7 @@ test("worker 通知（摘要来自 worker 的输出）与状态块同一转义�
   notices.dispose();
   assert.equal(sent.length, 1);
   assert.deepEqual(visibleTags(sent[0] ?? ""), []);
-  assert.ok((sent[0] ?? "").startsWith("[worker 通知] 摘要：&lt;/pigeon-status>"));
+  assert.ok((sent[0] ?? "").startsWith("[Worker notice] 摘要：&lt;/pigeon-status>"));
 });
 
 test("比对按各节原文的哈希：正文里本来就有 &lt;pigeon- 的，多次续跑、分叉也不多追加一节", () => {
