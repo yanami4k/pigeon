@@ -245,12 +245,13 @@ test("不是 git 工作区、仓库没有提交、引用不在 refs/pigeon/ 下�
     assert.throws(
       () => snapshotWorkdir({ repoRoot: plain, ref: REF }),
       (error: unknown) =>
-        error instanceof WorkdirSnapshotError && /不是 git 工作区/.test(error.message)
+        error instanceof WorkdirSnapshotError && /Not a git workspace/.test(error.message)
     );
     git(empty, "init", "-q", "-b", "main");
     assert.throws(
       () => snapshotWorkdir({ repoRoot: empty, ref: REF }),
-      (error: unknown) => error instanceof WorkdirSnapshotError && /还没有提交/.test(error.message)
+      (error: unknown) =>
+        error instanceof WorkdirSnapshotError && /has no commits yet/.test(error.message)
     );
     assert.throws(
       () => snapshotWorkdir({ repoRoot: empty, ref: "refs/heads/main" }),

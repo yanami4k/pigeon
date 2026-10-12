@@ -256,13 +256,15 @@ test("过时读取不论大小都算；同一文件在上下文里还有没裁�
   const effects: PruneEffects = { forgetRead: (path) => forgotten.push(path) };
   // a.txt 第 5–14 行之后被第 1–100 行的读取覆盖；b.txt 只读过一次；c.txt 之后读的第 20–30 行不覆盖第 1–10 行；
   // d.txt 之后被 write_file 整体覆写（覆写的结果还在，不撤读取记录）
+  // 小的读取取 100 token：远低于较大旧结果的门槛，仍是"不论大小"；不再用 50——决策 428 起占位为英文，按字符估算约 50 token，
+  // 裁掉 50 token 的结果省不下（裁不裁另由"省得下才裁"决定，不是本条要测的）
   const messages = conversation([
-    read("a.txt", 5, 10, 50),
-    read("a.txt", 1, 100, 50),
+    read("a.txt", 5, 10, 100),
+    read("a.txt", 1, 100, 100),
     read("b.txt", 1, 10, 1_000),
-    read("c.txt", 1, 10, 50),
-    read("c.txt", 20, 11, 50),
-    read("d.txt", 1, 10, 50),
+    read("c.txt", 1, 10, 100),
+    read("c.txt", 20, 11, 100),
+    read("d.txt", 1, 10, 100),
     { name: "write_file", text: "已覆盖", details: { resolvedPath: "/w/d.txt" } },
   ]);
   const record = new ContextPruner(settings(), effects).beforeCompaction(messages);
@@ -365,9 +367,9 @@ test("命令：截断而全文没落盘的、补落盘失败的不裁；部分�
   );
   assert.deepEqual(saved, [generated]);
   const [partial, withChanges, empty] = (record?.items ?? []).map((item) => item.placeholder);
-  assert.match(partial ?? "", /已保存的是输出的前 1000 字节.*pigeon:\/\/outputs\/s1\/4/);
+  assert.match(partial ?? "", /the first 1000 bytes of the output .*pigeon:\/\/outputs\/s1\/4/);
   assert.ok(withChanges?.endsWith(changes), withChanges);
-  assert.match(empty ?? "", /没有输出/);
+  assert.match(empty ?? "", /had no output/);
 });
 
 test("先写进会话记录再生效：写不成时这次裁剪不生效、错误照抛，之后照常可裁", () => {

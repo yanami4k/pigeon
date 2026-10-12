@@ -21,11 +21,13 @@ import type { WorkerNotices } from "./worker-notices.ts";
 import { sessionsDirOf } from "./workspace.ts";
 
 // 续接后补递的通知开头一句
+// （决策 428：给模型看，为英文）
 export const REDELIVERED_NOTICE_LEAD =
-  "（续接后补递：这个 worker 在之前的运行中已收尾，当时的完成通知没有递出）";
+  "(Delivered after resuming: this worker finished in an earlier run, and its completion notice was not delivered then.)";
 
 // 中断的 worker 交回的原因
-export const INTERRUPTED_WORKER_ERROR = "随上次进程退出而中断，没有交回结果";
+export const INTERRUPTED_WORKER_ERROR =
+  "interrupted when the previous process exited, without returning a result";
 
 function messageText(message: ViewMessage): string {
   const content = message.raw.content;

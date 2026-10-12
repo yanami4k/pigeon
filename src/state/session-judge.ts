@@ -97,7 +97,7 @@ export interface StoreSessionView {
 
 // 续跑时为悬空工具调用补的工具结果（决策 183）：正文给 agent 看，details 里的标记给读者认
 export const INTERRUPTED_TOOL_RESULT_TEXT =
-  "进程在执行途中中断，这次工具调用的结果未知：请自行核实（例如重新读取相关文件、查看命令的效果）后再决定下一步。";
+  "The process was interrupted while running this tool call, so its result is unknown: check for yourself (for example, read the relevant files again or look at what the command did) before deciding the next step.";
 export const INTERRUPTED_TOOL_RESULT_MARK = "pigeonInterrupted";
 
 // 运行面给工具结果消息挂的标记（写在该消息 details 的这个键下，不新增记录种类）：工具抛错时的错误归类（域 / 环境；

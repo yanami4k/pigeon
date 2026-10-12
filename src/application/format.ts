@@ -88,13 +88,13 @@ export function shortId(id: string): string {
   return match === null ? id : `${match[0]}…`;
 }
 
-// 模型原始参数的单行摘要；不可序列化时如实说明
-export function summarizeArgs(args: unknown): string {
+// 模型原始参数的单行摘要；不可序列化时如实说明。english：给模型看的地方用（决策 428），其余给人看照旧中文
+export function summarizeArgs(args: unknown, english = false): string {
   let json: string;
   try {
     json = JSON.stringify(args) ?? "undefined";
   } catch {
-    return "<不可序列化参数>";
+    return english ? "<arguments that cannot be serialized>" : "<不可序列化参数>";
   }
   if (json.length <= ARGS_SUMMARY_LIMIT) {
     return json;
@@ -105,7 +105,9 @@ export function summarizeArgs(args: unknown): string {
   if (before >= 0xd800 && before <= 0xdbff) {
     cut -= 1;
   }
-  return `${json.slice(0, cut)}…（共 ${json.length} 字符）`;
+  return english
+    ? `${json.slice(0, cut)}… (${json.length} characters in total)`
+    : `${json.slice(0, cut)}…（共 ${json.length} 字符）`;
 }
 
 // 批准来源 → 通俗措辞（决策 4 证据链：策略决定不能伪装成人工；M4 S6：grant 出处如实标明）

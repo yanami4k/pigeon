@@ -295,9 +295,9 @@ export type WorkerActivity =
   | { kind: "delta"; worker: WorkerRef; delta: WorkerStreamDelta }
   | { kind: "tool-result"; worker: WorkerRef; result: WorkerToolResult };
 
-// 决策 303：补批续做时交给 worker 的话（界面在人另附的话前面同样用它）
+// 决策 303：补批续做时交给 worker 的话（界面在人另附的话前面同样用它）。决策 428 起本文件里会交给模型的说法为英文
 export function resumeApprovalText(action: string): string {
-  return `人已批准你之前等待审批的调用（${action}）。请重新发起这个调用，然后接着完成任务。`;
+  return `A human approved the call you were waiting on (${action}). Make that call again, then continue the task.`;
 }
 
 // 决策 298 与 293 的接入点：观察 worker 的运行事件，需要时叫停它。打转检测（305–307）以观察者接入：
@@ -415,15 +415,15 @@ export function previousRunWorkerText(
 ): string {
   const base =
     status.previousRun === "interrupted"
-      ? `worker ${status.name} 是之前的运行派出的，随上次进程退出而中断`
-      : `worker ${status.name} 是之前的运行派出的，已在之前的运行中收尾`;
+      ? `Worker ${status.name} was spawned by an earlier run and was interrupted when that process exited`
+      : `Worker ${status.name} was spawned by an earlier run and already finished in that run`;
   switch (action) {
     case "cancel":
-      return `${base}，不在运行，无需取消。`;
+      return `${base}; it is not running, so there is nothing to cancel.`;
     case "send":
-      return `${base}，不在运行，收不到消息。`;
+      return `${base}; it is not running, so it cannot receive messages.`;
     case "resume":
-      return `${base}；续接后不能对它补批续做，要接着做请另派一个 worker。`;
+      return `${base}; after resuming it cannot be approved and continued, so spawn another worker to carry on.`;
   }
 }
 
@@ -521,18 +521,18 @@ function refOf(entry: WorkerEntry): WorkerRef {
 function describeAction(request: ApprovalRequest): string {
   const args = request.args as { command?: unknown; path?: unknown } | undefined;
   if (request.command !== undefined) {
-    return `跑命令 ${request.command}`;
+    return `run the command ${request.command}`;
   }
   if (typeof args?.command === "string") {
-    return `跑命令 ${args.command}`;
+    return `run the command ${args.command}`;
   }
   if (request.host !== undefined) {
-    return `访问网站 ${request.host}`;
+    return `access the website ${request.host}`;
   }
   if (typeof args?.path === "string") {
-    return `用 ${request.toolName} 处理 ${args.path}`;
+    return `use ${request.toolName} on ${args.path}`;
   }
-  return `调用 ${request.toolName}`;
+  return `call ${request.toolName}`;
 }
 
 function argsKey(args: unknown): string {
@@ -633,22 +633,26 @@ export class WorkerOrchestrator {
     if (depth > this.#maxDepth) {
       throw new WorkerDepthError(
         this.#maxDepth === 1
-          ? "深度 1：worker 会话不能再派 worker"
-          : `层数已满（最多 ${this.#maxDepth} 层）：这一层的 worker 不能再派 worker`
+          ? "Depth 1: a worker session cannot spawn workers"
+          : `The nesting limit is reached (at most ${this.#maxDepth} levels): workers at this level cannot spawn workers`
       );
     }
     const parentLog =
       fromEntry !== undefined ? fromEntry.runtime.childLog?.() : this.#options.parentLog;
     if (parentLog === undefined) {
-      throw new WorkerSpawnError(`worker ${fromEntry?.name ?? ""} 不能作派出方（没有落盘口）`);
+      throw new WorkerSpawnError(
+        `Worker ${fromEntry?.name ?? ""} cannot spawn workers (it has no session log to record them)`
+      );
     }
     if (!isWorkerRole(request.role)) {
-      throw new WorkerSpawnError(`未知角色：${request.role}（可用：${WORKER_ROLES.join("、")}）`);
+      throw new WorkerSpawnError(
+        `Unknown role: ${request.role} (available: ${WORKER_ROLES.join(", ")})`
+      );
     }
     const role = request.role;
     const task = request.task.trim();
     if (task === "") {
-      throw new WorkerSpawnError("任务不能为空");
+      throw new WorkerSpawnError("The task must not be empty");
     }
     const basePolicy = fromEntry !== undefined ? fromEntry.policy : this.#options.parentPolicy;
     // 决策 360：范围路径在 worker 起点所在的工作目录里查符号链接——接力为上游 worker 的工作树，嵌套为派出方 worker 的
@@ -669,7 +673,7 @@ export class WorkerOrchestrator {
     if (
       [...this.#workers.values(), ...this.#previous.values()].some((worker) => worker.name === name)
     ) {
-      throw new WorkerSpawnError(`worker 名已被占用：${name}`);
+      throw new WorkerSpawnError(`The worker name is already taken: ${name}`);
     }
     const limits: WorkerLimits = {
       ...DEFAULT_WORKER_LIMITS,
@@ -692,7 +696,9 @@ export class WorkerOrchestrator {
       // 决策 311：脚本整次共用的快照，引用由脚本持有到收回或放弃
       startPoint = given.point;
     } else if (given !== undefined && this.#options.startPoint === undefined) {
-      throw new WorkerSpawnError(`派出 worker ${name} 失败：没有起点提供者，不能接力开工`);
+      throw new WorkerSpawnError(
+        `Failed to spawn worker ${name}: there is no start-point provider, so it cannot start from another worker's work`
+      );
     } else if (this.#options.startPoint !== undefined) {
       try {
         const from = given !== undefined ? given.from : fromPath;
@@ -706,9 +712,12 @@ export class WorkerOrchestrator {
         releaseStart = release;
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        throw new WorkerSpawnError(`派出 worker ${name} 失败：拍工作目录快照失败：${message}`, {
-          cause: error,
-        });
+        throw new WorkerSpawnError(
+          `Failed to spawn worker ${name}: taking the working-directory snapshot failed: ${message}`,
+          {
+            cause: error,
+          }
+        );
       }
     }
     const planned: WorkerWorkspace = inPlace
@@ -779,7 +788,7 @@ export class WorkerOrchestrator {
             }
           : {}),
       });
-      throw new WorkerSpawnError(`派出 worker ${name} 失败：${message}`, { cause: error });
+      throw new WorkerSpawnError(`Failed to spawn worker ${name}: ${message}`, { cause: error });
     }
     const entry: WorkerEntry = {
       sessionId,
@@ -944,11 +953,13 @@ export class WorkerOrchestrator {
     this.#rejectPrevious(sessionId, "send");
     const entry = this.#require(sessionId);
     if (entry.state !== "running" && entry.state !== "queued") {
-      throw new WorkerSpawnError(`worker ${entry.name} 已收尾，收不到消息`);
+      throw new WorkerSpawnError(
+        `Worker ${entry.name} has finished, so it cannot receive messages`
+      );
     }
     const runtime = entry.runtime;
     if (runtime.notify === undefined) {
-      throw new WorkerSpawnError(`worker ${entry.name} 的运行面不支持发消息`);
+      throw new WorkerSpawnError(`Worker ${entry.name} does not support receiving messages`);
     }
     const key = runtime.notify(text);
     const delivered = runtime.noticeDelivered;
@@ -990,13 +1001,17 @@ export class WorkerOrchestrator {
     this.#rejectPrevious(sessionId, "resume");
     const entry = this.#require(sessionId);
     if (entry.outcome === undefined) {
-      throw new WorkerSpawnError(`worker ${entry.name} 还没收尾，不需要续做`);
+      throw new WorkerSpawnError(
+        `Worker ${entry.name} has not finished yet, so there is nothing to continue`
+      );
     }
     const approve = options.approve === true && entry.blocked !== undefined;
     const blocked = entry.blocked;
     const text =
       options.message ??
-      (approve && blocked !== undefined ? resumeApprovalText(blocked.action) : "请接着完成任务。");
+      (approve && blocked !== undefined
+        ? resumeApprovalText(blocked.action)
+        : "Continue the task.");
     const runtime = this.#createRuntime({
       sessionId: entry.sessionId,
       name: entry.name,
@@ -1185,8 +1200,8 @@ export class WorkerOrchestrator {
       approved: false,
       reason:
         errorKind === "approval-unattended"
-          ? "无人值守运行没有人审批，worker 停在这里等人补批"
-          : "等待审批超时，worker 停在这里等人补批",
+          ? "An unattended run has no human to approve this, so the worker stops here until a human approves it later"
+          : "Waiting for approval timed out, so the worker stops here until a human approves it later",
       reasonSource: "system-default",
     };
   }
@@ -1309,7 +1324,7 @@ export class WorkerOrchestrator {
         halt(
           "stalled",
           "stalled",
-          `${Math.round(stallMs / 60_000)} 分钟没有新的模型回复或工具结果`
+          `no new model reply or tool result for ${Math.round(stallMs / 60_000)} minutes`
         );
       }, stallMs);
       stallTimer.unref?.();
@@ -1400,7 +1415,7 @@ export class WorkerOrchestrator {
           : (entry.stopped?.status ?? entry.limitHit ?? "aborted");
       } else {
         status = "failed";
-        error = run.errorMessage ?? "运行以未知终态结束";
+        error = run.errorMessage ?? "the run ended in an unknown state";
         errorKind = run.emptyReply === true ? "empty-reply" : "run-failed";
       }
     } catch (caught) {
@@ -1424,10 +1439,10 @@ export class WorkerOrchestrator {
     if (entry.blocked !== undefined && !entry.cancelRequested) {
       status = "failed";
       errorKind = entry.blocked.errorKind;
-      error = `${entry.blocked.action}：${
+      error = `${entry.blocked.action}: ${
         entry.blocked.errorKind === "approval-unattended"
-          ? "无人值守运行没有人审批"
-          : "等待审批超时"
+          ? "an unattended run has no human to approve it"
+          : "waiting for approval timed out"
       }`;
     } else if (status === "stalled" || (status === "failed" && entry.stopped !== undefined)) {
       errorKind = entry.stopped?.errorKind ?? "stalled";
@@ -1553,7 +1568,7 @@ export class WorkerOrchestrator {
   #require(sessionId: SessionId): WorkerEntry {
     const entry = this.#workers.get(sessionId);
     if (entry === undefined) {
-      throw new WorkerSpawnError(`未知 worker：${sessionId}`);
+      throw new WorkerSpawnError(`Unknown worker: ${sessionId}`);
     }
     return entry;
   }

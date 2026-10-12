@@ -150,7 +150,7 @@ export interface SessionWorkersDeps extends Omit<WorkerRuntimeDeps, "streamFnFor
 // 无人值守时汇聚审批的兜底：worker 不接审批通道，不会走到这里；万一走到按拒绝处理
 const UNATTENDED_APPROVAL = async () => ({
   approved: false,
-  reason: "无人值守运行没有审批通道",
+  reason: "an unattended run has no approval channel",
   reasonSource: "system-default" as const,
 });
 

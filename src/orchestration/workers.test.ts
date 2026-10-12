@@ -383,7 +383,8 @@ test("起点拍不成（如不是 git 工作区）：不派——没有派出记
   assert.throws(
     () => orchestrator.spawn({ role: "implementer", task: "改", name: "fix-a" }),
     (error: unknown) =>
-      error instanceof WorkerSpawnError && /拍工作目录快照失败：不是 git 工作区/.test(error.message)
+      error instanceof WorkerSpawnError &&
+      /taking the working-directory snapshot failed: 不是 git 工作区/.test(error.message)
   );
   assert.equal(spawned.length, 0);
   assert.deepEqual(journal, []);
@@ -563,20 +564,25 @@ test("之前运行的 worker：查询与等结果照常；取消、发消息、�
   // 关键片段：哪个 worker、之前的运行派出的、中断还是已收尾、这次的操作为什么不做
   await assert.rejects(orchestrator.cancel(prev.interruptedId), (error: unknown) => {
     assert.ok(error instanceof WorkerSpawnError);
-    assert.match(error.message, /^worker half 是之前的运行派出的，随上次进程退出而中断/);
-    assert.ok(error.message.endsWith("无需取消。"), error.message);
+    assert.match(
+      error.message,
+      /^Worker half was spawned by an earlier run and was interrupted when that process exited/
+    );
+    assert.ok(error.message.endsWith("so there is nothing to cancel."), error.message);
     return true;
   });
   assert.throws(
     () => orchestrator.send(prev.settledId, "接着"),
     (error: unknown) =>
       error instanceof Error &&
-      error.message.includes("worker implementer-1 是之前的运行派出的，已在之前的运行中收尾") &&
-      error.message.endsWith("收不到消息。")
+      error.message.includes(
+        "Worker implementer-1 was spawned by an earlier run and already finished in that run"
+      ) &&
+      error.message.endsWith("so it cannot receive messages.")
   );
   assert.throws(
     () => orchestrator.resume(prev.settledId, { approve: true }),
-    /续接后不能对它补批续做，要接着做请另派一个 worker。/
+    /after resuming it cannot be approved and continued, so spawn another worker to carry on\./
   );
 });
 
@@ -590,7 +596,7 @@ test("之前运行的 worker 不计入同时在跑的上限，新派的不与它
   assert.equal(fresh?.name, "implementer-2", "名字跳过之前运行的 implementer-1");
   assert.throws(
     () => orchestrator.spawn({ role: "implementer", task: "同名", name: "half" }),
-    /worker 名已被占用：half/
+    /The worker name is already taken: half/
   );
   await orchestrator.cancel(id);
   await orchestrator.awaitResult(id);

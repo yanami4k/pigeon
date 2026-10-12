@@ -114,8 +114,12 @@ export function sandboxStatusFacts(
       ? { skipped: sandbox.startSkipped }
       : {};
   return sandbox.network === "on"
-    ? { sandbox: "容器沙箱（联网档）", ...skipped }
-    : { sandbox: "容器沙箱（断网档）", network: "不可用（沙箱断网）", ...skipped };
+    ? { sandbox: "container sandbox (network on)", ...skipped }
+    : {
+        sandbox: "container sandbox (network off)",
+        network: "not available (the sandbox has no network)",
+        ...skipped,
+      };
 }
 
 export function sandboxReadyNotice(sandbox: Sandbox): string {

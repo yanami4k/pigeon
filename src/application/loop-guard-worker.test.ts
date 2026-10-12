@@ -124,7 +124,7 @@ test("worker 打转：提醒递进它的下一轮，第 20 轮叫停，以 loopi
   assert.equal(outcome.errorKind, "looping");
   assert.equal(
     outcome.error,
-    '打转，连续 20 轮重复同样的工具调用与结果，已被叫停。重复的调用：run_command {"command":"npm test"}'
+    'stuck in a loop: the same tool calls and results repeated for 20 consecutive rounds, so it was stopped. Repeated calls: run_command {"command":"npm test"}'
   );
   assert.equal(runtimes.length, 1);
   const runtime = runtimes[0];
@@ -133,7 +133,10 @@ test("worker 打转：提醒递进它的下一轮，第 20 轮叫停，以 loopi
   assert.deepEqual(runtime.causes, ["looping"]);
   assert.equal(runtime.notes.length, 2);
   assert.ok(runtime.notes.every((note) => note.startsWith(LOOP_REMINDER_PREFIX)));
-  assert.match(runtime.notes[1] ?? "", /如果再重复 10 轮，本次运行将被叫停/);
+  assert.match(
+    runtime.notes[1] ?? "",
+    /If they repeat for 10 more rounds, this run will be stopped/
+  );
   // 通知主 agent：套失败文字，写明重复的调用与分支上可能有部分改动
   const failed = SPAWN_WORKER_TEXTS.failed(
     { name: "spin", role: "implementer", branch: "pigeon/spin" },

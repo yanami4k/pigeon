@@ -685,12 +685,12 @@ export function createContainerWorkspaceHost(options: ContainerHostOptions): Wor
     if (rootInfo === undefined) {
       const result = await helper(false, trustedShell(ROOT_SCRIPT, root));
       if (daemonFailure(result)) {
-        throw new ContainerHostError(`容器不可用：${result.stderr.trim()}`);
+        throw new ContainerHostError(`The container is unavailable: ${result.stderr.trim()}`);
       }
       const nul = result.stdout.indexOf(0);
       const real = nul > 0 ? result.stdout.subarray(0, nul).toString("utf8") : "";
       if (result.exitCode !== 0 || real === "" || hasControlChars(real)) {
-        throw new WorkspacePathError(`路径不存在或不可读：${root}`);
+        throw new WorkspacePathError(`Path does not exist or cannot be read: ${root}`);
       }
       const gitDir = result.stdout.subarray(nul + 1).toString("utf8");
       rootInfo = { real, ...(gitDir !== "" ? { gitDir } : {}) };
@@ -726,11 +726,11 @@ export function createContainerWorkspaceHost(options: ContainerHostOptions): Wor
   const inspect = async (key: string): Promise<Inspection> => {
     const result = await helper(false, trustedShell(INSPECT_SCRIPT, key));
     if (daemonFailure(result)) {
-      throw new ContainerHostError(`容器不可用：${result.stderr.trim()}`);
+      throw new ContainerHostError(`The container is unavailable: ${result.stderr.trim()}`);
     }
     const inspection = result.exitCode === 0 ? parseInspection(key, result.stdout) : undefined;
     if (inspection === undefined) {
-      throw new WorkspacePathError(`路径不存在或不可读：${key}`);
+      throw new WorkspacePathError(`Path does not exist or cannot be read: ${key}`);
     }
     lastInspection = inspection;
     return inspection;
@@ -743,16 +743,16 @@ export function createContainerWorkspaceHost(options: ContainerHostOptions): Wor
     outside = false
   ): string => {
     if (inspection.kind === "M") {
-      throw new WorkspacePathNotFoundError(`路径不存在或不可读：${inputPath}`);
+      throw new WorkspacePathNotFoundError(`Path does not exist or cannot be read: ${inputPath}`);
     }
     if (inspection.resolved === undefined) {
-      throw new WorkspacePathError(`路径不存在或不可读：${inputPath}`);
+      throw new WorkspacePathError(`Path does not exist or cannot be read: ${inputPath}`);
     }
     if (hasControlChars(inspection.resolved)) {
       throw controlCharsRefused(inspection.resolved);
     }
     if (!outside && !insideRoot(base, inspection.resolved)) {
-      throw new WorkspacePathError(`路径越出工作区根：${inputPath}`);
+      throw new WorkspacePathError(`Path is outside the workspace root: ${inputPath}`);
     }
     return inspection.resolved;
   };
@@ -823,7 +823,7 @@ export function createContainerWorkspaceHost(options: ContainerHostOptions): Wor
       } catch (error) {
         reject(
           new ContainerHostError(
-            `docker 拉不起来：${error instanceof Error ? error.message : String(error)}`
+            `docker could not be started: ${error instanceof Error ? error.message : String(error)}`
           )
         );
         return;
@@ -902,7 +902,7 @@ export function createContainerWorkspaceHost(options: ContainerHostOptions): Wor
       };
       child.on("error", (error) => {
         cleanup();
-        reject(new ContainerHostError(`docker 拉不起来：${error.message}`));
+        reject(new ContainerHostError(`docker could not be started: ${error.message}`));
       });
       child.on("close", (code, signal) => {
         cleanup();
@@ -929,7 +929,11 @@ export function createContainerWorkspaceHost(options: ContainerHostOptions): Wor
               /executable file not found|no such file or directory/i.test(ociFailure) &&
               !/chdir to cwd/i.test(ociFailure);
             if (!missing && !/permission denied/i.test(ociFailure)) {
-              reject(new ContainerHostError(`容器内进程起不来：${ociFailure.trim()}`));
+              reject(
+                new ContainerHostError(
+                  `The process inside the container could not start: ${ociFailure.trim()}`
+                )
+              );
               return;
             }
             const spawnError: NodeJS.ErrnoException = new Error(ociFailure.trim());
@@ -938,7 +942,7 @@ export function createContainerWorkspaceHost(options: ContainerHostOptions): Wor
             return;
           }
           if (daemonFailure({ exitCode: code, stderr: stderrHead })) {
-            reject(new ContainerHostError(`容器不可用：${stderrHead.trim()}`));
+            reject(new ContainerHostError(`The container is unavailable: ${stderrHead.trim()}`));
             return;
           }
           resolve({
@@ -995,7 +999,7 @@ export function createContainerWorkspaceHost(options: ContainerHostOptions): Wor
     if (exceeded === undefined) {
       return result;
     }
-    options.onNotice?.(`${memoryLimitText(exceeded)}（${[plan.program, ...plan.args].join(" ")}）`);
+    options.onNotice?.(`${memoryLimitText(exceeded)} (${[plan.program, ...plan.args].join(" ")})`);
     return { ...result, memoryLimitExceeded: exceeded };
   };
 
@@ -1096,7 +1100,7 @@ export function createContainerWorkspaceHost(options: ContainerHostOptions): Wor
         relPaths.length > 0 ? `${relPaths.join("\0")}\0` : ""
       );
       if (daemonFailure(result)) {
-        throw new ContainerHostError(`容器不可用：${result.stderr.trim()}`);
+        throw new ContainerHostError(`The container is unavailable: ${result.stderr.trim()}`);
       }
       const fields = result.stdout.toString("utf8").split("\0");
       const classify = (rel: string | undefined, real: string | undefined) => {
@@ -1145,7 +1149,7 @@ export function createContainerWorkspaceHost(options: ContainerHostOptions): Wor
       // 文件清单经标准输入以 NUL 分隔交给 xargs，不进命令行；stat 从系统目录解析
       const result = await helper(true, trustedShell(MTIMES_SCRIPT), `${relPaths.join("\0")}\0`);
       if (daemonFailure(result)) {
-        throw new ContainerHostError(`容器不可用：${result.stderr.trim()}`);
+        throw new ContainerHostError(`The container is unavailable: ${result.stderr.trim()}`);
       }
       for (const line of result.stdout.toString("utf8").split("\n")) {
         const space = line.indexOf(" ");
@@ -1163,7 +1167,7 @@ export function createContainerWorkspaceHost(options: ContainerHostOptions): Wor
       }
       const result = await helper(false, ["test", "-f", resolvedPath]);
       if (daemonFailure(result)) {
-        throw new ContainerHostError(`容器不可用：${result.stderr.trim()}`);
+        throw new ContainerHostError(`The container is unavailable: ${result.stderr.trim()}`);
       }
       return result.exitCode === 0;
     },
@@ -1174,7 +1178,7 @@ export function createContainerWorkspaceHost(options: ContainerHostOptions): Wor
       }
       const result = await helper(false, ["cat", "--", resolvedPath]);
       if (result.exitCode !== 0) {
-        throw new ContainerHostError(`读取失败：${resolvedPath}（${result.stderr.trim()}）`);
+        throw new ContainerHostError(`Read failed: ${resolvedPath} (${result.stderr.trim()})`);
       }
       return result.stdout.toString("utf8");
     },
@@ -1190,7 +1194,7 @@ export function createContainerWorkspaceHost(options: ContainerHostOptions): Wor
         content
       );
       if (daemonFailure(result)) {
-        throw new ContainerHostError(`容器不可用：${result.stderr.trim()}`);
+        throw new ContainerHostError(`The container is unavailable: ${result.stderr.trim()}`);
       }
       if (result.exitCode === EXIT_STALE && inspected !== undefined) {
         const fresh = parseInspection(inspected.key, result.stdout);
@@ -1198,7 +1202,7 @@ export function createContainerWorkspaceHost(options: ContainerHostOptions): Wor
           lastInspection = fresh;
         }
         throw new WorkspaceContentChangedError(
-          `文件在预检之后被改动：${resolvedPath}，未写入（已重新读取原文）`
+          `The file changed after the pre-write check, so it was not written: ${resolvedPath} (the original has been read again)`
         );
       }
       const stdout = result.stdout.toString("utf8").replace(/\n$/, "");
@@ -1209,7 +1213,7 @@ export function createContainerWorkspaceHost(options: ContainerHostOptions): Wor
         throw pathChanged(resolvedPath, result.exitCode === EXIT_CHANGED ? stdout : undefined);
       }
       if (result.exitCode !== 0) {
-        throw new ContainerHostError(`写入失败：${resolvedPath}（${result.stderr.trim()}）`);
+        throw new ContainerHostError(`Write failed: ${resolvedPath} (${result.stderr.trim()})`);
       }
     },
     async resolveForCreate(inputPath, writeOptions) {
@@ -1220,30 +1224,32 @@ export function createContainerWorkspaceHost(options: ContainerHostOptions): Wor
       // 不做词法折叠：原样交给容器，按内核顺序解析（与受保护路径的容器判定同一口径）
       const result = await helper(false, trustedShell(RESOLVE_FOR_CREATE_SCRIPT, inputPath, root));
       if (daemonFailure(result)) {
-        throw new ContainerHostError(`容器不可用：${result.stderr.trim()}`);
+        throw new ContainerHostError(`The container is unavailable: ${result.stderr.trim()}`);
       }
       const stdout = result.stdout.toString("utf8");
       if (result.exitCode === EXIT_SYMLINK) {
         throw symlinkRefused(inputPath, stdout.replace(/\n$/, ""));
       }
       if (result.exitCode === EXIT_NOT_DIR) {
-        throw new WorkspacePathError(`路径上有一层不是目录：${inputPath}`);
+        throw new WorkspacePathError(`A component on the path is not a directory: ${inputPath}`);
       }
       if (result.exitCode === EXIT_BAD_PART) {
-        throw new WorkspacePathError(`路径里尚不存在的部分不能含空段、. 或 ..：${inputPath}`);
+        throw new WorkspacePathError(
+          `The part of the path that does not exist yet must not contain empty segments, . or ..: ${inputPath}`
+        );
       }
       if (result.exitCode !== 0 && result.exitCode !== EXIT_NEW) {
-        throw new WorkspacePathError(`路径不存在或不可读：${inputPath}`);
+        throw new WorkspacePathError(`Path does not exist or cannot be read: ${inputPath}`);
       }
       const [real = "", rest = ""] = stdout.split("\0");
       const target = result.exitCode === EXIT_NEW ? `${real === "/" ? "" : real}${rest}` : real;
       if (target === "" || hasControlChars(target)) {
         throw new WorkspacePathError(
-          `路径解析结果为空或含控制字符，拒绝写入：${JSON.stringify(target)}`
+          `Refused to write: the resolved path is empty or contains control characters: ${JSON.stringify(target)}`
         );
       }
       if (writeOptions?.outside !== true && !insideRoot(base, target)) {
-        throw new WorkspacePathError(`路径越出工作区根：${inputPath}`);
+        throw new WorkspacePathError(`Path is outside the workspace root: ${inputPath}`);
       }
       // 覆盖与新建都不写版本库元数据
       await refuseGitMetadata(inputPath, target, base);
@@ -1254,16 +1260,18 @@ export function createContainerWorkspaceHost(options: ContainerHostOptions): Wor
       lastInspection = undefined;
       const result = await helper(true, trustedShell(CREATE_SCRIPT, resolvedPath), content);
       if (daemonFailure(result)) {
-        throw new ContainerHostError(`容器不可用：${result.stderr.trim()}`);
+        throw new ContainerHostError(`The container is unavailable: ${result.stderr.trim()}`);
       }
       if (result.exitCode === EXIT_EXISTS) {
-        throw new WorkspaceWriteRefusedError(`文件在检查之后已被创建，未覆盖：${resolvedPath}`);
+        throw new WorkspaceWriteRefusedError(
+          `The file was created after it was checked, so it was not overwritten: ${resolvedPath}`
+        );
       }
       if (result.exitCode === EXIT_CHANGED) {
         throw pathChanged(resolvedPath, result.stdout.toString("utf8"));
       }
       if (result.exitCode !== 0) {
-        throw new ContainerHostError(`写入失败：${resolvedPath}（${result.stderr.trim()}）`);
+        throw new ContainerHostError(`Write failed: ${resolvedPath} (${result.stderr.trim()})`);
       }
     },
     async readBytes(resolvedPath) {
@@ -1274,7 +1282,7 @@ export function createContainerWorkspaceHost(options: ContainerHostOptions): Wor
       }
       const result = await helper(false, ["cat", "--", resolvedPath]);
       if (result.exitCode !== 0) {
-        throw new ContainerHostError(`读取失败：${resolvedPath}（${result.stderr.trim()}）`);
+        throw new ContainerHostError(`Read failed: ${resolvedPath} (${result.stderr.trim()})`);
       }
       return result.stdout;
     },
@@ -1299,7 +1307,9 @@ export function createContainerWorkspaceHost(options: ContainerHostOptions): Wor
       const beforeSections = pre !== undefined ? markedSections(pre, nonce) : [];
       const before = stateOfSections(beforeSections, limit);
       if (before === undefined) {
-        throw new ContainerHostError(`容器内的取证脚本没有运行：${rest.stderr.trim()}`);
+        throw new ContainerHostError(
+          `The evidence script inside the container did not run: ${rest.stderr.trim()}`
+        );
       }
       if (post === undefined) {
         // 客户端被强行断开（命令或取证卡住）：命令后的取证由调用方另取
@@ -1312,7 +1322,7 @@ export function createContainerWorkspaceHost(options: ContainerHostOptions): Wor
       const after = completed ? stateOfSections(afterSections, limit, before) : undefined;
       let result: HostExecResult = rest;
       if (ended === "missing" || ended === "denied") {
-        const spawnError: NodeJS.ErrnoException = new Error(`${plan.program}：${ended}`);
+        const spawnError: NodeJS.ErrnoException = new Error(`${plan.program}: ${ended}`);
         spawnError.code = ended === "missing" ? "ENOENT" : "EACCES";
         result = { ...rest, spawned: false, spawnError, exitCode: null };
       } else if (/^\d+$/.test(ended)) {
@@ -1340,7 +1350,7 @@ export function createContainerWorkspaceHost(options: ContainerHostOptions): Wor
               : undefined;
         if (exceeded !== undefined) {
           options.onNotice?.(
-            `${memoryLimitText(exceeded)}（${[plan.program, ...plan.args].join(" ")}）`
+            `${memoryLimitText(exceeded)} (${[plan.program, ...plan.args].join(" ")})`
           );
           result = { ...result, memoryLimitExceeded: exceeded };
         }
@@ -1357,11 +1367,13 @@ export function createContainerWorkspaceHost(options: ContainerHostOptions): Wor
         `${nonce}\n${given}`
       );
       if (daemonFailure(result)) {
-        throw new ContainerHostError(`容器不可用：${result.stderr.trim()}`);
+        throw new ContainerHostError(`The container is unavailable: ${result.stderr.trim()}`);
       }
       const state = stateOfSections(markedSections(result.stdout, nonce), limit, before);
       if (state === undefined) {
-        throw new ContainerHostError(`容器内的取证脚本没有运行：${result.stderr.trim()}`);
+        throw new ContainerHostError(
+          `The evidence script inside the container did not run: ${result.stderr.trim()}`
+        );
       }
       return state;
     },
@@ -1377,7 +1389,7 @@ export function createContainerWorkspaceHost(options: ContainerHostOptions): Wor
         `-exec stat -c '%n\t%s:%y' {} + | head -n ${limit + 1}`;
       const result = await helper(false, ["sh", "-c", script]);
       if (daemonFailure(result)) {
-        throw new ContainerHostError(`容器不可用：${result.stderr.trim()}`);
+        throw new ContainerHostError(`The container is unavailable: ${result.stderr.trim()}`);
       }
       const files = new Map<string, string>();
       let truncated = false;
@@ -1440,7 +1452,7 @@ export function dockerOnce(
     child.stderr?.on("data", (chunk: Buffer) => stderr.push(chunk));
     child.on("error", (error) => {
       clearTimeout(timer);
-      reject(new ContainerHostError(`docker 拉不起来：${error.message}`));
+      reject(new ContainerHostError(`docker could not be started: ${error.message}`));
     });
     child.on("close", (code) => {
       clearTimeout(timer);
@@ -1523,7 +1535,7 @@ export async function restartContainer(
 ): Promise<void> {
   const result = await dockerOnce(docker, ["restart", "-t", "0", container], timeoutMs);
   if (result.exitCode !== 0) {
-    throw new ContainerHostError(`容器重启失败：${result.stderr.trim()}`);
+    throw new ContainerHostError(`Restarting the container failed: ${result.stderr.trim()}`);
   }
 }
 
@@ -1564,11 +1576,11 @@ export async function containerHelperExec(input: {
   );
   if (result.timedOut === true) {
     // 客户端被杀：容器内的命令可能还在，重启容器杀干净
-    let note = `辅助命令超过 ${Math.round(clientTimeoutMs / 1000)} 秒未结束，已重启容器`;
+    let note = `A helper command did not finish within ${Math.round(clientTimeoutMs / 1000)} seconds, so the container was restarted`;
     try {
       await restartContainer(input.docker, input.container);
     } catch (error) {
-      note = `辅助命令超过 ${Math.round(clientTimeoutMs / 1000)} 秒未结束，${error instanceof Error ? error.message : String(error)}`;
+      note = `A helper command did not finish within ${Math.round(clientTimeoutMs / 1000)} seconds; ${error instanceof Error ? error.message : String(error)}`;
     }
     return { ...result, stderr: `${result.stderr}${result.stderr === "" ? "" : "\n"}${note}` };
   }
@@ -1582,7 +1594,7 @@ export async function containerHelperExec(input: {
     return {
       ...result,
       timedOut: true,
-      stderr: `${result.stderr}${result.stderr === "" ? "" : "\n"}辅助命令超过 ${seconds} 秒，已在容器内终止`,
+      stderr: `${result.stderr}${result.stderr === "" ? "" : "\n"}A helper command ran longer than ${seconds} seconds and was terminated inside the container`,
     };
   }
   return result;

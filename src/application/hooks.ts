@@ -115,7 +115,7 @@ const HOOK_OUTPUT_STRING_CAP = 2000;
 function capText(text: string, cap = HOOK_OUTPUT_STRING_CAP): string | undefined {
   const trimmed = text.trim();
   if (trimmed === "") return undefined;
-  return trimmed.length > cap ? `${trimmed.slice(0, cap)}…（已截断）` : trimmed;
+  return trimmed.length > cap ? `${trimmed.slice(0, cap)}… (truncated)` : trimmed;
 }
 
 // stdout 是否按 JSON 解析（照 Claude Code：去掉首尾空白后以 { 开头且以 } 结尾）
@@ -159,7 +159,9 @@ export function interpretHookRun(
           ? "block"
           : "block";
     record.decisionBlock = true;
-    record.reason = stderrText !== "" ? stderrText : "钩子拦下（退出码 2，未给理由）";
+    // 决策 428：拦截理由会交给模型，缺省说法为英文
+    record.reason =
+      stderrText !== "" ? stderrText : "Blocked by a hook (exit code 2, no reason given)";
     return record;
   }
   if (outcome.exitCode !== 0 || outcome.spawnError !== undefined || outcome.timedOut) {
@@ -190,7 +192,7 @@ export function interpretHookRun(
   const reason = stringField(json.reason);
   if (json.decision === "block") {
     record.decisionBlock = true;
-    record.reason = reason ?? "钩子拦下（decision: block，未给 reason）";
+    record.reason = reason ?? "Blocked by a hook (decision: block, no reason given)";
     record.conclusion = event === "PreToolUse" ? "deny" : "block";
   }
   const specific =
@@ -211,7 +213,7 @@ export function interpretHookRun(
           record.decisionBlock = true;
           record.reason =
             stringField(specific.permissionDecisionReason) ??
-            "钩子拒绝（permissionDecision: deny）";
+            "Denied by a hook (permissionDecision: deny)";
           record.conclusion = "deny";
         } else if (decision === "ask") {
           record.permissionDecision = "ask";
@@ -374,7 +376,7 @@ export class SessionHooks {
     const allowed = report.runs.some((record) => record.conclusion === "allow");
     const blockedRun = report.runs.find((record) => record.decisionBlock === true);
     if (denied || blockedRun !== undefined) {
-      report.blocked = { reason: mergeReason(report.runs) ?? "钩子拦下" };
+      report.blocked = { reason: mergeReason(report.runs) ?? "Blocked by a hook" };
     } else if (asked) {
       const why = mergeReason(report.runs);
       report.ask = why !== undefined ? { reason: why } : {};

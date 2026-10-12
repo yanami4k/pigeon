@@ -22,11 +22,13 @@ test("环境一节列出开工快照没带进来的文件与大小；没有即�
     startSkipped: [{ path: "data/big.bin", bytes: 12 * 1024 * 1024 }],
   });
   assert.ok(
-    environmentText({ ...base, facts }).includes("data/big.bin（12.0 MiB）"),
+    environmentText({ ...base, facts }).includes("Files not brought in: data/big.bin (12.0 MiB)"),
     environmentText({ ...base, facts })
   );
   assert.ok(
-    !environmentText({ ...base, facts: sandboxStatusFacts({ network: "on" }) }).includes("没带进来")
+    !environmentText({ ...base, facts: sandboxStatusFacts({ network: "on" }) }).includes(
+      "Files not brought in"
+    )
   );
 });
 
@@ -37,12 +39,15 @@ test("git 没有成功时按情形写原因：不是仓库、没装 git、超时
         stderr: "fatal: not a git repository (or any of the parent directories): .git\n",
       })
     ),
-    "不是 git 仓库。"
+    "Not a git repository."
   );
-  assert.match(gitText(gitFailure({ missing: true, stderr: "" })), /^取不到 git 状态：没有装 git/);
+  assert.match(
+    gitText(gitFailure({ missing: true, stderr: "" })),
+    /^Git status unavailable: git is not installed/
+  );
   assert.match(
     gitText(gitFailure({ timedOut: true, stderr: "" })),
-    /^取不到 git 状态：git status 超过 \d+ 秒没有结束/
+    /^Git status unavailable: git status did not finish within \d+ seconds/
   );
   assert.match(
     gitText(
@@ -51,15 +56,15 @@ test("git 没有成功时按情形写原因：不是仓库、没装 git、超时
           "fatal: detected dubious ownership in repository at '/w'\nTo add an exception ...\n",
       })
     ),
-    /^取不到 git 状态：仓库属主与当前用户不同，git 拒绝读取（dubious ownership/
+    /^Git status unavailable: the repository is owned by a different user, so git refuses to read it \(dubious ownership/
   );
   assert.equal(
     gitText(gitFailure({ stderr: "\nfatal: index file corrupt\nmore\n" })),
-    "取不到 git 状态：git 报错：fatal: index file corrupt"
+    "Git status unavailable: git error: fatal: index file corrupt"
   );
   assert.equal(
     gitText(gitFailure({ stderr: "" })),
-    "取不到 git 状态：git status 没有成功，也没有报错输出"
+    "Git status unavailable: git status failed without any error output"
   );
 });
 
@@ -70,7 +75,7 @@ test("本机：不是仓库的目录写不是 git 仓库；git status 带 --no-o
     const state = await localStatusProbe(dir).gitState();
     assert.notEqual(state.kind, "unavailable", JSON.stringify(state));
     if (state.kind === "none") {
-      assert.equal(gitText(state), "不是 git 仓库。");
+      assert.equal(gitText(state), "Not a git repository.");
     }
   } finally {
     rmSync(dir, { recursive: true, force: true });

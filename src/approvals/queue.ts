@@ -20,7 +20,7 @@ export function createApprovalQueue(): ApprovalQueue {
         request.signal?.aborted === true
           ? {
               approved: false,
-              reason: "请求已撤回（等待审批超时）",
+              reason: "The request was withdrawn (waiting for approval timed out)",
               reasonSource: "system-default" as const,
             }
           : handler(request)

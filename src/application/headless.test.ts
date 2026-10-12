@@ -229,8 +229,8 @@ test("headless：显式 skillRoots 只用给定的根、agentsMd 关掉——空
     assert.deepEqual(noneStarted?.memory, []);
     // agentsMd 关掉：开工状态块（决策 363：人写的说明在它的「项目说明」一节）照常发出，但没有说明一节，两层内容都不在
     const noneStatus = statusTextOf(noneModel.calls[0]);
-    assert.match(noneStatus, /name="环境"/);
-    assert.doesNotMatch(noneStatus, /name="项目说明"/);
+    assert.match(noneStatus, /name="Environment"/);
+    assert.doesNotMatch(noneStatus, /name="Project instructions"/);
     assert.ok(!noneStatus.includes("用户说明"));
     assert.equal(noneStarted?.advertisedTools.includes("load_skill"), false);
 

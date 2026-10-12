@@ -172,7 +172,7 @@ test("收尾总时限按每次运行各自计：到了停掉余下的、本次�
     await settleBackgroundJobs({ jobs: c.jobs, target, stopped: () => false, closeoutMs: 300 });
     assert.equal(c.jobs.get("j1").killedBy, "closeout");
     assert.equal(target.runs(), 2);
-    await assert.rejects(c.start("cmd-again"), /总时限/);
+    await assert.rejects(c.start("cmd-again"), /time limit for the unattended wrap-up/);
     c.jobs.beginRun();
     await c.start("cmd-next");
     await settleBackgroundJobs({ jobs: c.jobs, target, stopped: () => false, closeoutMs: 300 });

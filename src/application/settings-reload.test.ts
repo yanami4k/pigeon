@@ -308,7 +308,7 @@ test("/reload 后系统提示逐字节不变；中途改的 AGENTS.md、两层�
     assert.match(first, /alpha：开局的技能/);
     assert.match(first, /开局学到的一条/);
     assert.match(first, /用户级开局的一条/);
-    assert.doesNotMatch(first, /name="外部工具"/);
+    assert.doesNotMatch(first, /name="External tools"/);
     const promptBefore = streamFn.calls[0]?.context.systemPrompt;
     writeFileSync(join(root, "AGENTS.md"), "中途改过的约定\n");
     writeFileSync(projectMemoryPathOf(root), "- [P1] 中途学到的一条\n");
@@ -326,13 +326,14 @@ test("/reload 后系统提示逐字节不变；中途改的 AGENTS.md、两层�
     const call = streamFn.calls.at(-1);
     assert.equal(call?.context.systemPrompt, promptBefore, "系统提示逐字节不变");
     const update = statusTextOf(call).split("<pigeon-status-update>").at(-1) ?? "";
-    assert.match(update, /以下整段取代此前的「项目说明」：[\s\S]*中途改过的约定/);
-    assert.match(update, /以下整段取代此前的「Skill 目录」：[\s\S]*beta：中途的技能/);
+    const lead = (name: string) => `This replaces the earlier "${name}" section in full:`;
+    assert.match(update, new RegExp(`${lead("Project instructions")}[\\s\\S]*中途改过的约定`));
+    assert.match(update, new RegExp(`${lead("Skill catalog")}[\\s\\S]*中途的技能`));
     assert.match(
       update,
-      /以下整段取代此前的「记忆」：[\s\S]*中途学到的一条[\s\S]*用户级中途的一条/
+      new RegExp(`${lead("Memory")}[\\s\\S]*中途学到的一条[\\s\\S]*用户级中途的一条`)
     );
-    assert.match(update, /以下整段取代此前的「外部工具」：/);
+    assert.ok(update.includes(lead("External tools")), update);
     assert.equal(
       statusTextOf(call).split("<pigeon-status>").length - 1,
       1,

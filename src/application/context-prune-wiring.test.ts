@@ -194,6 +194,6 @@ test("新裁出错时只应用已有的裁剪：之前的占位不撤，那次�
     });
     assert.equal(result.status, "completed");
     const prefix = (call: number) => JSON.stringify(fake.calls[call]?.context.messages.slice(0, 4));
-    assert.match(prefix(2), /\[已裁剪\]/);
+    assert.match(prefix(2), /\[Pruned\]/);
     assert.equal(prefix(3), prefix(2));
   }));

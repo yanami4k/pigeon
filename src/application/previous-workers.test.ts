@@ -244,10 +244,16 @@ test("续接：之前的运行收尾未取用的 worker 照常可取，中断的
     const halfId = statuses.find((worker) => worker.name === "half")?.sessionId as SessionId;
     await assert.rejects(
       second.orchestrator.cancel(halfId),
-      /是之前的运行派出的，随上次进程退出而中断/
+      /was spawned by an earlier run and was interrupted when that process exited/
     );
-    assert.throws(() => second.orchestrator.send(w1 as SessionId, "x"), /收不到消息/);
-    assert.throws(() => second.orchestrator.resume(w1 as SessionId), /续接后不能对它补批续做/);
+    assert.throws(
+      () => second.orchestrator.send(w1 as SessionId, "x"),
+      /it cannot receive messages/
+    );
+    assert.throws(
+      () => second.orchestrator.resume(w1 as SessionId),
+      /after resuming it cannot be approved and continued/
+    );
     // 补递的通知：带会话号，进下一次运行
     assert.equal(second.opened.bundle.adapter.pendingNotices(), 1);
     const delivered = await second.opened.bundle.adapter.runNotices();

@@ -25,23 +25,24 @@ test("时间预算：同一档内不追加，跌破档位追加，别的节变�
   const step = (elapsed: number): string | undefined => {
     now = budget.startedAt + elapsed;
     const extra = budgetStatus(budget, { runCommand: true });
-    const state = new Map<StatusSectionName, string>([["git 状态", git], ...extra.sections]);
+    const state = new Map<StatusSectionName, string>([["Git status", git], ...extra.sections]);
     const text = tracker.next(state, false, extra.keys);
     tracker.delivered();
     if (text !== undefined) sent.push(text);
     return text;
   };
-  assert.match(step(0) ?? "", /墙钟预算共 10 分钟/);
+  assert.match(step(0) ?? "", /wall-clock budget of 10 minutes/);
   assert.equal(step(1 * MINUTE), undefined, "同一档内分钟数变了不追加");
   const crossed = step(2.5 * MINUTE);
-  assert.deepEqual(sections(crossed), ["时间预算"]);
-  assert.match(crossed ?? "", /剩余约 7 分钟/);
+  // 决策 428：节名给模型看的是英文名
+  assert.deepEqual(sections(crossed), ["Time budget"]);
+  assert.match(crossed ?? "", /about 7 minutes is left/);
   git = "工作区有未提交的改动";
   const riding = step(3 * MINUTE);
-  assert.deepEqual(sections(riding), ["git 状态", "时间预算"]);
-  assert.match(riding ?? "", /已用约 3 分钟/);
+  assert.deepEqual(sections(riding), ["Git status", "Time budget"]);
+  assert.match(riding ?? "", /about 3 minutes has been used/);
   assert.equal(step(7.9 * MINUTE)?.includes(BUDGET_REMINDER_TEXT), false);
-  assert.deepEqual(sections(step(8.5 * MINUTE)), ["时间预算", "时间提醒"]);
+  assert.deepEqual(sections(step(8.5 * MINUTE)), ["Time budget", "Time reminder"]);
   assert.equal(step(9 * MINUTE), undefined);
   assert.equal(sent.filter((text) => text.includes(BUDGET_REMINDER_TEXT)).length, 1);
 });
@@ -79,10 +80,13 @@ test("pigeon run：设了墙钟预算时开工状态带时间预算、run_comman
       assert.equal(evidence?.exitCode, 0, "命令照常执行、结果带执行证据");
       const shortened = evidence?.timeoutShortened;
       if (wallClockMs !== undefined) {
-        assert.match(statusTextOf(first), /<pigeon-section name="时间预算">\n[^\n]*共 10 分钟/);
+        assert.match(
+          statusTextOf(first),
+          /<pigeon-section name="Time budget">\n[^\n]*wall-clock budget of 10 minutes/
+        );
         assert.ok(shortened !== undefined && shortened.appliedSeconds <= 570, String(shortened));
       } else {
-        assert.doesNotMatch(statusTextOf(first), /时间预算/);
+        assert.doesNotMatch(statusTextOf(first), /Time budget/);
         assert.equal(shortened, undefined);
       }
     }

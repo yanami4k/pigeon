@@ -104,7 +104,7 @@ test("状态块随第一条输入单独发出；改了文件后 git 状态以追
     const [first, second] = streamFn.calls;
     assert.deepEqual(userTexts(first).slice(1), ["把 a.txt 改成 new"]);
     assert.match(userTexts(first)[0] ?? "", /^<pigeon-status>\n/);
-    assert.match(statusTextOf(first), /工作区没有未提交的改动/);
+    assert.match(statusTextOf(first), /the workspace has no uncommitted changes/);
     // 第二次请求以第一次的消息为前缀，其后是助手消息、工具结果、状态追加
     const prefix = wire(first).slice(0, -1);
     assert.ok(wire(second).startsWith(prefix), "之前的消息一字不改");
@@ -114,10 +114,10 @@ test("状态块随第一条输入单独发出；改了文件后 git 状态以追
       ["assistant", "toolResult", "user"]
     );
     const update = userTexts(second).at(-1) ?? "";
-    assert.deepEqual(sections(update), ["git 状态"]);
+    assert.deepEqual(sections(update), ["Git status"]);
     assert.match(
       update,
-      /以下整段取代此前的「git 状态」：\n分支 main，当前提交 [0-9a-f]+；工作区有未提交的改动/
+      /This replaces the earlier "Git status" section in full:\nBranch main, commit [0-9a-f]+; the workspace has uncommitted changes/
     );
     assert.ok(!update.includes("a.txt"), "具体改了哪些文件不进看板");
   } finally {
@@ -162,7 +162,7 @@ test("续跑：系统提示与对话前缀逐字节不变，只追加变了的�
     const sent = (call?.context.messages ?? []).slice(0, transcript.length);
     assert.equal(shape(sent), expected);
     const appended = userTexts(call).slice(-2);
-    assert.deepEqual(sections(appended[0] ?? ""), ["项目说明"]);
+    assert.deepEqual(sections(appended[0] ?? ""), ["Project instructions"]);
     assert.match(appended[0] ?? "", /^<pigeon-status-update>\n[\s\S]*约定二/);
     assert.equal(appended[1], "继续");
 
@@ -212,7 +212,7 @@ test("压缩之后重发完整块，注明取代此前的全部开工状态", as
     assert.ok(main.length >= 2 && last !== undefined);
     assert.match(
       statusTextOf(last),
-      /<pigeon-status>\n以下整段取代此前的全部开工状态。\n[\s\S]*约定一/
+      /<pigeon-status>\nThe following replaces all earlier startup status in full\.\n[\s\S]*约定一/
     );
   } finally {
     r.cleanup();
@@ -338,11 +338,18 @@ test("读会话的地方按标记跳过状态块：会话列表的第一句、�
     assert.equal(input?.raw.pigeonStatus, undefined);
     const search = extractSessionSearch(view, 0);
     assert.ok(search.conversation.some((doc) => doc.text === human));
-    assert.ok(!search.conversation.some((doc) => doc.text.includes("开工状态（Pigeon 自动附上）")));
+    assert.ok(
+      !search.conversation.some((doc) =>
+        doc.text.includes("Startup status (attached automatically by Pigeon)")
+      )
+    );
     const store = loadStoreSession(sessionsDirOf(r.root), sessionId)?.view;
     assert.ok(store !== undefined);
     assert.equal(resolveForkPoint(store, {}).runSeq, 2, "缺省分叉点落在人输入的那条上");
-    assert.match(messageLines(status as never)[0]?.text ?? "", /^\[开工状态\] 项目说明、/);
+    assert.match(
+      messageLines(status as never)[0]?.text ?? "",
+      /^\[开工状态] Project instructions、/
+    );
     assert.equal(messageLines(input as never)[0]?.text, `> ${human}`);
     // 交给模型的请求里没有标记
     assert.ok(!JSON.stringify(streamFn.calls[0]?.context.messages).includes("pigeonStatus"));
@@ -382,7 +389,7 @@ test("旧会话续跑：沿用会话记录里的系统提示（其中带人写�
     assert.equal(call?.context.systemPrompt, old, "不重新生成系统提示");
     const texts = userTexts(call);
     assert.equal(texts[0], "旧任务");
-    assert.match(texts.at(-2) ?? "", /^<pigeon-status>\n开工状态/);
+    assert.match(texts.at(-2) ?? "", /^<pigeon-status>\nStartup status/);
     // 旧系统提示里没有权威层级说明、还带"开局冻结"的旧说法：完整块开头另加一句以本状态块为准
     assert.ok((texts.at(-2) ?? "").split("\n")[2] === LEGACY_PROMPT_NOTE);
     assert.equal(texts.at(-1), "继续");
@@ -430,7 +437,7 @@ test("/reload 与续跑接着最后发出的一份：不重发完整块；模型
   try {
     let bundle = (await open()).bundle;
     await bundle.adapter.run("记一下");
-    assert.match(statusTextOf(fake.calls[0]), /<pigeon-section name="记忆">/);
+    assert.match(statusTextOf(fake.calls[0]), /<pigeon-section name="Memory">/);
     assert.doesNotMatch(statusTextOf(fake.calls[1]), /「记忆」/, "本运行面内不回显");
     // /reload：照终端界面的做法，先落盘，同一会话上带着旧运行面重开，再释放旧的
     await bundle.sessionStore.flush();
@@ -506,7 +513,7 @@ test("没有工具结果、因通知接着跑的一轮触发的压缩：下一�
     const texts = userTexts(main[1]);
     assert.match(
       texts.at(-2) ?? "",
-      /^<pigeon-status>\n以下整段取代此前的全部开工状态。\n[\s\S]*约定一/
+      /^<pigeon-status>\nThe following replaces all earlier startup status in full\.\n[\s\S]*约定一/
     );
     assert.match(texts.at(-1) ?? "", /有一条通知/);
   } finally {

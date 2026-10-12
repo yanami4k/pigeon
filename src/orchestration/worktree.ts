@@ -30,7 +30,7 @@ export interface WorktreeEntry {
 export function assertWorkerName(name: string): void {
   if (!WORKER_NAME.test(name)) {
     throw new WorktreeError(
-      `worker 名不合法：${JSON.stringify(name)}（小写字母数字开头，只含小写字母数字与连字符，最长 40）`
+      `Invalid worker name: ${JSON.stringify(name)} (it must start with a lowercase letter or digit, contain only lowercase letters, digits, and hyphens, and be at most 40 characters)`
     );
   }
 }

@@ -405,11 +405,14 @@ export interface MemoryWriteConfig {
   now?: () => Date;
 }
 
+// 钩子要求停止本轮处理而没给理由时的说法（给模型看，决策 428）
+const HOOK_STOP_REASON = "A hook asked to stop processing this turn";
+
 // 写操作的审批说法（170 ④），按本会话的审批状态取；决策 363 起在开工状态块的「审批」一节
 const WRITE_APPROVAL_SENTENCES: Readonly<Record<RunCommandApproval, string>> = {
-  yolo: "写操作自动批准。",
-  prompt: "写操作可能需要人工批准。",
-  none: "需要批准的写操作会被拒绝（本会话没有人工审批通道）。",
+  yolo: "Writes are approved automatically.",
+  prompt: "Writes may need human approval.",
+  none: "Writes that need approval are refused (this session has no human approval channel).",
 };
 
 // 在 Run 窗口外触发、记录挂刚结束的 Run 的收尾类钩子事件（自动压缩的 PostCompact 另按触发位置判）
@@ -432,12 +435,12 @@ function registrySubset(source: ToolRegistry, names: readonly string[]): ToolReg
 
 // 决策 359：没注册 web_search（缺搜索 key）时只说 web_fetch（决策 363 起同在「联网」一节）
 export const WEB_FETCH_SENTENCE =
-  "需要读取某个网页时，用 web_fetch 读取并说明要从中找什么；web_fetch 只交回按问题提炼的结果，不交回网页原文。";
+  "To read a web page, use web_fetch and say what to look for in it; web_fetch returns only the result distilled for that question, not the page itself.";
 
 // 联网工具的说法（决策 287、289）：只在注册了两件工具时给；决策 363 起在开工状态块的「联网」一节
 export const WEB_TOOLS_SENTENCE =
-  "需要网上的资料时，用 web_search 搜索（返回标题、链接与摘要），用 web_fetch 读取某个网页并说明要从中找什么；" +
-  "web_fetch 只交回按问题提炼的结果，不交回网页原文。";
+  "To find information online, use web_search (it returns titles, links, and snippets), and use web_fetch to read a web page, saying what to look for in it; " +
+  "web_fetch returns only the result distilled for that question, not the page itself.";
 
 // 本运行面开局定下的部分（决策 340、363）：系统提示，以及开局读到的人写说明（AGENTS.md）、推送的记忆、本地 Skill 扫描结果
 // 与按环境注册工具的检查结果。/reload 重建运行面时沿用，不重读文件；开工状态块里的说明、记忆与 Skill 目录照常每个 Run 重读
@@ -988,8 +991,8 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
   ];
   // 决策 360：worker 只在给了某件外部工具时才说外部工具
   const mcpSection = mcpTools.some((bridged) => offered(bridged.name))
-    ? "## 外部工具\n以 mcp__<server>__ 开头的工具来自外部 MCP server，与内置工具同样受审批与留证；" +
-      "server 不可用时这些工具会报错，改用内置工具继续。"
+    ? "## External tools\nTools whose names start with mcp__<server>__ come from external MCP servers and go through the same approvals and records as built-in tools; " +
+      "when a server is unavailable these tools return errors, so continue with the built-in tools."
     : "";
   // 决策 363：系统提示 = 固定底座 + 任务指令 + 权威层级说明；续跑沿用会话记录里的、/reload 沿用旧运行面的，逐字节不变。
   // 人写的说明、推送的记忆、Skill 目录与外部工具的说明进开工状态块（见下方状态变化通道）。
@@ -1071,10 +1074,10 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
       : "";
     const memory = memorySection();
     return new Map<StatusSectionName, string>([
-      ["项目说明", agents],
-      ["Skill 目录", skills],
+      ["Project instructions", agents],
+      ["Skill catalog", skills],
       [
-        "环境",
+        "Environment",
         environmentText({
           root: deps.workspaceHost?.root ?? deps.workspaceRoot,
           platform: workspaceHost.platform,
@@ -1083,8 +1086,8 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
           ...(deps.statusFacts !== undefined ? { facts: deps.statusFacts } : {}),
         }),
       ],
-      ["记忆", memory],
-      ["git 状态", gitText(git)],
+      ["Memory", memory],
+      ["Git status", gitText(git)],
     ]);
   };
   let slowSections: Map<StatusSectionName, string> | undefined;
@@ -1094,10 +1097,10 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
     }
     const state = new Map<StatusSectionName, string>([
       ...slowSections,
-      ["外部工具", mcpSection],
-      ["审批", approvalSection],
-      ["联网", webSection],
-      ["日期", dateText(new Date())],
+      ["External tools", mcpSection],
+      ["Approvals", approvalSection],
+      ["Web access", webSection],
+      ["Date", dateText(new Date())],
     ]);
     for (const [name, text] of state) {
       if (text === "") {
@@ -1370,8 +1373,7 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
           return {
             decision: "deny",
             terminate: true,
-            reason:
-              report.blocked?.reason ?? report.continueFalse.stopReason ?? "钩子要求停止本轮处理",
+            reason: report.blocked?.reason ?? report.continueFalse.stopReason ?? HOOK_STOP_REASON,
           };
         }
         if (report.blocked !== undefined) {
@@ -1453,7 +1455,7 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
           ...(appended.length > 0 ? { contextText: appended.join("\n\n") } : {}),
           // continue:false（决策 324 复审）：整轮结束，理由显示给人
           ...(report.continueFalse !== undefined
-            ? { stopReason: report.continueFalse.stopReason ?? "钩子要求停止本轮处理" }
+            ? { stopReason: report.continueFalse.stopReason ?? HOOK_STOP_REASON }
             : {}),
         };
       },
@@ -1528,7 +1530,7 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
     // 模型自己写的记忆当即记成已发（连同会话记录），/reload 与续跑之后也不回显
     if (notice.toolName === UPDATE_MEMORY_TOOL && !notice.isError) {
       const memory = memorySection();
-      recordStatus(statusTracker.absorb("记忆", memory === "" ? undefined : memory));
+      recordStatus(statusTracker.absorb("Memory", memory === "" ? undefined : memory));
     }
   });
   const toolTiers = new Map(

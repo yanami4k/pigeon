@@ -16,20 +16,21 @@ export { STATUS_TAG, STATUS_UPDATE_TAG };
 
 const SECTION_TAG = "pigeon-section";
 
-// 各节的名字与先后（稳定在前、易变在后）
+// 各节的名字与先后（稳定在前、易变在后）。决策 428：节名即给模型看的英文名，也是会话记录里各节哈希的键；
+// 428 之前的会话记录用的是中文节名，读回时认不出、按没发过处理——续跑旧会话的第一次各节整段重发一次
 export const STATUS_SECTIONS = [
-  "项目说明",
-  "Skill 目录",
-  "外部工具",
-  "环境",
-  "审批",
-  "联网",
-  "记忆",
-  "git 状态",
-  "日期",
+  "Project instructions",
+  "Skill catalog",
+  "External tools",
+  "Environment",
+  "Approvals",
+  "Web access",
+  "Memory",
+  "Git status",
+  "Date",
   // 决策 418：设了墙钟预算才有（见 wall-clock-status.ts）
-  "时间预算",
-  "时间提醒",
+  "Time budget",
+  "Time reminder",
 ] as const;
 export type StatusSectionName = (typeof STATUS_SECTIONS)[number];
 
@@ -41,25 +42,27 @@ export type StatusHashes = ReadonlyMap<StatusSectionName, string>;
 // 别的节有变化要追加时随之带上当前正文
 export type StatusKeys = ReadonlyMap<StatusSectionName, string>;
 
-const FIRST_INTRO = `开工状态（Pigeon 自动附上）。之后有变化时以 <${STATUS_UPDATE_TAG}> 追加，整段取代此前的同名一节。`;
-const SUPERSEDE_INTRO = "以下整段取代此前的全部开工状态。";
+// 决策 428：给模型看的说法为英文
+const FIRST_INTRO = `Startup status (attached automatically by Pigeon). Later changes are appended in <${STATUS_UPDATE_TAG}>; each section there replaces the earlier section of the same name in full.`;
+const SUPERSEDE_INTRO = "The following replaces all earlier startup status in full.";
 // 旧会话（系统提示里还带人写的说明与"开局冻结"的旧说法）续跑时，完整块开头另加一句
 export const LEGACY_PROMPT_NOTE =
-  "以本状态块为准：此前系统提示里「会话开始时读取并冻结」「下个会话才生效」一类的说法已不适用。";
+  'This status block is authoritative: statements in the earlier system prompt such as "read and frozen at session start" or "takes effect in the next session" no longer apply.';
 
 // 某节没了时的正文
 const REMOVED_TEXTS: Readonly<Record<StatusSectionName, string>> = {
-  项目说明: "现在没有人写的说明。",
-  "Skill 目录": "现在没有登记的 Skill。",
-  外部工具: "现在没有外部工具。",
-  环境: "现在没有环境信息。",
-  审批: "现在没有审批说明。",
-  联网: "现在不能联网搜索与读取网页（web_search、web_fetch 不可用）。",
-  记忆: "现在没有推送的记忆。",
-  "git 状态": "现在没有 git 状态。",
-  日期: "现在没有日期信息。",
-  时间预算: "现在没有墙钟预算。",
-  时间提醒: "此前的时间提醒已不适用。",
+  "Project instructions": "There are no project instructions now.",
+  "Skill catalog": "There are no registered Skills now.",
+  "External tools": "There are no external tools now.",
+  Environment: "There is no environment information now.",
+  Approvals: "There is no approval information now.",
+  "Web access":
+    "Web search and web page reading are not available now (web_search and web_fetch cannot be used).",
+  Memory: "There is no pushed memory now.",
+  "Git status": "There is no git status now.",
+  Date: "There is no date information now.",
+  "Time budget": "There is no wall-clock budget now.",
+  "Time reminder": "Earlier time reminders no longer apply.",
 };
 
 // 系统提示里的权威层级说明（决策 363；决策 428 起为英文）
@@ -151,7 +154,8 @@ export function renderStatusBlock(
   ].join("\n");
 }
 
-const replaceLead = (name: StatusSectionName) => `以下整段取代此前的「${name}」：`;
+const replaceLead = (name: StatusSectionName) =>
+  `This replaces the earlier "${name}" section in full:`;
 
 // 变化追加：只含变了的节
 export function renderStatusUpdate(changes: ReadonlyArray<[StatusSectionName, string]>): string {

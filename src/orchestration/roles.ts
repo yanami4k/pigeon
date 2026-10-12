@@ -163,13 +163,14 @@ function presetTools(parent: ToolPolicyLike, role: ActiveWorkerRole): string[] {
 function checkedTools(parent: ToolPolicyLike, tools: readonly string[]): string[] {
   const unique = [...new Set(tools.map((tool) => tool.trim()))];
   if (unique.length === 0 || unique.includes("")) {
-    throw new WorkerPolicyError("工具清单不能为空，也不能有空的工具名");
+    // 决策 428：这些报错经 spawn_worker 交回模型，为英文
+    throw new WorkerPolicyError("The tool list must not be empty or contain empty tool names");
   }
   const delegable = delegableTools(parent);
   const outside = unique.filter((tool) => !delegable.includes(tool));
   if (outside.length > 0) {
     throw new WorkerPolicyError(
-      `这些工具不能交给 worker：${outside.join("、")}（可选：${delegable.join("、")}）`
+      `These tools cannot be given to a worker: ${outside.join(", ")} (available: ${delegable.join(", ")})`
     );
   }
   return unique;
@@ -188,16 +189,20 @@ function workerScopes(
   const scopes: ToolScope[] = [];
   for (const scope of given) {
     if (seen.has(scope.tool)) {
-      throw new WorkerPolicyError(`${scope.tool} 的作用范围给了不止一份`);
+      throw new WorkerPolicyError(`More than one scope was given for ${scope.tool}`);
     }
     seen.add(scope.tool);
     if (!allow.includes(scope.tool)) {
-      throw new WorkerPolicyError(`worker 没有 ${scope.tool}，不能给它作用范围`);
+      throw new WorkerPolicyError(
+        `The worker does not have ${scope.tool}, so it cannot be given a scope for it`
+      );
     }
     const normalized = normalizedScope(scope, root);
     const outer = inherited.find((candidate) => candidate.tool === scope.tool);
     if (outer !== undefined && !scopeWithin(normalized, outer)) {
-      throw new WorkerPolicyError(`${scope.tool} 的作用范围不能比派出方的宽`);
+      throw new WorkerPolicyError(
+        `The scope of ${scope.tool} cannot be wider than the spawner's scope`
+      );
     }
     scopes.push(normalized);
   }
@@ -214,26 +219,26 @@ function normalizedScope(scope: ToolScope, root: string | undefined): ToolScope 
   const kind = scopeKindOf(tool);
   if (kind === "commandPrefixes") {
     if (paths !== undefined || commandPrefixes === undefined || commandPrefixes.length === 0) {
-      throw new WorkerPolicyError(`${tool} 的作用范围只能给 commandPrefixes`);
+      throw new WorkerPolicyError(`The scope of ${tool} can only be given as commandPrefixes`);
     }
     const prefixes = [...new Set(commandPrefixes.map((prefix) => prefix.trim()))];
     const bad = prefixes.find((prefix) => commandPrefixWords(prefix) === undefined);
     if (bad !== undefined) {
       throw new WorkerPolicyError(
-        `命令前缀须是一条不经 shell 的命令的开头（不含管道、重定向、串联、命令替换或换行）：${bad}`
+        `A command prefix must be the start of a single command that does not go through a shell (no pipes, redirection, chaining, command substitution, or newlines): ${bad}`
       );
     }
     return { tool, commandPrefixes: prefixes };
   }
   if (kind === "paths") {
     if (commandPrefixes !== undefined || paths === undefined || paths.length === 0) {
-      throw new WorkerPolicyError(`${tool} 的作用范围只能给 paths`);
+      throw new WorkerPolicyError(`The scope of ${tool} can only be given as paths`);
     }
     const normalized = paths.map((given) => ({ given, path: normalizeScopePath(given) }));
     const bad = normalized.find((entry) => entry.path === undefined);
     if (bad !== undefined) {
       throw new WorkerPolicyError(
-        `作用范围的路径须相对 worker 工作树的根，不能用 .. 或绝对路径：${bad.given}`
+        `Scope paths must be relative to the root of the worker's worktree, without .. or absolute paths: ${bad.given}`
       );
     }
     const unique = [...new Set(normalized.map((entry) => entry.path as string))];
@@ -245,7 +250,7 @@ function normalizedScope(scope: ToolScope, root: string | undefined): ToolScope 
     return { tool, paths: unique };
   }
   throw new WorkerPolicyError(
-    `${tool} 不能附加作用范围（可以附加的：${Object.keys(SCOPABLE_TOOLS).join("、")}）`
+    `${tool} cannot be given a scope (tools that can: ${Object.keys(SCOPABLE_TOOLS).join(", ")})`
   );
 }
 
@@ -256,14 +261,20 @@ export function assertPolicySubset(child: ScopedPolicy, parent: ScopedPolicy): v
     (tool) => !parent.allow.includes(tool) || parent.deny.includes(tool)
   );
   if (widened.length > 0) {
-    throw new WorkerPolicyError(`worker 策略超出父策略：${widened.join("、")}`);
+    throw new WorkerPolicyError(
+      `The worker policy goes beyond the parent policy: ${widened.join(", ")}`
+    );
   }
   const dropped = parent.deny.filter((tool) => !child.deny.includes(tool));
   if (dropped.length > 0) {
-    throw new WorkerPolicyError(`worker 策略丢了父策略的 deny：${dropped.join("、")}`);
+    throw new WorkerPolicyError(
+      `The worker policy drops the parent policy's deny list: ${dropped.join(", ")}`
+    );
   }
   if (child.approvalMode === "yolo" && parent.approvalMode !== "yolo") {
-    throw new WorkerPolicyError("worker 审批模式不能高于父策略（父 prompt 不派 yolo 子）");
+    throw new WorkerPolicyError(
+      "The worker's approval mode cannot be looser than the parent's (a parent in prompt mode cannot spawn a yolo worker)"
+    );
   }
   const widenedScopes = (parent.scopes ?? []).filter((outer) => {
     if (!child.allow.includes(outer.tool)) return false;
@@ -272,7 +283,7 @@ export function assertPolicySubset(child: ScopedPolicy, parent: ScopedPolicy): v
   });
   if (widenedScopes.length > 0) {
     throw new WorkerPolicyError(
-      `worker 的作用范围超出父策略：${widenedScopes.map((scope) => scope.tool).join("、")}`
+      `The worker's scopes go beyond the parent policy: ${widenedScopes.map((scope) => scope.tool).join(", ")}`
     );
   }
 }

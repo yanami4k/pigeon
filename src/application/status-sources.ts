@@ -78,10 +78,13 @@ export function gitFailure(failure: {
   stderr: string;
 }): GitWorkspaceState {
   if (failure.missing === true) {
-    return { kind: "unavailable", reason: "没有装 git（找不到 git 程序）" };
+    return { kind: "unavailable", reason: "git is not installed (the git program was not found)" };
   }
   if (failure.timedOut === true) {
-    return { kind: "unavailable", reason: `git status 超过 ${GIT_TIMEOUT_MS / 1000} 秒没有结束` };
+    return {
+      kind: "unavailable",
+      reason: `git status did not finish within ${GIT_TIMEOUT_MS / 1000} seconds`,
+    };
   }
   if (/not a git repository/i.test(failure.stderr)) {
     return { kind: "none" };
@@ -90,7 +93,7 @@ export function gitFailure(failure: {
     return {
       kind: "unavailable",
       reason:
-        "仓库属主与当前用户不同，git 拒绝读取（dubious ownership；需把该目录加进 safe.directory）",
+        "the repository is owned by a different user, so git refuses to read it (dubious ownership; add the directory to safe.directory)",
     };
   }
   const line = failure.stderr
@@ -101,8 +104,8 @@ export function gitFailure(failure: {
     kind: "unavailable",
     reason:
       line !== undefined
-        ? `git 报错：${line.slice(0, 200)}`
-        : "git status 没有成功，也没有报错输出",
+        ? `git error: ${line.slice(0, 200)}`
+        : "git status failed without any error output",
   };
 }
 
@@ -166,7 +169,7 @@ export function hostStatusProbe(host: WorkspaceHost): WorkspaceStatusProbe {
       } catch (error) {
         return {
           kind: "unavailable",
-          reason: `执行端出错：${error instanceof Error ? error.message : String(error)}`,
+          reason: `the execution host failed: ${error instanceof Error ? error.message : String(error)}`,
         };
       }
     },
@@ -209,14 +212,14 @@ export function languageLine(entries: readonly string[]): string {
     return markers.length > 0 ? [{ language, markers }] : [];
   });
   if (found.length === 0) {
-    return "语言环境：没有认出（工作区根下没有常见的项目文件）";
+    return "Language: not detected (no common project files at the workspace root)";
   }
   const deps = [
     ...new Set(found.flatMap(({ language }) => language.deps.filter((dep) => present.has(dep)))),
   ];
   return (
-    `语言环境：${found.map(({ language, markers }) => `${language.name}（${markers.join("、")}）`).join("、")}；` +
-    `依赖目录：${deps.length > 0 ? deps.join("、") : "没有"}`
+    `Language: ${found.map(({ language, markers }) => `${language.name} (${markers.join(", ")})`).join(", ")}; ` +
+    `dependency directories: ${deps.length > 0 ? deps.join(", ") : "none"}`
   );
 }
 
@@ -245,14 +248,14 @@ export function environmentText(input: {
   const os = OS_NAMES[input.platform] ?? input.platform;
   const shell = input.platform === "win32" ? "cmd.exe" : "/bin/sh -c";
   return [
-    `工作目录：${input.root}`,
-    `操作系统：${os}${input.remote ? "（容器内）" : ""}；需要 shell 的命令经 ${shell} 执行`,
-    `沙箱：${input.facts?.sandbox ?? "不在沙箱里（命令直接在本机执行）"}`,
+    `Working directory: ${input.root}`,
+    `Operating system: ${os}${input.remote ? " (in a container)" : ""}; commands that need a shell run through ${shell}`,
+    `Sandbox: ${input.facts?.sandbox ?? "not in a sandbox (commands run directly on this machine)"}`,
     languageLine(input.entries),
-    ...(input.facts?.network !== undefined ? [`网络：${input.facts.network}`] : []),
+    ...(input.facts?.network !== undefined ? [`Network: ${input.facts.network}`] : []),
     ...(input.facts?.skipped !== undefined && input.facts.skipped.length > 0
       ? [
-          `没带进来的文件：${skippedFilesText(input.facts.skipped)}（未跟踪且过大，开工快照没有收；这里没有它们）`,
+          `Files not brought in: ${skippedFilesText(input.facts.skipped, true)} (untracked and too large, so the starting snapshot left them out; they are not here)`,
         ]
       : []),
   ].join("\n");
@@ -260,17 +263,18 @@ export function environmentText(input: {
 
 export function gitText(state: GitWorkspaceState): string {
   if (state.kind === "none") {
-    return "不是 git 仓库。";
+    return "Not a git repository.";
   }
   if (state.kind === "unavailable") {
-    return `取不到 git 状态：${state.reason}`;
+    return `Git status unavailable: ${state.reason}`;
   }
-  const where = state.branch !== undefined ? `分支 ${state.branch}` : "分离 HEAD（不在任何分支上）";
-  const commit = state.commit !== undefined ? `当前提交 ${state.commit}` : "还没有提交";
-  return `${where}，${commit}；工作区${state.dirty ? "有" : "没有"}未提交的改动`;
+  const where =
+    state.branch !== undefined ? `Branch ${state.branch}` : "Detached HEAD (not on any branch)";
+  const commit = state.commit !== undefined ? `commit ${state.commit}` : "no commits yet";
+  return `${where}, ${commit}; the workspace ${state.dirty ? "has" : "has no"} uncommitted changes`;
 }
 
 export function dateText(now: Date): string {
   const pad = (value: number) => String(value).padStart(2, "0");
-  return `今天是 ${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}（本地时间）`;
+  return `Today is ${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} (local time)`;
 }

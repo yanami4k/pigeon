@@ -180,7 +180,7 @@ class GovernedToolCalls implements ToolGovernance {
       return this.#blockWithBreaker(
         call.toolName,
         call.args,
-        `审批闸内部异常（fail-closed 阻断）：${error instanceof Error ? error.message : String(error)}`,
+        `The approval gate failed internally (blocked, fail-closed): ${error instanceof Error ? error.message : String(error)}`,
         "fingerprint"
       );
     }
@@ -253,7 +253,7 @@ class GovernedToolCalls implements ToolGovernance {
       }
     }
     if (hookDecision?.decision === "deny") {
-      const deniedReason = hookDecision.reason ?? "钩子拒绝";
+      const deniedReason = hookDecision.reason ?? "Denied by a hook";
       const proposed = proposeToolExecution({
         toolCallId,
         toolName,
@@ -475,7 +475,8 @@ class GovernedToolCalls implements ToolGovernance {
       runId: this.#host.activeRunId(),
     });
     if (!approval.approved) {
-      const reason = approval.reason ?? "人工拒绝";
+      // 决策 428：没写理由时的缺省说法给模型看，为英文（人写的理由原样交回）
+      const reason = approval.reason ?? "Rejected by the human reviewer";
       // 决策 066：理由来源——handler 明说的优先（TUI [r]、CLI 输入了理由标人写）；
       // 未明说时按有无理由推定，不带理由的拒绝落默认文案并标系统默认（TUI [n]、CLI 留空）
       const reasonSource =

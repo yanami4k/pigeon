@@ -69,10 +69,10 @@ function noticeSection(job: BackgroundJob): string {
   const changes = jobChangesText(job);
   const tail = outputTail(job, NOTICE_TAIL_BYTES);
   return [
-    `作业 ${job.id} ${jobStateText(job)}：$ ${commandLabel(job.command)}`,
+    `Job ${job.id} ${jobStateText(job)}: $ ${commandLabel(job.command)}`,
     jobOutputText(job),
     ...(changes !== undefined ? [changes] : []),
-    ...(tail !== "" ? [`输出末尾：\n${tail}`] : []),
+    ...(tail !== "" ? [`Output tail:\n${tail}`] : []),
   ].join("\n");
 }
 
@@ -80,7 +80,7 @@ export function jobNoticeText(jobs: readonly BackgroundJob[]): string {
   const sections = jobs.map(noticeSection);
   return jobs.length === 1
     ? (sections[0] as string)
-    : [`${jobs.length} 个后台作业已结束：`, ...sections].join("\n\n");
+    : [`${jobs.length} background jobs finished:`, ...sections].join("\n\n");
 }
 
 export interface JobNoticesOptions {
@@ -156,13 +156,14 @@ export class JobNotices {
 export function stillRunningText(jobs: readonly BackgroundJob[], now = Date.now()): string {
   const list = jobs
     .map(
-      (job) => `${job.id}（${commandLabel(job.command)}，已跑 ${elapsedText(now - job.startedAt)}）`
+      (job) =>
+        `${job.id} (${commandLabel(job.command)}, running for ${elapsedText(now - job.startedAt)})`
     )
-    .join("、");
-  return `本次运行即将收尾，${jobs.length} 个后台作业仍在跑：${list}；需要它们的结果就用 job_output 等，不需要的用 job_kill 停掉`;
+    .join(", ");
+  return `This run is about to wrap up, and ${jobs.length} background job(s) are still running: ${list}; use job_output to wait for the ones whose results you need, and job_kill to stop the rest`;
 }
 
-export const CLOSEOUT_CLOSED_REASON = "无人值守收尾的总时限已到";
+export const CLOSEOUT_CLOSED_REASON = "the time limit for the unattended wrap-up has been reached";
 
 // 无人值守收尾：等在跑的作业、把通知交给模型跑一轮，直到没有在跑的作业或待递的通知；stopped 为真（墙钟、上限、外部中止）
 // 即不再等。总时限到了停掉余下的作业，此后拒绝新开。返回最后一次运行的结果（没跑即 undefined）。
@@ -238,8 +239,8 @@ export function previousJobsOf(
 
 export function lostJobsText(lost: PreviousJobs["lost"]): string {
   return (
-    `上一个进程启动的后台作业已随它结束而丢失（没有结束记录）：${lost.map((job) => `${job.jobId}（${commandLabel(job.command)}）`).join("、")}。` +
-    "残留的进程已按记录清理或会在下次启动时清理；需要的话重新启动"
+    `Background jobs started by the previous process were lost when it exited (they have no end record): ${lost.map((job) => `${job.jobId} (${commandLabel(job.command)})`).join(", ")}. ` +
+    "Leftover processes have been cleaned up from the records or will be at the next start; start them again if you need them"
   );
 }
 

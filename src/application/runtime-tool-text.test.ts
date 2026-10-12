@@ -66,7 +66,7 @@ test("容器执行端（linux）且自动批准：系统提示与 run_command �
       backgroundJobs: DEFAULT_MAX_BACKGROUND_JOBS,
     });
     assert.ok(systemPrompt.includes(texts.prompt), systemPrompt);
-    assert.ok(status.includes(`写操作自动批准。\n${texts.approval}`), status);
+    assert.ok(status.includes(`Writes are approved automatically.\n${texts.approval}`), status);
     assert.equal(runCommand, texts.tool);
     assert.doesNotMatch(systemPrompt + status, /人工批准|不经 shell/);
   } finally {
@@ -96,7 +96,9 @@ test("本地无人值守且未放权（没有审批通道）：系统提示写�
     });
     assert.ok(systemPrompt.includes(texts.prompt), systemPrompt);
     assert.ok(
-      status.includes(`需要批准的写操作会被拒绝（本会话没有人工审批通道）。\n${texts.approval}`),
+      status.includes(
+        `Writes that need approval are refused (this session has no human approval channel).\n${texts.approval}`
+      ),
       status
     );
     assert.equal(runCommand, texts.tool);
@@ -129,7 +131,7 @@ test("本地有人工审批通道：系统提示与 run_command 说明照实写�
       backgroundJobs: DEFAULT_MAX_BACKGROUND_JOBS,
     });
     assert.ok(systemPrompt.includes(texts.prompt), systemPrompt);
-    assert.ok(status.includes(`写操作可能需要人工批准。\n${texts.approval}`), status);
+    assert.ok(status.includes(`Writes may need human approval.\n${texts.approval}`), status);
     assert.equal(runCommand, texts.tool);
   } finally {
     await bundle.adapter.dispose();

@@ -112,7 +112,10 @@ function wrap(child: ChildProcess, kill: () => Promise<void>): ScriptProcess {
       try {
         emit(JSON.parse(line) as ScriptExecutorMessage);
       } catch {
-        emit({ t: "error", message: `执行器输出了读不懂的一行：${line.slice(0, 200)}` });
+        emit({
+          t: "error",
+          message: `The script runner printed a line that could not be parsed: ${line.slice(0, 200)}`,
+        });
       }
     }
   });

@@ -78,12 +78,17 @@ export function repoToplevel(repoRoot: string): string {
   try {
     top = git(repoRoot, ["rev-parse", "--show-toplevel"]).trim();
   } catch (error) {
-    throw new WorkdirSnapshotError(`不是 git 工作区，不能生成工作目录快照：${repoRoot}`, {
-      cause: error,
-    });
+    throw new WorkdirSnapshotError(
+      `Not a git workspace, so no working-directory snapshot can be taken: ${repoRoot}`,
+      {
+        cause: error,
+      }
+    );
   }
   if (top === "") {
-    throw new WorkdirSnapshotError(`不是 git 工作区，不能生成工作目录快照：${repoRoot}`);
+    throw new WorkdirSnapshotError(
+      `Not a git workspace, so no working-directory snapshot can be taken: ${repoRoot}`
+    );
   }
   return top;
 }
@@ -122,7 +127,7 @@ export function workdirTree(
       skipped = oversizedUntracked(top, limits, { drop: isProgramOwnedPath });
     } catch (error) {
       throw new WorkdirSnapshotError(
-        `列出未跟踪文件失败：${error instanceof Error ? error.message : String(error)}`
+        `Listing untracked files failed: ${error instanceof Error ? error.message : String(error)}`
       );
     }
     specFile = skipped.length > 0 ? addPathspecFile(skipped) : undefined;
@@ -159,7 +164,9 @@ export function snapshotWorkdir(input: {
     head = "";
   }
   if (head === "") {
-    throw new WorkdirSnapshotError("仓库还没有提交，不能生成工作目录快照：请先提交一次");
+    throw new WorkdirSnapshotError(
+      "The repository has no commits yet, so no working-directory snapshot can be taken: commit once first"
+    );
   }
   const { tree, skipped } = workdirTree(top, input.limits);
   const headTree = git(top, ["rev-parse", `${head}^{tree}`]).trim();

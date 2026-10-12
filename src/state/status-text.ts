@@ -24,7 +24,7 @@ export function withoutStatusMarker<T extends object>(message: T): T {
   return rest as T;
 }
 
-// 回看时的一行：哪几节（只对已按标记认出的状态消息用）
+// 回看时的一行：哪几节（只对已按标记认出的状态消息用）；节名照消息里的原样显示（决策 428 起为英文）
 export function statusSummary(text: string): string {
   const names = [...text.matchAll(/<pigeon-section name="([^"]+)">/g)].map((match) => match[1]);
   const kind = text.startsWith(`<${STATUS_UPDATE_TAG}>`) ? "开工状态更新" : "开工状态";

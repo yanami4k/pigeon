@@ -21,8 +21,9 @@ export interface WallClockBudget {
 export const BUDGET_TIERS = [0.8, 0.6, 0.4, 0.2] as const;
 export const BUDGET_REMINDER_FRACTION = 0.2;
 
+// 决策 428：给模型看的说法为英文
 export const BUDGET_REMINDER_TEXT =
-  "剩余时间已不到总预算的 20%：优先拿出可交付的结果（让已有的改动处于可用状态、把结论写清楚），不要再启动耗时长的任务。";
+  "Less than 20% of the total time budget is left: prioritize a deliverable result (leave your changes in a usable state and state your conclusions clearly), and do not start long-running tasks.";
 
 export function budgetRemainingMs(budget: WallClockBudget, now = budget.now()): number {
   return Math.max(0, budget.startedAt + budget.totalMs - now);
@@ -30,7 +31,7 @@ export function budgetRemainingMs(budget: WallClockBudget, now = budget.now()): 
 
 function spanText(ms: number): string {
   const seconds = Math.floor(ms / 1000);
-  return seconds < 120 ? `${seconds} 秒` : `${Math.floor(seconds / 60)} 分钟`;
+  return seconds < 120 ? `${seconds} seconds` : `${Math.floor(seconds / 60)} minutes`;
 }
 
 // 状态块里与预算有关的几节及其比对键（同一时刻取一次时钟）
@@ -43,20 +44,20 @@ export function budgetStatus(
   const elapsed = Math.min(budget.totalMs, Math.max(0, now - budget.startedAt));
   const tier = BUDGET_TIERS.filter((fraction) => remaining < budget.totalMs * fraction).length;
   const text = [
-    `本次运行的墙钟预算共 ${spanText(budget.totalMs)}，到点即中止。截至这条状态已用约 ${spanText(elapsed)}，剩余约 ${spanText(remaining)}。`,
-    "剩余时间每少总预算的五分之一、或别的状态有变化时，会追加这一节的最新值。",
+    `This run has a wall-clock budget of ${spanText(budget.totalMs)} and is stopped when it runs out. As of this status, about ${spanText(elapsed)} has been used and about ${spanText(remaining)} is left.`,
+    "The latest values of this section are appended each time the remaining time drops by another fifth of the total budget, or when other status changes.",
     ...(options.runCommand
       ? [
-          `run_command 的超时超过剩余时间时按剩余时间缩短（留出 ${COMMAND_BUDGET_MARGIN_MS / 1000} 秒收尾），结果里会注明。`,
+          `A run_command timeout longer than the remaining time is shortened to the remaining time (keeping ${COMMAND_BUDGET_MARGIN_MS / 1000} seconds for wrapping up), and the result says so.`,
         ]
       : []),
   ].join("\n");
   const reminder = remaining < budget.totalMs * BUDGET_REMINDER_FRACTION;
   return {
     sections: [
-      ["时间预算", text],
-      ...(reminder ? [["时间提醒", BUDGET_REMINDER_TEXT] as [StatusSectionName, string]] : []),
+      ["Time budget", text],
+      ...(reminder ? [["Time reminder", BUDGET_REMINDER_TEXT] as [StatusSectionName, string]] : []),
     ],
-    keys: new Map([["时间预算", `${budget.startedAt}+${budget.totalMs}#${tier}`]]),
+    keys: new Map([["Time budget", `${budget.startedAt}+${budget.totalMs}#${tier}`]]),
   };
 }

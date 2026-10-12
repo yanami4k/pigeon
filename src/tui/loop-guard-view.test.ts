@@ -123,12 +123,7 @@ test("终端界面：提醒显示成系统消息；第 20 轮叫停并在消息�
     // 提醒进模型下一轮，同时显示在消息区：是系统消息，不带人输入的回显前缀
     assert.equal(runtime.notes.length, 1);
     const screen = screenFlat(term);
-    assert.ok(
-      screen.includes(
-        "[Loop reminder] 最近连续 5 轮，你的工具调用和得到的结果都与上一轮完全相同："
-      ),
-      screen
-    );
+    assert.ok(screen.includes("[Loop reminder] In the last 5 consecutive rounds"), screen);
     assert.ok(!screen.includes("> [Loop reminder]"), screen);
     assert.ok(screen.includes("> 修测试"), screen);
     runtime.rounds(15);

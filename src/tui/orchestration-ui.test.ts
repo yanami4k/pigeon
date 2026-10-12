@@ -432,7 +432,7 @@ test("补批续做：请示等满时限交回后，面板标 blocked 且不淡�
     await settle();
     assert.match(
       panelRow(term, "ship") ?? "",
-      /ship\s+blocked\s+.*needs approval: 跑命令 npm test$/
+      /ship\s+blocked\s+.*needs approval: run the command npm test$/
     );
     clock.now += 5_000;
     await settle(120);
@@ -462,9 +462,12 @@ test("补批续做：请示等满时限交回后，面板标 blocked 且不淡�
     assert.equal(second.request.resume, true);
     // 补批的话（带等审批的那个调用）在前：说明已批准、点出那个调用、要它重新发起；人另附的话另起一行在后
     const resumed = second.inputs[0] ?? "";
-    assert.match(resumed, /^人已批准你之前等待审批的调用（跑命令 npm test）。/);
-    assert.ok(resumed.includes("请重新发起这个调用"), resumed);
-    assert.ok(resumed.endsWith("。\n顺便跑 lint"), resumed);
+    assert.match(
+      resumed,
+      /^A human approved the call you were waiting on \(run the command npm test\)\./
+    );
+    assert.ok(resumed.includes("Make that call again"), resumed);
+    assert.ok(resumed.endsWith(".\n顺便跑 lint"), resumed);
     // 重新发起的同一个调用直接放行，不再问人
     const decision = await second.ask("npm test");
     assert.equal(decision.approved, true);
@@ -473,7 +476,10 @@ test("补批续做：请示等满时限交回后，面板标 blocked 且不淡�
     await until(() => h.orchestrator.status()[0]?.state === "completed", "续做完成");
     await settle();
     const flat = screenFlat(term);
-    assert.ok(flat.includes("已补批 worker ship 的调用（跑命令 npm test），它接着做"), flat);
+    assert.ok(
+      flat.includes("已补批 worker ship 的调用（run the command npm test），它接着做"),
+      flat
+    );
     assert.ok(flat.includes("== 已补批，worker 接着做 =="), flat);
     assert.ok(flat.includes("== worker ship（tester）收尾：完成"), flat);
     // 已收尾：/approve 说明不需要

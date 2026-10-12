@@ -295,7 +295,7 @@ test("程序直接调用积木：不经模型工具即可派出、发消息、�
     all.settled.map((outcome) => outcome.status),
     ["cancelled", "completed"]
   );
-  assert.throws(() => orchestrator.send(a, "晚了"), /已收尾，收不到消息/);
+  assert.throws(() => orchestrator.send(a, "晚了"), /has finished, so it cannot receive messages/);
 });
 
 test("同时在跑缺省 8 个、不设总数上限：派 20 个，8 个在跑、12 个排队，逐个接上", async () => {
@@ -455,7 +455,7 @@ test("审批等满时限无人批：撤回请求，这个 worker 以可恢复错
   assert.equal(outcome.status, "failed");
   assert.equal(outcome.errorKind, "approval-timeout");
   assert.equal(outcome.recoverable, true);
-  assert.equal(outcome.blocked?.action, "跑命令 npm test");
+  assert.equal(outcome.blocked?.action, "run the command npm test");
   assert.equal(outcome.label, "T3");
   assert.equal(signals.length, 1);
   assert.equal(signals[0]?.aborted, true);
@@ -518,7 +518,7 @@ test("补批后能续做：同一个会话与工作树重新装运行面，放�
     ["failed", "completed"]
   );
   // 放行只一次：同一调用再请示照常走（无人值守即再搁下）
-  assert.throws(() => orchestrator.resume(newSessionId() as SessionId), /未知 worker/);
+  assert.throws(() => orchestrator.resume(newSessionId() as SessionId), /Unknown worker/);
 });
 
 test("自带超时的工具执行期间暂停卡住计时：命令超时配成大于卡住时限、命令跑满也不判卡住", async () => {

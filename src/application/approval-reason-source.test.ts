@@ -114,6 +114,6 @@ async function runRejected(options: {
 
 test("默认文案：handler 不带理由（TUI [n] / CLI 留空）时工具结果正文是默认文案", async () => {
   const recorded = await runRejected({ approval: { approved: false } });
-  assert.equal(recorded.text, "人工拒绝");
+  assert.equal(recorded.text, "Rejected by the human reviewer");
   assert.deepEqual(recorded.gate, { outcome: "rejected", approvedBy: "human" });
 });

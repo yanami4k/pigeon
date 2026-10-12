@@ -109,13 +109,19 @@ test("pigeon run：第 5 轮提醒、第 10 轮再提醒、第 20 轮叫停；�
     assert.equal(first.length, 1);
     assert.match(
       first[0] ?? "",
-      /^\[Loop reminder\] [^\n]*5 轮[^\n]*\n- read_file \{"path":"a\.ts"\}\n {4}结果：/
+      /^\[Loop reminder\] [^\n]*5 consecutive rounds[^\n]*\n- read_file \{"path":"a\.ts"\}\n {4}Result: /
     );
-    assert.match(first[0] ?? "", /重复同样的调用不会带来新信息。请换一个思路/);
+    assert.match(
+      first[0] ?? "",
+      /Repeating the same calls will not bring any new information\. Try a different approach/
+    );
     const second = reminders(userTexts(streamFn.calls[11]));
     assert.equal(second.length, 2);
-    assert.match(second[1] ?? "", /^\[Loop reminder\] 这是第二次提醒。最近连续 10 轮/);
-    assert.match(second[1] ?? "", /如果再重复 10 轮，本次运行将被叫停。/);
+    assert.match(
+      second[1] ?? "",
+      /^\[Loop reminder\] This is the second reminder\. In the last 10 consecutive rounds/
+    );
+    assert.match(second[1] ?? "", /If they repeat for 10 more rounds, this run will be stopped\./);
     // 会话记录里留作用户消息；Run 收尾的结束方式为打转
     const view = sessionOf(repo.root, result.sessionId);
     const stored = view.runs.flatMap((run) =>

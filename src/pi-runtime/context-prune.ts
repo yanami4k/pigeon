@@ -667,16 +667,17 @@ export function placeholderOf(
   output: SavedOutput | undefined
 ): string {
   const what = describeCall(candidate);
+  // 决策 428：占位给模型看，为英文
   const why =
     candidate.reason === "stale"
-      ? "之后又读过或整体覆写过"
+      ? "read again or overwritten later"
       : candidate.reason === "empty"
-        ? "没有结果"
+        ? "no results"
         : candidate.reason === "image"
-          ? "上下文里的图片超过预算"
-          : "较大的旧结果";
+          ? "images over budget"
+          : "large old result";
   if (candidate.reason === "rejected") return rejectedPlaceholder(candidate);
-  const head = `[已裁剪] 这里原是 ${candidate.toolName} 的结果（${what}；约 ${candidate.tokens} token；${why}），为节省上下文已移出。找回：${recoveryOf(candidate, output)}`;
+  const head = `[Pruned] ${candidate.toolName} result (${what}; ~${candidate.tokens} tokens; ${why}), removed to save context. To get it back: ${recoveryOf(candidate, output)}`;
   return `${head}${fileChangesOf(candidate)}`;
 }
 
@@ -686,8 +687,8 @@ function rejectedPlaceholder(candidate: Pick<Candidate, "toolName" | "result" | 
     block.type === "text" ? [block.text] : []
   );
   const note =
-    `[图片未被服务方接受：${describeCall(candidate)}。图片已移出上下文、换成这段文字；` +
-    "重新读取多半仍会被拒，可改用命令行工具查看]";
+    `[The provider did not accept this image: ${describeCall(candidate)}. The image was removed from the context and replaced by this text; ` +
+    "reading it again would most likely be rejected too, so use command-line tools to inspect it instead]";
   return [...texts, note].join("\n");
 }
 
@@ -698,27 +699,27 @@ function describeCall(candidate: Pick<Candidate, "toolName" | "result" | "args">
     case "read_file": {
       // 决策 414：图片与其他二进制按整个文件读，写明类型与尺寸
       if (details?.kind === "image" || details?.kind === "binary") {
-        const what = details.kind === "image" ? "图片" : "二进制文件";
+        const what = details.kind === "image" ? "image" : "binary file";
         const dims =
-          typeof details.width === "number" ? `，${details.width}×${String(details.height)}` : "";
+          typeof details.width === "number" ? `, ${details.width}×${String(details.height)}` : "";
         const type = details.mimeType ?? details.format;
-        return `读取${what} ${clip(String(args.path ?? ""))}（${type !== undefined ? String(type) : "类型未认出"}${dims}）`;
+        return `read ${what} ${clip(String(args.path ?? ""))} (${type !== undefined ? String(type) : "type not recognized"}${dims})`;
       }
       const window = readWindowOf(candidate.result);
-      const range = window !== undefined ? `，第 ${window.from}–${window.to} 行` : "";
-      return `读取 ${clip(String(args.path ?? ""))}${range}`;
+      const range = window !== undefined ? `, lines ${window.from}–${window.to}` : "";
+      return `read ${clip(String(args.path ?? ""))}${range}`;
     }
     case "run_command": {
-      const exit = details?.exitCode !== undefined ? `，退出码 ${String(details.exitCode)}` : "";
-      return `命令 ${clip(String(args.command ?? ""))}${exit}`;
+      const exit = details?.exitCode !== undefined ? `, exit code ${String(details.exitCode)}` : "";
+      return `command ${clip(String(args.command ?? ""))}${exit}`;
     }
     case "grep":
     case "glob":
-      return `搜索 ${clip(String(args.pattern ?? ""))}${args.path !== undefined ? ` 于 ${clip(String(args.path))}` : ""}`;
+      return `search ${clip(String(args.pattern ?? ""))}${args.path !== undefined ? ` in ${clip(String(args.path))}` : ""}`;
     case "web_search":
-      return `搜索 ${clip(String(args.query ?? ""))}`;
+      return `search ${clip(String(args.query ?? ""))}`;
     default:
-      return `参数 ${clip(JSON.stringify(args))}`;
+      return `arguments ${clip(JSON.stringify(args))}`;
   }
 }
 
@@ -728,15 +729,15 @@ function recoveryOf(
 ): string {
   const { toolName } = candidate;
   if (toolName === "read_file")
-    return "需要时用 read_file 重新读取（覆盖这个文件之前也须重新读取）。";
+    return "re-read it with read_file (also required before overwriting this file).";
   if (toolName === "run_command") {
-    if (output === undefined) return "这条命令没有输出。";
+    if (output === undefined) return "the command had no output.";
     const saved = output.partial
-      ? `已保存的是输出的前 ${output.bytes} 字节（全文超过落盘上限），存为 ${output.uri}`
-      : `完整输出存为 ${output.uri}`;
-    return `${saved}，可用 read_file 读取（若已被清理，需要重新运行）；${VIRTUAL_PATH_HINT}。`;
+      ? `the first ${output.bytes} bytes of the output (the full output exceeded the saving limit) are saved as ${output.uri}`
+      : `the full output is saved as ${output.uri}`;
+    return `${saved}; read it with read_file (if it has been cleaned up, run the command again); ${VIRTUAL_PATH_HINT}.`;
   }
-  return SEARCH_TOOLS.has(toolName) ? "需要时重新搜索。" : "需要时重新调用。";
+  return SEARCH_TOOLS.has(toolName) ? "search again." : "call it again.";
 }
 
 // 命令结果正文里的文件变化一段（有变化或说不准时原样保留，换掉的只是输出部分）

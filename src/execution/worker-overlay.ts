@@ -121,7 +121,7 @@ function workerChanges(input: OverlayInput): {
   const { tree: workerTree, skipped } = workdirTree(repoToplevel(input.worktreePath), input.limits);
   const base = git(top, ["rev-parse", "--verify", "-q", `${input.base}^{commit}`]);
   if (base === "") {
-    throw new OverlayError(`起点快照不存在：${input.base}`);
+    throw new OverlayError(`The starting snapshot does not exist: ${input.base}`);
   }
   // worker 相对起点的改动：状态与路径成对，NUL 分隔
   const parts = git(top, [
@@ -203,7 +203,7 @@ function applyChanges(
   for (const { status, path } of changes) {
     const target = resolve(top, path);
     if (!target.startsWith(topResolved + sep)) {
-      throw new OverlayError(`worker 改动的路径越出仓库：${path}`);
+      throw new OverlayError(`A path changed by the worker is outside the repository: ${path}`);
     }
     if (status === "D") {
       // ② worker 删除的不自动删
@@ -282,9 +282,9 @@ function applyChanges(
           "merge-file",
           "-p",
           "-L",
-          "工作目录",
+          "working directory",
           "-L",
-          "起点快照",
+          "starting snapshot",
           "-L",
           "worker",
           oursFile,
@@ -307,7 +307,7 @@ function applyChanges(
       }
       const stderr = (error as { stderr?: unknown }).stderr;
       throw new OverlayError(
-        `合并 ${path} 失败：${Buffer.isBuffer(stderr) ? stderr.toString("utf8").trim() : String(error)}`
+        `Merging ${path} failed: ${Buffer.isBuffer(stderr) ? stderr.toString("utf8").trim() : String(error)}`
       );
     }
     // 合并结果先入对象库再经过滤还原：写出来的行尾等与仓库配置一致
