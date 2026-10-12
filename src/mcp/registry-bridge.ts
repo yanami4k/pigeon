@@ -108,22 +108,28 @@ function mapContentBlock(block: unknown): ModelContent {
     return { type: "image", data: item.data, mimeType: item.mimeType };
   }
   if (item !== undefined && type === "audio") {
-    return { type: "text", text: `[音频内容 ${String(item.mimeType ?? "")}，未转交模型]` };
+    return {
+      type: "text",
+      text: `[Audio content ${String(item.mimeType ?? "")}, not passed to the model]`,
+    };
   }
   if (item !== undefined && type === "resource") {
     const resource = record(item.resource);
     if (typeof resource?.text === "string") {
       return { type: "text", text: resource.text };
     }
-    return { type: "text", text: `[资源 ${String(resource?.uri ?? "")}，二进制内容未转交模型]` };
+    return {
+      type: "text",
+      text: `[Resource ${String(resource?.uri ?? "")}, binary content not passed to the model]`,
+    };
   }
   if (item !== undefined && type === "resource_link") {
     return {
       type: "text",
-      text: `[资源链接 ${String(item.name ?? "")}：${String(item.uri ?? "")}]`,
+      text: `[Resource link ${String(item.name ?? "")}: ${String(item.uri ?? "")}]`,
     };
   }
-  return { type: "text", text: `[未识别的内容块 ${type}]` };
+  return { type: "text", text: `[Unrecognized content block ${type}]` };
 }
 
 // 决策 379：第一个文字块的开头加外部内容标记；块的个数、顺序与图片不动，没有文字块（纯图片）不加
@@ -151,7 +157,7 @@ function createBridgedTool(
       const args = params ?? {};
       const raw = record(await source.callTool(descriptor.name, args, signal));
       if (raw === undefined || !Array.isArray(raw.content)) {
-        throw new Error(`MCP 工具 ${server.name}/${descriptor.name} 返回形状不合法`);
+        throw new Error(`MCP tool ${server.name}/${descriptor.name} returned a malformed result`);
       }
       const content = raw.content.map(mapContentBlock);
       if (raw.isError === true) {
@@ -160,14 +166,14 @@ function createBridgedTool(
           .join("\n");
         // 决策 379：服务端给的说明同样是外部内容
         throw new McpToolError(
-          `MCP 工具 ${server.name}/${descriptor.name} 返回错误：${text === "" ? "（无说明）" : `\n${markExternal(text)}`}`
+          `MCP tool ${server.name}/${descriptor.name} returned an error: ${text === "" ? "(no details)" : `\n${markExternal(text)}`}`
         );
       }
       return {
         content:
           content.length > 0
             ? markFirstText(content)
-            : [{ type: "text", text: "（工具没有返回内容）" }],
+            : [{ type: "text", text: "(The tool returned no content.)" }],
         details: {
           server: server.name,
           tool: descriptor.name,
@@ -209,7 +215,7 @@ export function bridgeMcpServer(input: { server: McpServerConfig; source: McpToo
     const declaredHint = declaredHintOf(descriptor);
     const { effectiveTier, conflict } = effectiveMcpTier(resolution.tier, declaredHint);
     const summary = descriptor.description ?? descriptor.title ?? descriptor.annotations?.title;
-    const description = `${summary !== undefined && summary !== "" ? summary : "（无描述）"}（MCP server ${server.name} 的工具 ${descriptor.name}）`;
+    const description = `${summary !== undefined && summary !== "" ? summary : "(no description)"} (tool ${descriptor.name} from MCP server ${server.name})`;
     // 路径活动范围 Pigeon 看不见：只有实际为 read 档时沿用人在配置里的声明；其余登记为 none
     const pathConfinement: McpPathConfinement =
       effectiveTier === "read" && resolution.pathConfinement !== undefined
