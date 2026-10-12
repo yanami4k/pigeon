@@ -11,8 +11,8 @@ import { DEFAULT_EDIT_MODE, type EditMode } from "../tools/edit-mode.ts";
 import { replaceEditDescription } from "../tools/replace-edit.ts";
 import { runCommandTexts } from "../tools/run-command.ts";
 import { runHeadless } from "./headless-core.ts";
-import { PARALLEL_READS_SENTENCE, TRUNCATION_GUIDANCE } from "./runtime.ts";
 import { STATUS_AUTHORITY_SENTENCE } from "./status-block.ts";
+import { PARALLEL_READS_SENTENCE, TRUNCATION_GUIDANCE } from "./system-prompt.ts";
 
 // 文字里依次含有各段（只核对关键片段与先后，不逐字比对整段）
 function assertInOrder(text: string | undefined, segments: readonly string[]): void {
@@ -65,14 +65,14 @@ test("编辑模式显式 hashline：edit_file 与 read_file 的描述带锚点�
   // system prompt 按段依次核对：hashline 编辑句、并行读取的引导（决策 353）、其后追加的截断引导（决策 063）、
   // run_command 的说法（按执行端生成，170 ④）、末尾的权威层级说明（决策 363）
   assertInOrder(systemPrompt, [
-    "用 edit_file 按锚点编辑。",
+    "edit_file edits by anchor.",
     PARALLEL_READS_SENTENCE,
     TRUNCATION_GUIDANCE,
     runCommandTexts({ platform: process.platform, approval: "yolo" }).prompt,
     STATUS_AUTHORITY_SENTENCE,
   ]);
   // 决策 363：审批的说法在开工状态块，不在系统提示（本文件的运行一律 yolo）
-  assert.doesNotMatch(systemPrompt ?? "", /写操作自动批准|命令自动批准/);
+  assert.doesNotMatch(systemPrompt ?? "", /自动批准|approved automatically|auto-approved/i);
   // 决策 359：临时目录里没有历史会话，会话检索三件不注册，提示里也没有那一句
   assert.doesNotMatch(systemPrompt ?? "", /list_sessions/);
   assertInOrder(edit?.description, ["N#TAG", "snapshot", "快照过期"]);
@@ -102,5 +102,8 @@ test("编辑模式缺省为 replace：不传编辑模式时装配出 replace 版
   // 截断后拆小引导（决策 063）：replace 模式同样追加（hashline 模式由上一条核对）
   assert.ok(systemPrompt?.includes(TRUNCATION_GUIDANCE), `replace：${systemPrompt}`);
   // 引导的关键说法（常量本身在这里用字面片段钉住）
-  assert.match(TRUNCATION_GUIDANCE, /输出上限未执行[^。]*拆成几次较小的调用重发，不要原样重发/);
+  assert.match(
+    TRUNCATION_GUIDANCE,
+    /output limit[^.;]*split the change into several smaller calls instead of resending it unchanged/
+  );
 });

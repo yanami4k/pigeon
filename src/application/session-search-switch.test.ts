@@ -19,10 +19,10 @@ import { sessionsDirOf } from "../state/paths.ts";
 import { emptySettingsSnapshot } from "../state/settings.ts";
 import { runHeadless } from "./headless-core.ts";
 import { buildRuntime, disposeRuntime } from "./runtime.ts";
+import { SESSION_SEARCH_SENTENCE } from "./system-prompt.ts";
 
-const SEARCH_SENTENCE =
-  "需要以前会话里的信息时，可用 list_sessions 浏览本项目以前的会话，用 search_sessions 按关键词检索以前会话里的对话，" +
-  "再用 read_session_entry 按 entryId 读原文；检索片段只是线索，结论要回查原文。";
+// 系统提示的工具用法一节里那一条（决策 429：每条一行、以"- "开头）
+const SEARCH_LINE = `\n- ${SESSION_SEARCH_SENTENCE}`;
 
 async function assembled(sessionSearch: boolean | undefined) {
   const root = mkdtempSync(join(tmpdir(), "pigeon-search-switch-"));
@@ -65,12 +65,12 @@ test("会话检索开关：关掉时三件工具都不注册、系统提示去�
   assert.ok(searchTools.every((name) => on.tools.includes(name)));
   assert.deepEqual(byDefault.tools, on.tools);
   assert.equal(byDefault.systemPrompt, on.systemPrompt);
-  assert.ok(on.systemPrompt.includes(SEARCH_SENTENCE));
+  assert.ok(on.systemPrompt.includes(SEARCH_LINE));
   assert.deepEqual(
     off.tools,
     on.tools.filter((name) => !searchTools.includes(name))
   );
-  assert.equal(off.systemPrompt, on.systemPrompt.replace(SEARCH_SENTENCE, ""));
+  assert.equal(off.systemPrompt, on.systemPrompt.replace(SEARCH_LINE, ""));
   assert.doesNotMatch(off.systemPrompt, /search_sessions|read_session_entry|list_sessions/);
 });
 

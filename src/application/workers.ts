@@ -278,6 +278,8 @@ interface RuntimeSurface {
   statusFacts?: StatusFacts;
   // 决策 363：续做与分叉续跑沿用的系统提示与状态变化通道的起点（取自会话记录）
   systemPrompt?: string;
+  // 决策 430：生成上面这份系统提示时所用的模型（旧记录没有）；与本次不同即按新模型重建
+  systemPromptModel?: { provider: string; id: string };
   statusSent?: StatusHashes;
   // 决策 361：上下文裁剪的起点（取自会话记录）
   pruneSeed?: PruneSeed;
@@ -437,6 +439,9 @@ export function createWorkerRuntimeFactory(deps: WorkerRuntimeDeps): WorkerRunti
       // 决策 363：续做沿用会话记录里的系统提示，状态变化通道接着记录里最后发出的一份
       ...(restored !== undefined ? { initialMessages: restored.messages } : {}),
       ...(restored?.systemPrompt !== undefined ? { systemPrompt: restored.systemPrompt } : {}),
+      ...(restored?.systemPromptModel !== undefined
+        ? { systemPromptModel: restored.systemPromptModel }
+        : {}),
       ...(restored?.statusSent !== undefined ? { statusSent: restored.statusSent } : {}),
       ...(restored !== undefined ? { pruneSeed: restored.pruneSeed } : {}),
       ...(nestedSlot !== undefined ? { spawnWorker: nestedSlot } : {}),
@@ -571,6 +576,7 @@ export function createWorkerRuntimeFactory(deps: WorkerRuntimeDeps): WorkerRunti
 function restoreWorkerSession(request: WorkerRuntimeRequest): {
   messages: AgentMessage[];
   systemPrompt: string | undefined;
+  systemPromptModel: { provider: string; id: string } | undefined;
   statusSent: StatusHashes | undefined;
   pruneSeed: PruneSeed;
 } {
@@ -580,9 +586,14 @@ function restoreWorkerSession(request: WorkerRuntimeRequest): {
     throw new Error(`找不到 worker 会话 ${request.sessionId} 的会话文件，无法续做`);
   }
   const { messages, interrupted } = restoreSessionContext(loaded.main);
+  const start = loaded.view.runs.at(-1)?.start;
   return {
     messages: [...messages, ...interrupted],
-    systemPrompt: loaded.view.runs.at(-1)?.start.systemPrompt,
+    systemPrompt: start?.systemPrompt,
+    systemPromptModel:
+      start?.modelInfo !== undefined
+        ? { provider: start.modelInfo.provider, id: start.modelInfo.id }
+        : undefined,
     statusSent: statusFromEntries(loaded.main),
     pruneSeed: pruneSeedFromEntries(loaded.main),
   };
@@ -708,6 +719,9 @@ function openRuntimeSurface(surface: RuntimeSurface): WorkerRuntimeHandle {
     ...(surface.settings !== undefined ? { settings: surface.settings } : {}),
     ...(surface.statusFacts !== undefined ? { statusFacts: surface.statusFacts } : {}),
     ...(surface.systemPrompt !== undefined ? { systemPrompt: surface.systemPrompt } : {}),
+    ...(surface.systemPromptModel !== undefined
+      ? { systemPromptModel: surface.systemPromptModel }
+      : {}),
     ...(surface.statusSent !== undefined ? { statusSent: surface.statusSent } : {}),
     ...(surface.pruneSeed !== undefined ? { pruneSeed: surface.pruneSeed } : {}),
   };

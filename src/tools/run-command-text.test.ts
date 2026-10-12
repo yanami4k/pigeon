@@ -24,12 +24,13 @@ test("容器执行端（linux）且自动批准：需要 shell 的命令经 /bin
   );
   // 决策 363：系统提示里的一句只说经哪个 shell，不提审批；审批的说法在状态块一节与工具说明里
   assertIncludesAll(texts.prompt, ["/bin/sh -c"]);
-  assert.doesNotMatch(texts.prompt, /批准|放权/);
+  assert.doesNotMatch(texts.prompt, /批准|放权|approv/i);
   for (const text of [texts.approval, texts.tool]) {
     assertIncludesAll(text, ["/bin/sh -c", "命令自动批准"]);
   }
-  // 决策 413：多行命令经 /bin/sh -c
-  for (const text of [texts.prompt, texts.approval, texts.tool]) assertIncludesAll(text, ["多行"]);
+  // 决策 413：多行命令经 /bin/sh -c（决策 428：系统提示里的一句为英文）
+  assertIncludesAll(texts.prompt, ["multiple lines"]);
+  for (const text of [texts.approval, texts.tool]) assertIncludesAll(text, ["多行"]);
   // 三种情形共用的工具说明尾句（commands 短名、文件变化不含治理目录）只在这里核对一次
   assertIncludesAll(texts.tool, ["commands 一节", ".pigeon"]);
   for (const text of Object.values(texts)) {
@@ -44,7 +45,7 @@ test("本地 Windows 执行端且有人工审批：需要 shell 的命令经人�
     "在工作区根运行一条命令（普通命令直接执行，需要 shell 语义的经 cmd.exe 执行）"
   );
   assertIncludesAll(texts.prompt, ["cmd.exe"]);
-  assert.doesNotMatch(texts.prompt, /批准|放权/);
+  assert.doesNotMatch(texts.prompt, /批准|放权|approv|multiple lines/i);
   assertIncludesAll(texts.approval, ["人确认后经 cmd.exe", "每条命令都要人工批准"]);
   assertIncludesAll(texts.tool, ["人确认后经 cmd.exe", "每条命令都需要人工批准"]);
   // 决策 415：Windows 上写明不支持多行命令与改法

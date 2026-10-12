@@ -263,7 +263,7 @@ export type RunCommandApproval = "yolo" | "prompt" | "none";
 export interface RunCommandTexts {
   // 工具登记里的描述
   registry: string;
-  // 系统提示里介绍 run_command 的一句（决策 363：与审批无关，续跑与 /reload 后不变）
+  // 系统提示里介绍 run_command 的一句（决策 363：与审批无关，续跑与 /reload 后不变；决策 428 起为英文）
   prompt: string;
   // 开工状态块「审批」一节里命令的说法（随本会话的审批状态）
   approval: string;
@@ -315,6 +315,10 @@ export function runCommandTexts(input: {
   const shellContains = multiline
     ? "含管道、重定向、&& 串联或多行的命令"
     : "含管道、重定向或 && 串联的命令";
+  // 决策 428：系统提示为英文
+  const shellContainsEn = multiline
+    ? "commands with pipes, redirection, && chaining, or multiple lines"
+    : "commands with pipes, redirection, or && chaining";
   const toolShell = {
     yolo: `${shellKinds}等需要 shell 的命令经 ${shell} 运行。`,
     prompt: `${shellKinds}等需要 shell 的命令只在人确认后经 ${shell} 运行，尽量拆成单条命令。`,
@@ -337,7 +341,7 @@ export function runCommandTexts(input: {
   }[input.approval];
   return {
     registry: `在工作区根运行一条命令（普通命令直接执行，需要 shell 语义的经 ${shell} 执行）`,
-    prompt: `用 run_command 运行命令：普通命令直接执行，${shellContains}经 ${shell} 执行。`,
+    prompt: `run_command runs plain commands directly; ${shellContainsEn} run through ${shell}.`,
     approval: `run_command：${promptApproval}；${shellContains}${promptShell}。`,
     tool:
       `在工作区根运行一条命令。普通命令不经 shell 直接执行；${toolShell}${windowsMultiline}${toolApproval}` +

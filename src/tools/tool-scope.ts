@@ -219,18 +219,18 @@ export function scopeViolation(
   return undefined;
 }
 
-// worker 系统提示里交代作用范围的一句；没有范围给空串
+// worker 系统提示里交代作用范围的一句（决策 428 起为英文）；没有范围给空串
 export function scopePromptSentence(scopes: readonly ToolScope[]): string {
   const parts = scopes.flatMap((scope) =>
     scope.paths !== undefined
-      ? [`${scope.tool} 只能用于 ${scope.paths.join("、")} 之内的路径`]
+      ? [`${scope.tool} may only be used on paths within ${scope.paths.join(", ")}`]
       : scope.commandPrefixes !== undefined
         ? [
-            `${scope.tool} 只能运行以${scope.commandPrefixes.map((prefix) => `「${prefix}」`).join("、")}开头、不经 shell 的单条命令`,
+            `${scope.tool} may only run single commands that start with ${scope.commandPrefixes.map((prefix) => `"${prefix}"`).join(", ")} and do not go through a shell`,
           ]
         : []
   );
   return parts.length > 0
-    ? `部分工具限定了作用范围，超出的调用会被拒绝：${parts.join("；")}。`
+    ? `Some tools are limited in scope, and calls outside the scope are rejected: ${parts.join("; ")}.`
     : "";
 }

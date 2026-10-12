@@ -187,7 +187,10 @@ export async function openSessionRuntime(
     request.resume === true
       ? loadStoreSession(sessionsDirOf(request.governanceRoot), request.sessionId)
       : undefined;
-  const recordedSystemPrompt = recorded?.view.runs.at(-1)?.start.systemPrompt;
+  const recordedStart = recorded?.view.runs.at(-1)?.start;
+  const recordedSystemPrompt = recordedStart?.systemPrompt;
+  // 决策 430：生成这份系统提示时所用的模型（旧记录没有模型信息）
+  const recordedPromptModel = recordedStart?.modelInfo;
   // 决策 365：/reload 接着管旧运行面的后台作业；续跑时取会话记录里上一进程的作业（已丢失的与用过的作业号）
   const reloadJobs = request.reloadFrom?.jobs;
   const previousJobs =
@@ -257,6 +260,14 @@ export async function openSessionRuntime(
       ...(request.hooksNotice !== undefined ? { hooksNotice: request.hooksNotice } : {}),
       ...(frozenPrompt !== undefined ? { frozenPrompt } : {}),
       ...(recordedSystemPrompt !== undefined ? { systemPrompt: recordedSystemPrompt } : {}),
+      ...(recordedPromptModel !== undefined
+        ? {
+            systemPromptModel: {
+              provider: recordedPromptModel.provider,
+              id: recordedPromptModel.id,
+            },
+          }
+        : {}),
       ...(statusSent !== undefined ? { statusSent } : {}),
       ...(pruneSeed !== undefined ? { pruneSeed } : {}),
       ...(request.statusFacts !== undefined ? { statusFacts: request.statusFacts } : {}),

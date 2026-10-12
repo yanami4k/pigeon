@@ -220,6 +220,7 @@ import {
 import {
   escapeStatusText,
   STATUS_AUTHORITY_SENTENCE,
+  STATUS_AUTHORITY_SENTENCE_ZH,
   type StatusHashes,
   type StatusSectionName,
   type StatusState,
@@ -234,6 +235,7 @@ import {
   localStatusProbe,
   type StatusFacts,
 } from "./status-sources.ts";
+import { promptModelName, sameModelIdentity, systemPromptBase } from "./system-prompt.ts";
 import {
   createTakeWorkerTool,
   TAKE_WORKER_TOOL,
@@ -350,6 +352,9 @@ export interface RuntimeDeps {
   env?: NodeJS.ProcessEnv;
   // 决策 363：续跑沿用会话记录里最后一个 Run 开始条目记下的系统提示（不重新生成）；缺省按本会话现拼
   systemPrompt?: string;
+  // 决策 430：生成上面这份系统提示时所用模型的身份（同一 Run 开始条目记下的模型信息）；与本次不同即按新模型重建。
+  // 缺省（旧记录没有模型信息）照旧沿用
+  systemPromptModel?: { provider: string; id: string };
   // 决策 363：状态变化通道的起点（各节哈希）——/reload 交来旧运行面最后发出的一份，续跑、续做与分叉续跑取会话记录里
   // 最后一条状态条目；缺省没有（首次给完整块）
   statusSent?: StatusHashes;
@@ -400,13 +405,6 @@ export interface MemoryWriteConfig {
   now?: () => Date;
 }
 
-// 决策 353：引导模型把互不依赖的读取放进同一次回复（纯读的一批会同时执行）
-export const PARALLEL_READS_SENTENCE = "互不依赖的读取与搜索放在同一次回复里一起发。";
-
-// 截断后拆小引导（决策 063 第 2 件）：两种编辑模式的 system prompt 都追加。静态文本，对 prompt cache 友好
-export const TRUNCATION_GUIDANCE =
-  "工具调用若因输出上限未执行，把改动拆成几次较小的调用重发，不要原样重发；单次编辑只改需要改的那一段。";
-
 // 写操作的审批说法（170 ④），按本会话的审批状态取；决策 363 起在开工状态块的「审批」一节
 const WRITE_APPROVAL_SENTENCES: Readonly<Record<RunCommandApproval, string>> = {
   yolo: "写操作自动批准。",
@@ -420,18 +418,6 @@ const RUN_TAIL_HOOK_EVENTS: ReadonlySet<HookEventName> = new Set([
   "StopFailure",
   "SubagentStop",
 ]);
-
-// 系统提示开头一句：介绍读与改两件文件工具。worker 只介绍它有的（决策 360）；两件都在时即原有的整句
-function fileToolsSentence(replaceMode: boolean, read: boolean, edit: boolean): string {
-  const readPart = replaceMode
-    ? "用 read_file 读取文件（每行形如「行号| 内容」）"
-    : "用 read_file 读取文件（输出带 N#TAG 行锚点与 [PATH#TAG] 快照）";
-  const editPart = replaceMode
-    ? "用 edit_file 按原文替换编辑（old_string 须与文件原文逐字一致且在文件里恰好出现一次，不要带行号前缀）"
-    : "用 edit_file 按锚点编辑";
-  const parts = [...(read ? [readPart] : []), ...(edit ? [editPart] : [])];
-  return `你是 Pigeon 编程助手。${parts.length > 0 ? `${parts.join("，")}。` : ""}`;
-}
 
 // 决策 360：worker 没给的工具不注册——注册表只留委派策略里有的
 function registrySubset(source: ToolRegistry, names: readonly string[]): ToolRegistry {
@@ -936,17 +922,19 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
   const delegatedAllow = deps.toolPolicy?.allow;
   const offered = (...names: string[]): boolean =>
     delegatedAllow === undefined || names.every((name) => delegatedAllow.includes(name));
-  // 决策 363：系统提示只留固定底座（工具的介绍）——审批与联网的说法随 /reload 会变，搬进开工状态块（见下方「审批」「联网」两节）
-  const basePrompt =
-    fileToolsSentence(replaceMode, offered("read_file"), offered("edit_file")) +
-    PARALLEL_READS_SENTENCE +
-    (offered("edit_file") ? TRUNCATION_GUIDANCE : "") +
-    (offered(RUN_COMMAND_TOOL) ? commandTexts.prompt : "") +
-    (sessionSearch && offered(SEARCH_SESSIONS_TOOL, READ_SESSION_ENTRY_TOOL, LIST_SESSIONS_TOOL)
-      ? "需要以前会话里的信息时，可用 list_sessions 浏览本项目以前的会话，用 search_sessions 按关键词检索以前会话里的对话，" +
-        "再用 read_session_entry 按 entryId 读原文；检索片段只是线索，结论要回查原文。"
-      : "") +
-    scopePromptSentence(deps.toolPolicy?.scopes ?? []);
+  // 决策 363：系统提示只留固定底座——审批与联网的说法随 /reload 会变，搬进开工状态块（见下方「审批」「联网」两节）。
+  // 决策 428、429：底座为英文，开头写明所用模型，做事规矩与工具用法只写本会话有的工具
+  const modelName = promptModelName(modelInfo);
+  const basePrompt = systemPromptBase({
+    ...(modelName !== undefined ? { model: modelName } : {}),
+    replaceMode,
+    offered: (name) => offered(name),
+    runCommandSentence: commandTexts.prompt,
+    backgroundJobs: jobs.available,
+    sessionSearch:
+      sessionSearch && offered(SEARCH_SESSIONS_TOOL, READ_SESSION_ENTRY_TOOL, LIST_SESSIONS_TOOL),
+    scopeSentence: scopePromptSentence(deps.toolPolicy?.scopes ?? []),
+  });
   // M5 S4（决策 043）：会话开始登记 Skill Catalog——决策 363 起目录段进开工状态块（会话中增删改时重新登记、整段追加），
   // 哈希清单进快照；有 Skill 才注册并广告 load_skill（无 Skill 时不占工具广告）
   // 本地 Skill 开局扫描一次（/reload 沿用）；MCP server 的 prompts 随本运行面的 MCP 会话
@@ -1004,9 +992,15 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
       "server 不可用时这些工具会报错，改用内置工具继续。"
     : "";
   // 决策 363：系统提示 = 固定底座 + 任务指令 + 权威层级说明；续跑沿用会话记录里的、/reload 沿用旧运行面的，逐字节不变。
-  // 人写的说明、推送的记忆、Skill 目录与外部工具的说明进开工状态块（见下方状态变化通道）
+  // 人写的说明、推送的记忆、Skill 目录与外部工具的说明进开工状态块（见下方状态变化通道）。
+  // 决策 430：续跑所用模型与记录里生成系统提示时的不同，按新模型重建；旧记录没有模型信息时照旧沿用
+  const recordedPrompt =
+    deps.systemPrompt !== undefined &&
+    (deps.systemPromptModel === undefined || sameModelIdentity(deps.systemPromptModel, modelInfo))
+      ? deps.systemPrompt
+      : undefined;
   const systemPrompt =
-    deps.systemPrompt ??
+    recordedPrompt ??
     frozen?.systemPrompt ??
     [basePrompt, deps.taskDirective ?? "", STATUS_AUTHORITY_SENTENCE]
       .filter((section) => section !== "")
@@ -1115,7 +1109,9 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
   // 状态变化通道：首次与压缩之后给完整块，其余只给变了的节；起点见 statusSent。沿用的是旧会话的系统提示（没有权威层级
   // 说明，还带"开局冻结"的旧说法）时，首次的完整块开头另加一句以本状态块为准
   const statusTracker = new StatusTracker(deps.statusSent, {
-    legacyNote: !systemPrompt.includes(STATUS_AUTHORITY_SENTENCE),
+    legacyNote:
+      !systemPrompt.includes(STATUS_AUTHORITY_SENTENCE) &&
+      !systemPrompt.includes(STATUS_AUTHORITY_SENTENCE_ZH),
   });
   // 每次发出（状态消息进了会话记录）与记成已发都把当时的各节哈希记进会话记录，续跑与分叉从记录取
   const recordStatus = (hashes: StatusHashes | undefined) => {
