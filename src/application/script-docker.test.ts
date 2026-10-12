@@ -72,8 +72,11 @@ test.skipIf(ready ? false : `没有 Docker 或本地没有通用镜像 ${image}`
       undefined
     );
     const summary = await notice;
-    assert.match(summary, /已完成。worker 3 个：成功 3，失败 0/);
-    assert.match(summary, /收回：叠入 a\.txt、b\.txt、c\.txt；冲突未写入 无/);
+    assert.match(summary, /completed\. Workers: 3; succeeded 3, failed 0/);
+    assert.match(
+      summary,
+      /Collected: applied a\.txt, b\.txt, c\.txt; conflicts, not written: none/
+    );
     assert.equal(readFileSync(join(repo, "a.txt"), "utf8"), "from a\n");
     assert.equal(readFileSync(join(repo, "b.txt"), "utf8"), "b saw from a\n");
     assert.equal(readFileSync(join(repo, "c.txt"), "utf8"), "c\n");
