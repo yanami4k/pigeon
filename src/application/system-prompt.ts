@@ -87,7 +87,7 @@ function guidelines(input: SystemPromptBaseInput): string[] {
   const lines: string[] = [];
   if (runs) {
     lines.push(
-      "Every run_command result reports the command's exit code (退出码). Check it, and when a command fails, find out why before moving on."
+      "Every run_command result reports the command's exit code. Check it, and when a command fails, find out why before moving on."
     );
     // 有 shell 时才需要说"别用 shell 的 cat、grep、find"
     const read = offered("read_file")

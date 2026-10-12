@@ -1,5 +1,6 @@
 // 系统提示的固定底座（决策 428、429）：英文；开头写明所用模型（只有占位标签时省掉），做事规矩与工具用法只写本会话有的工具。
-// TB 实验的装配（全部工具、replace 编辑、后台作业、没有会话检索、linux）与分岔点回放核对过的原文逐字一致
+// TB 实验的装配（全部工具、replace 编辑、后台作业、没有会话检索、linux）与分岔点回放核对过的原文逐字一致——
+// 唯一的差别：回放时命令结果还是中文，退出码那条带着"(退出码)"；结果改英文（Exit code: N）后去掉了这个括注
 import assert from "node:assert/strict";
 import { test } from "vitest";
 import { runCommandTexts } from "../tools/run-command.ts";
@@ -11,11 +12,11 @@ import {
   systemPromptBase,
 } from "./system-prompt.ts";
 
-// 分岔点回放里合格的那一版（M1），逐字
+// 分岔点回放里合格的那一版（M1），逐字（退出码那条去掉了"(退出码)"，见文件开头）
 const REPLAYED = `You are Pigeon, a coding agent powered by the deepseek-flash model. You get work done in the user's workspace by reading files, running commands, editing code, and writing new files, and you check your work by running it.
 
 Guidelines:
-- Every run_command result reports the command's exit code (退出码). Check it, and when a command fails, find out why before moving on.
+- Every run_command result reports the command's exit code. Check it, and when a command fails, find out why before moving on.
 - Use read_file, not cat, head, or sed, to look at files. Use grep and glob, not shell grep or find, to search.
 - Read a file before editing or overwriting it. Use edit_file for targeted changes and write_file only for new files or complete rewrites.
 - Track the background jobs you start. You are notified when one finishes, so do not poll or sleep on it; keep working on other steps. Before your final answer, collect what you still need with job_output and stop jobs that no longer matter with job_kill.
@@ -77,7 +78,7 @@ test("只读的 worker：不提跑命令、编辑与写文件，也不说别用 
   );
   assert.doesNotMatch(
     text,
-    /run_command|edit_file|write_file|job_output|退出码|check your work|not cat|output limit/
+    /run_command|edit_file|write_file|job_output|exit code|check your work|not cat|output limit/
   );
   assert.match(text, /Be concise\. Reply in the language the user writes in\./);
   assert.match(text, /read_file shows each line as "lineNumber\| content"\./);
