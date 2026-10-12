@@ -20,7 +20,7 @@ import { join } from "node:path";
 import { test } from "vitest";
 import { listSessionRefs, readSessionView } from "../persistence/session-catalog.ts";
 import { loadStoreSession } from "../persistence/session-view.ts";
-import { createFakeStreamFn, type FakeStreamFn } from "../pi-runtime/fixtures.ts";
+import { createFakeStreamFn, type FakeStreamFn, isSummaryRequest } from "../pi-runtime/fixtures.ts";
 import type { StreamFn } from "../pi-runtime/index.ts";
 import { newSessionId } from "../state/ids.ts";
 import { sessionsDirOf } from "../state/paths.ts";
@@ -193,7 +193,7 @@ test("压缩之后重发完整块，注明取代此前的全部开工状态", as
     });
     const main: FakeStreamFn["calls"] = [];
     const streamFn: StreamFn = (model, context, options) => {
-      if (!(context.systemPrompt ?? "").startsWith("You are a context summarization assistant.")) {
+      if (!isSummaryRequest(context)) {
         main.push({ model, context: { ...context, messages: [...context.messages] } });
       }
       return fake(model, context, options);
@@ -474,7 +474,7 @@ test("没有工具结果、因通知接着跑的一轮触发的压缩：下一�
     });
     const main: FakeStreamFn["calls"] = [];
     const streamFn: StreamFn = (model, context, options) => {
-      if (!(context.systemPrompt ?? "").startsWith("You are a context summarization assistant.")) {
+      if (!isSummaryRequest(context)) {
         main.push({ model, context: { ...context, messages: [...context.messages] } });
       }
       return fake(model, context, options);

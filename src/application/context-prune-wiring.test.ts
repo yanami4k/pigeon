@@ -9,7 +9,12 @@ import { locateSessionFile } from "../persistence/session-reader.ts";
 import { loadStoreSessionFile } from "../persistence/session-view.ts";
 import { type CompactionConfigInput, contextTokens } from "../pi-runtime/compaction.ts";
 import { ContextPruner, pruneSeedFromEntries } from "../pi-runtime/context-prune.ts";
-import { createFakeStreamFn, type FakeReply } from "../pi-runtime/fixtures.ts";
+import {
+  createFakeStreamFn,
+  type FakeReply,
+  type FakeStreamFn,
+  isSummaryRequest,
+} from "../pi-runtime/fixtures.ts";
 import { restoreSessionContext } from "../pi-runtime/session-store.ts";
 import type { ContextPruneSection } from "../state/prune-config.ts";
 import { contextPruneSettings } from "../state/prune-config.ts";
@@ -17,8 +22,6 @@ import { type PruneData, SessionEntryType } from "../state/session-entries.ts";
 import { emptySettingsSnapshot } from "../state/settings.ts";
 import { runHeadless } from "./headless-core.ts";
 import type { RuntimeBundle } from "./runtime.ts";
-
-const SUMMARY_PROMPT_HEAD = "You are a context summarization assistant.";
 
 // 读一个大文件（约 2000 token）、再读 second（缺省再整读一次大文件，前一次成了过时读取；这时的用量报 6000）、收尾
 // （last 缺省正常回复）
@@ -119,8 +122,8 @@ test("压缩之前先裁（含较大的旧结果）：裁掉之后降到触发�
     second: "small.txt",
     task: `读文件。${"背景说明。".repeat(60)}`,
   };
-  const summaries = (fake: { calls: Array<{ context: { systemPrompt?: string } }> }) =>
-    fake.calls.filter((call) => call.context.systemPrompt?.startsWith(SUMMARY_PROMPT_HEAD)).length;
+  const summaries = (fake: FakeStreamFn) =>
+    fake.calls.filter((call) => isSummaryRequest(call.context)).length;
   await withRoot(async (root) => {
     const { fake, prunes } = await run(root, { protectTurns: 1 }, options);
     assert.deepEqual(

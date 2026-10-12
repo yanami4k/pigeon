@@ -12,7 +12,7 @@ import {
   type StoredEntry,
 } from "../persistence/session-reader.ts";
 import type { CompactionConfigInput } from "../pi-runtime/compaction.ts";
-import { createFakeStreamFn, type FakeReply } from "../pi-runtime/fixtures.ts";
+import { createFakeStreamFn, type FakeReply, isSummaryRequest } from "../pi-runtime/fixtures.ts";
 import type { StreamFn } from "../pi-runtime/index.ts";
 import { newSessionId, type SessionId } from "../state/ids.ts";
 import { noMcpSession } from "./mcp.ts";
@@ -38,9 +38,6 @@ export function textOf(message: { content?: unknown }): string {
     .join("");
 }
 
-// 压缩摘要请求的系统提示开头（上游口径）
-const SUMMARY_PROMPT_HEAD = "You are a context summarization assistant.";
-
 // 按请求分派的假模型：压缩摘要与干活的请求各走各的剧本
 export function routedModel(input: { main?: FakeReply[] }): {
   streamFn: StreamFn;
@@ -51,7 +48,7 @@ export function routedModel(input: { main?: FakeReply[] }): {
   const calls: LoggedCall[] = [];
   const streamFn: StreamFn = async (model, context, options) => {
     const messages = structuredClone(context.messages) as unknown as LoggedCall["messages"];
-    const kind = (context.systemPrompt ?? "").startsWith(SUMMARY_PROMPT_HEAD) ? "summary" : "main";
+    const kind = isSummaryRequest(context) ? "summary" : "main";
     calls.push({ kind, provider: String(model.provider), model: model.id, messages });
     return (kind === "summary" ? summary : main)(model, context, options);
   };

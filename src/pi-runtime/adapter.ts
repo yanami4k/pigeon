@@ -64,7 +64,9 @@ import {
 import type {
   Api,
   AssistantMessage,
+  Message,
   Model,
+  SimpleStreamOptions,
   StopReason,
   ToolResultMessage,
 } from "@earendil-works/pi-ai";
@@ -101,6 +103,7 @@ import {
   type CompactionStore,
   type CompactionTrigger,
   type ContextCompactor,
+  type ConversationSource,
   freshUsageMessage,
 } from "./compaction.ts";
 import type { ContextPruner, PruneRecord } from "./context-prune.ts";
@@ -114,6 +117,18 @@ import { type InjectionSnapshot, InjectionSnapshotSchema } from "./snapshot.ts";
 // 快照里没给推理档位时的兜底：off（不请求推理）。装配层（buildRuntime）总会按启动参数、设置与模型信息定下档位写进快照
 // （决策 390：支持推理的模型缺省 high，见 state/thinking-config.ts），这里只兜直接构造的适配器与旧快照
 export const DEFAULT_THINKING_LEVEL = "off";
+
+// 交给模型之前的转换（决策 188、363）：上游的 convertToLlm（压缩摘要与分支摘要转成用户消息；缺省实现会丢掉它们），
+// 状态消息上的标记先去掉。主请求与接续式摘要请求（决策 424）共用，两者的前缀才一致
+function toLlm(messages: AgentMessage[]): Message[] {
+  return convertToLlm(messages.map(withoutStatusMarker));
+}
+
+// 此刻发出的上下文（应用已有的裁剪，不新裁）与它的 token 数：接续式摘要请求沿用它（决策 424）
+interface SentContext {
+  tokens: number;
+  messages: AgentMessage[];
+}
 
 // Run 终态：completed / failed / aborted 之外保留 unknown——
 // ROADMAP M1 要求“中断和异常能够得到明确终态或 OutcomeUnknown”，
@@ -416,7 +431,7 @@ export class PiRuntimeAdapter {
       shouldStopAfterTurn: () => this.#hookStopReason !== undefined,
       // 决策 188：上游的转换（压缩摘要与分支摘要转成用户消息），缺省实现会丢掉它们。
       // 决策 363：状态消息上的标记交给模型之前去掉
-      convertToLlm: (messages) => convertToLlm(messages.map(withoutStatusMarker)),
+      convertToLlm: toLlm,
       // 决策 361：每次请求之前应用上下文裁剪（返回新数组，不改 Agent 持有的消息）
       transformContext: async (messages) => this.#pruneContext(messages),
       // 决策 188：一次 Run 内轮与轮之间的压缩挂点
@@ -693,8 +708,14 @@ export class PiRuntimeAdapter {
     this.#compactionAbort = abort;
     let outcome: CompactionOutcome;
     try {
-      const tokens = this.#sentTokens(compactor, this.#agent.state.messages.slice(0, -1));
-      outcome = await this.#runCompaction("overflow", tokens, abort.signal);
+      const sent = this.#sent(compactor, this.#agent.state.messages.slice(0, -1));
+      outcome = await this.#runCompaction(
+        "overflow",
+        sent.tokens,
+        abort.signal,
+        undefined,
+        this.#conversation(sent, this.#agent.state)
+      );
     } catch (error) {
       this.#listenerErrors.push(error);
       outcome = { kind: "failed", stage: "summary", error };
@@ -996,7 +1017,8 @@ export class PiRuntimeAdapter {
         "manual",
         compactor.check(this.#agent.state.messages).tokens,
         abort.signal,
-        focus !== undefined && focus !== "" ? focus : undefined
+        focus !== undefined && focus !== "" ? focus : undefined,
+        this.#conversation(this.#sent(compactor, this.#agent.state.messages), this.#agent.state)
       );
       if (outcome.kind === "compacted") {
         this.#agent.state.messages = structuredClone(outcome.messages);
@@ -1170,7 +1192,8 @@ export class PiRuntimeAdapter {
     trigger: CompactionTrigger,
     tokens: number,
     signal: AbortSignal,
-    customInstructions?: string
+    customInstructions: string | undefined,
+    conversation: ConversationSource
   ): Promise<CompactionOutcome> {
     const compactor = this.#compactor;
     if (compactor === undefined) {
@@ -1181,6 +1204,7 @@ export class PiRuntimeAdapter {
       tokens,
       ...(customInstructions !== undefined ? { customInstructions } : {}),
       signal,
+      conversation,
       onHookError: (error) => {
         this.#notifyCompaction({ kind: "hook-failed", trigger, error });
       },
@@ -1294,14 +1318,16 @@ export class PiRuntimeAdapter {
       if (compactor === undefined || this.#currentRunId === null) {
         return undefined;
       }
-      const { tokens, exceeds } = this.#checkCompaction(compactor, turn.context.messages);
-      if (!exceeds) {
+      const check = this.#checkCompaction(compactor, turn.context.messages);
+      if (check.sent === undefined) {
         return undefined;
       }
       const outcome = await this.#runCompaction(
         "turn",
-        tokens,
-        signal ?? new AbortController().signal
+        check.tokens,
+        signal ?? new AbortController().signal,
+        undefined,
+        this.#conversation(check.sent, turn.context)
       );
       if (outcome.kind !== "compacted") {
         return undefined;
@@ -1319,31 +1345,73 @@ export class PiRuntimeAdapter {
   }
 
   // 决策 361：压缩判定按裁剪后的上下文估算（裁了还没随请求发出的量从上一次用量里减去）；超过触发点时先一次裁光候选，
-  // 降到触发点以下即不再压缩
+  // 降到触发点以下即不再压缩。要压缩时一并交回这次裁剪之前发出的上下文（sent）：接续式摘要请求沿用它，前缀才与上一次
+  // 主请求相同（决策 424）；不压缩时 sent 为 undefined
   #checkCompaction(
     compactor: ContextCompactor,
     messages: readonly AgentMessage[]
-  ): { tokens: number; exceeds: boolean } {
-    const prune = this.#prune;
-    if (prune === undefined) {
-      return compactor.check(messages);
-    }
+  ): { tokens: number; sent?: SentContext } {
     const tokens = this.#sentTokens(compactor, messages);
     if (!compactor.exceeds(tokens)) {
-      return { tokens, exceeds: false };
+      return { tokens };
     }
+    const prune = this.#prune;
+    const sent: SentContext = { tokens, messages: prune?.view(messages) ?? [...messages] };
     let record: PruneRecord | undefined;
     try {
-      record = prune.beforeCompaction(messages, (pending) => this.#writePrune(pending));
+      record = prune?.beforeCompaction(messages, (pending) => this.#writePrune(pending));
     } catch (error) {
       // 裁剪记录写不成：这次不裁，照常压缩
       this.#listenerErrors.push(error);
     }
     if (record === undefined) {
-      return { tokens, exceeds: true };
+      return { tokens, sent };
     }
     const after = this.#sentTokens(compactor, messages);
-    return { tokens: after, exceeds: compactor.exceeds(after) };
+    return compactor.exceeds(after) ? { tokens: after, sent } : { tokens: after };
+  }
+
+  // 此刻发出的上下文（决策 361：应用已有的裁剪，不新裁）与按压缩判定口径估算的 token 数
+  #sent(compactor: ContextCompactor, messages: readonly AgentMessage[]): SentContext {
+    return {
+      tokens: this.#sentTokens(compactor, messages),
+      messages: this.#prune?.view(messages) ?? [...messages],
+    };
+  }
+
+  // 接续式摘要请求要的会话（决策 424）：与主请求同一个模型对象、系统提示与工具，消息按主请求的转换，选项同主请求
+  #conversation(
+    sent: SentContext,
+    context: { systemPrompt: string; tools?: AgentTool[] }
+  ): ConversationSource {
+    return {
+      tokens: sent.tokens,
+      build: () => ({
+        model: this.#agent.state.model,
+        context: {
+          systemPrompt: context.systemPrompt,
+          messages: toLlm(sent.messages),
+          ...(context.tools !== undefined ? { tools: context.tools } : {}),
+        },
+        options: this.#requestOptions(),
+      }),
+    };
+  }
+
+  // 主请求的选项：取法同上游 Agent 组循环配置（推理档位 off 即不请求推理，会话号、传输方式、思考预算、重试等待上限照带），
+  // 温度同装配层给主请求的包装（注入快照里记的实际下发值）
+  #requestOptions(): SimpleStreamOptions {
+    const agent = this.#agent;
+    const level = agent.state.thinkingLevel;
+    const temperature = this.#snapshot.model.temperature;
+    return {
+      ...(level !== "off" ? { reasoning: level } : {}),
+      ...(agent.sessionId !== undefined ? { sessionId: agent.sessionId } : {}),
+      transport: agent.transport,
+      ...(agent.thinkingBudgets !== undefined ? { thinkingBudgets: agent.thinkingBudgets } : {}),
+      ...(agent.maxRetryDelayMs !== undefined ? { maxRetryDelayMs: agent.maxRetryDelayMs } : {}),
+      ...(temperature !== undefined ? { temperature } : {}),
+    };
   }
 
   // 决策 361：实际发出的上下文（裁剪后）的 token 数：按裁剪后的消息估算，再减去在所用那条 usage 之后裁掉的量
@@ -1397,11 +1465,17 @@ export class PiRuntimeAdapter {
     const abort = new AbortController();
     this.#compactionAbort = abort;
     try {
-      const { tokens, exceeds } = this.#checkCompaction(compactor, this.#agent.state.messages);
-      if (!exceeds) {
+      const check = this.#checkCompaction(compactor, this.#agent.state.messages);
+      if (check.sent === undefined) {
         return false;
       }
-      const outcome = await this.#runCompaction("run-start", tokens, abort.signal);
+      const outcome = await this.#runCompaction(
+        "run-start",
+        check.tokens,
+        abort.signal,
+        undefined,
+        this.#conversation(check.sent, this.#agent.state)
+      );
       if (outcome.kind === "compacted" && !abort.signal.aborted) {
         this.#agent.state.messages = structuredClone(outcome.messages);
         this.#statusCompacted = true;

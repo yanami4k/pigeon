@@ -23,7 +23,13 @@ import {
   ContextCompactor,
   resolveCompactionConfig,
 } from "./compaction.ts";
-import { createFakeStreamFn, type FakeReply, type FakeStreamFn } from "./fixtures.ts";
+import {
+  createFakeStreamFn,
+  type FakeReply,
+  type FakeStreamFn,
+  isContinuationSummary,
+  isSummaryRequest as isSummaryContext,
+} from "./fixtures.ts";
 import type { AgentTool } from "./governance.ts";
 import type { AgentMessage } from "./index.ts";
 import { openSessionStoreWriter, type SessionStoreWriter } from "./session-store.ts";
@@ -198,17 +204,23 @@ function harness(
 }
 
 function isSummaryRequest(call: FakeStreamFn["calls"][number]): boolean {
-  return (
-    call.context.systemPrompt?.startsWith("You are a context summarization assistant.") === true
-  );
+  return isSummaryContext(call.context);
 }
 
 function requestText(call: FakeStreamFn["calls"][number] | undefined): string {
   return JSON.stringify(call?.context.messages ?? []);
 }
 
-function roles(messages: readonly AgentMessage[]): string[] {
+function roles(messages: ReadonlyArray<{ role: string }>): string[] {
   return messages.map((message) => message.role);
+}
+
+// 主分支上最后一条压缩条目记下的摘要请求发法（决策 424）
+function summaryRequestOf(main: ReturnType<typeof mainBranch>): unknown {
+  const entry = main.findLast((item) => item.type === "compaction") as
+    | { details?: { summaryRequest?: unknown } }
+    | undefined;
+  return entry?.details?.summaryRequest;
 }
 
 test("轮间挂点：上下文超过触发点时在下一轮之前压缩，下一轮请求以摘要开头（经 convertToLlm 发给模型）；原始消息仍在会话文件里", async () => {
@@ -237,11 +249,28 @@ test("轮间挂点：上下文超过触发点时在下一轮之前压缩，下�
       ["turn"]
     );
     assert.ok((h.notices[0]?.tokensBefore ?? 0) > (h.notices[0]?.tokensAfter ?? 0));
+    // 决策 424：接续式——系统提示与工具同上一次主请求，消息以它的消息逐字节开头，接着是这一轮的回复与工具结果，末尾一条摘要指令
+    const [first, summary] = h.streamFn.calls;
+    const sent = first?.context.messages ?? [];
+    assert.equal(summary?.context.systemPrompt, first?.context.systemPrompt);
+    assert.deepEqual(summary?.context.tools, first?.context.tools);
+    assert.equal(
+      JSON.stringify(summary?.context.messages.slice(0, sent.length)),
+      JSON.stringify(sent)
+    );
+    assert.deepEqual(roles(summary?.context.messages.slice(sent.length) ?? []), [
+      "assistant",
+      "toolResult",
+      "user",
+    ]);
+    assert.ok(summary !== undefined && isContinuationSummary(summary.context));
+    assert.equal(summary.options?.toolChoice, "none");
 
     await h.store.flush();
     const main = mainBranch(h.sessions, h.sessionId);
     const types = main.map((entry) => entry.type);
     assert.equal(types.filter((type) => type === "compaction").length, 1);
+    assert.deepEqual(summaryRequestOf(main), { mode: "continuation" });
     // 原始消息保留（179）：长任务那条用户消息仍在文件里
     assert.ok(JSON.stringify(main).includes("细节说明。细节说明。"));
   } finally {
@@ -386,23 +415,23 @@ test("手动压缩：重点作为摘要的附加说明，替换上下文并发�
       { text: LONG_REPLY, contextTokens: 50 },
       { text: LONG_REPLY, contextTokens: 80 },
       { text: "## Goal\n手动" },
-      { text: "## Turn\n前段" },
       { text: "后续回答", contextTokens: 60 },
     ],
     { thresholdTokens: 900_000, keepRecentTokens: 5 }
   );
   try {
-    // 两问之后再压缩：第一问进历史段（重点附在它的摘要请求上）；上游只摘要被切开那一轮的前段时不带附加说明
+    // 两问之后再压缩：第一问进历史段，切点落在第二问那一轮中间——接续式一次请求写出历史摘要与那一轮的摘要（上游是两次请求）
     await h.adapter.run(LONG_TASK);
     await h.adapter.run("第二问");
     const outcome = await h.adapter.compact("保留 a.ts 的改动");
     assert.equal(outcome.kind, "compacted");
     const summaryCalls = h.streamFn.calls.slice(2);
-    assert.ok(summaryCalls.length >= 1);
-    assert.ok(summaryCalls.every((call) => isSummaryRequest(call)));
-    assert.ok(
-      summaryCalls.some((call) => requestText(call).includes("Additional focus: 保留 a.ts 的改动"))
-    );
+    assert.equal(summaryCalls.length, 1);
+    assert.ok(isSummaryRequest(summaryCalls[0] as never));
+    const instruction = requestText(summaryCalls[0]);
+    assert.ok(instruction.includes("Additional focus: 保留 a.ts 的改动"));
+    assert.ok(instruction.includes("**Turn Context (split turn):**"));
+    assert.ok(instruction.includes("<turn-start>第二问</turn-start>"));
     assert.equal(h.adapter.transcript()[0]?.role, "compactionSummary");
     assert.deepEqual(
       h.notices.map((notice) => notice.trigger),
@@ -579,7 +608,10 @@ test("超长出错（决策 422）：先压缩（压缩前回调、压缩条目�
       ["overflow", "overflow"]
     );
     await h.store.flush();
-    const main = JSON.stringify(mainBranch(h.sessions, h.sessionId));
+    const branch = mainBranch(h.sessions, h.sessionId);
+    // 决策 424：超长触发走独立式
+    assert.deepEqual(summaryRequestOf(branch), { mode: "standalone", reason: "overflow" });
+    const main = JSON.stringify(branch);
     assert.equal(main.split('"type":"compaction"').length - 1, 1);
     assert.ok(main.includes("maximum context length"));
   } finally {

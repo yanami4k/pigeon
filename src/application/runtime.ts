@@ -1166,9 +1166,9 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
           ...(skippedTools.length > 0 ? { skippedTools: structuredClone(skippedTools) } : {}),
         })
       : undefined;
-  // 决策 188：压缩服务。摘要请求与主请求同一个模型接入，只套温度（摘要从不请求推理，温度总能生效）；
-  // 不套单轮输出上限包装——它会盖掉上游给摘要定的输出上限（0.8 倍预留与模型输出上限的较小者）。
-  // 模型对象只是占位身份（真实模型元数据在模型接入插件里），带上输出上限与窗口供上游定摘要请求的选项
+  // 决策 188：压缩服务。摘要请求与主请求同一个模型接入（同一网关、计量与重试）；不套单轮输出上限包装——它会盖掉摘要的输出上限
+  // （0.8 倍预留与模型输出上限的较小者）。决策 424：接续式摘要请求的推理档位与温度同主请求（由运行面随会话给出）；独立式不请求
+  // 推理，只套温度（温度总能生效）。模型对象只是占位身份（真实模型元数据在模型接入插件里），带上输出上限与窗口供定摘要请求的选项
   // 决策 323 / 324：PreCompact 钩子——压缩之前通知（只通知、不能拦：拦下压缩会使下一次请求超长出错）。
   // matcher 匹配触发位置：turn / run-start / overflow（决策 422）记 auto，手动压缩记 manual（331：压缩前复盘已删除，回调只剩调用方的）
   const hooksBeforeCompaction: BeforeCompaction | undefined = sessionHooks
@@ -1209,10 +1209,8 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
   };
   const compactor = new ContextCompactor({
     config: compactionConfig,
-    streamFn:
-      deps.temperature !== undefined
-        ? fixTemperature(requestStreamFn, deps.temperature)
-        : requestStreamFn,
+    streamFn: requestStreamFn,
+    ...(deps.temperature !== undefined ? { temperature: deps.temperature } : {}),
     model: placeholderModel,
     ...(hooksBeforeCompaction !== undefined ? { beforeCompaction: hooksBeforeCompaction } : {}),
   });

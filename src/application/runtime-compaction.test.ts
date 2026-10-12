@@ -1,6 +1,6 @@
-// 上下文压缩的装配（决策 188、203、218、192、207）：Pigeon 的运行面缺省开启压缩（触发点为模型窗口减预留，取不到窗口用缺省 1M），
-// 阈值与保留量可配置并写进 Run 开始条目；摘要请求经主请求同一个模型接入，
-// 关思考、温度同主请求的设置、输出上限按上游规则；压缩前回调经装配根接上。
+// 上下文压缩的装配（决策 188、203、218、192、207、424）：Pigeon 的运行面缺省开启压缩（触发点为模型窗口减预留，取不到窗口用
+// 缺省 1M），阈值与保留量可配置并写进 Run 开始条目；摘要请求经主请求同一个模型接入，接续式的推理档位与温度同主请求、
+// 输出上限按上游规则；压缩前回调经装配根接上。
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -9,14 +9,16 @@ import { test } from "vitest";
 import { locateSessionFile } from "../persistence/session-reader.ts";
 import { loadStoreSessionFile } from "../persistence/session-view.ts";
 import type { BeforeCompactionInfo } from "../pi-runtime/compaction.ts";
-import { createFakeStreamFn } from "../pi-runtime/fixtures.ts";
+import {
+  createFakeStreamFn,
+  isContinuationSummary,
+  isSummaryRequest,
+} from "../pi-runtime/fixtures.ts";
 import type { StreamFn } from "../pi-runtime/index.ts";
 import { newSessionId } from "../state/ids.ts";
 import { type RunStartData, SessionEntryType } from "../state/session-entries.ts";
 import { runHeadless } from "./headless-core.ts";
 import { buildRuntime, disposeRuntime } from "./runtime.ts";
-
-const SUMMARY_PROMPT_HEAD = "You are a context summarization assistant.";
 
 function runStarts(sessions: string, sessionId: string): RunStartData[] {
   const located = locateSessionFile(sessions, sessionId);
@@ -54,7 +56,7 @@ test("缺省开启：模型信息没有窗口时，Run 开始条目记下缺省�
   }
 });
 
-test("调低触发点：一次 Run 内轮间压缩；摘要请求经同一个模型接入发出，温度同主请求（0）、不请求推理、输出上限取 0.8 倍预留", async () => {
+test("调低触发点：一次 Run 内轮间压缩；接续式摘要请求经同一个模型接入发出，温度同主请求（0）、不请求推理（主请求也不）、输出上限取 0.8 倍预留、不许调工具", async () => {
   const root = mkdtempSync(join(tmpdir(), "pigeon-compaction-headless-"));
   try {
     writeFileSync(join(root, "a.txt"), "内容\n");
@@ -70,9 +72,9 @@ test("调低触发点：一次 Run 内轮间压缩；摘要请求经同一个模
         { text: "读完了", contextTokens: 300 },
       ],
     });
-    const seen: Array<{ system: string; options: unknown }> = [];
+    const seen: Array<{ summary: boolean; options: unknown }> = [];
     const streamFn: StreamFn = (model, context, options) => {
-      seen.push({ system: context.systemPrompt ?? "", options });
+      seen.push({ summary: isContinuationSummary(context), options });
       return fake(model, context, options);
     };
     const result = await runHeadless({
@@ -88,18 +90,18 @@ test("调低触发点：一次 Run 内轮间压缩；摘要请求经同一个模
       compaction: { thresholdTokens: 1000, keepRecentTokens: 20 },
     });
     assert.equal(result.status, "completed");
-    const summaries = seen.filter((call) => call.system.startsWith(SUMMARY_PROMPT_HEAD));
-    assert.ok(summaries.length >= 1, "摘要请求应经同一个模型接入发出");
-    for (const call of summaries) {
-      const options = call.options as {
-        temperature?: number;
-        reasoning?: unknown;
-        maxTokens?: number;
-      };
-      assert.equal(options.temperature, 0);
-      assert.equal(options.reasoning, undefined);
-      assert.ok(options.maxTokens !== undefined && options.maxTokens <= Math.floor(0.8 * 16_384));
-    }
+    const summaries = seen.filter((call) => call.summary);
+    assert.equal(summaries.length, 1, "接续式摘要请求应经同一个模型接入发出");
+    const options = summaries[0]?.options as {
+      temperature?: number;
+      reasoning?: unknown;
+      maxTokens?: number;
+      toolChoice?: unknown;
+    };
+    assert.equal(options.temperature, 0);
+    assert.equal(options.reasoning, undefined);
+    assert.equal(options.maxTokens, Math.floor(0.8 * 16_384));
+    assert.equal(options.toolChoice, "none");
     const [start] = runStarts(join(root, ".pigeon", "state", "sessions"), result.sessionId);
     assert.deepEqual(start?.compaction, {
       contextWindow: 1_000_000,
@@ -113,7 +115,7 @@ test("调低触发点：一次 Run 内轮间压缩；摘要请求经同一个模
   }
 });
 
-test("主请求开思考时摘要请求仍关思考：摘要不请求推理", async () => {
+test("主请求开思考时，接续式摘要请求沿用主请求的推理档位", async () => {
   const root = mkdtempSync(join(tmpdir(), "pigeon-compaction-thinking-"));
   try {
     const fake = createFakeStreamFn({
@@ -123,9 +125,9 @@ test("主请求开思考时摘要请求仍关思考：摘要不请求推理", as
         { text: "第二问的回答", contextTokens: 300 },
       ],
     });
-    const seen: Array<{ system: string; reasoning: unknown }> = [];
+    const seen: Array<{ summary: boolean; reasoning: unknown }> = [];
     const streamFn: StreamFn = (model, context, options) => {
-      seen.push({ system: context.systemPrompt ?? "", reasoning: options?.reasoning });
+      seen.push({ summary: isContinuationSummary(context), reasoning: options?.reasoning });
       return fake(model, context, options);
     };
     const bundle = buildRuntime({
@@ -144,11 +146,8 @@ test("主请求开思考时摘要请求仍关思考：摘要不请求推理", as
     try {
       await bundle.adapter.run(`第一问。${"背景说明。".repeat(60)}`);
       await bundle.adapter.run("第二问");
-      const summary = seen.find((call) => call.system.startsWith(SUMMARY_PROMPT_HEAD));
-      assert.ok(summary !== undefined);
-      assert.equal(summary.reasoning, undefined);
-      const main = seen.filter((call) => !call.system.startsWith(SUMMARY_PROMPT_HEAD));
-      assert.ok(main.every((call) => call.reasoning === "high"));
+      assert.equal(seen.filter((call) => call.summary).length, 1);
+      assert.ok(seen.every((call) => call.reasoning === "high"));
     } finally {
       await disposeRuntime(bundle);
     }
@@ -215,7 +214,7 @@ function readFileTurns(): StreamFn {
   });
   // 摘要请求一律被拒（如撞上花费上限），主请求照常
   return (model, context, options) =>
-    context.systemPrompt?.startsWith(SUMMARY_PROMPT_HEAD) === true
+    isSummaryRequest(context)
       ? Promise.reject(new Error("网关拒绝：花费上限"))
       : fake(model, context, options);
 }
