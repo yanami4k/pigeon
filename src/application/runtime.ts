@@ -255,7 +255,7 @@ import {
 } from "./tool-environment.ts";
 import { toolExecutionModeOf } from "./tool-execution-modes.ts";
 import { budgetRemainingMs, budgetStatus, type WallClockBudget } from "./wall-clock-status.ts";
-import { stderrWarn, type WarnSink } from "./warnings.ts";
+import { onceEachLine, stderrWarn, type WarnSink } from "./warnings.ts";
 import { createModelDistiller, type WebToolsConfig } from "./web-tools.ts";
 
 export interface RuntimeDeps {
@@ -397,7 +397,7 @@ export interface LearnedMemoryConfig {
 }
 
 export interface MemoryWriteConfig {
-  // 来源（哪个入口）：工具补在每条的〔〕里
+  // 来源（哪个入口）：工具以英文短名补在每条的尾巴里
   source: MemorySource;
   // 写入后调用：入口在消息区显示一行记下的内容与层级
   onWritten?: (notice: MemoryWriteNotice) => void;
@@ -800,6 +800,9 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
   const memoryLimits = learned?.limits ?? memoryLimitsOf(settings);
   const memoryWrite =
     learned?.write !== undefined && deps.toolPolicy === undefined ? learned.write : undefined;
+  // 决策 431：推送记忆读到旧格式文件时一次性迁移，迁移的结果与没能落盘的告警走运行期告警的出口；同一行本运行面只说一次
+  // （没能落盘时每个 Run 开始都会重试）
+  const memoryReport = onceEachLine(deps.storeWarn ?? stderrWarn);
   if (memoryWrite !== undefined) {
     registry.register(
       updateMemoryRegistration({
@@ -919,6 +922,7 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
           limits: memoryLimits,
           writable: memoryWrite !== undefined,
           ...(learned.layers !== undefined ? { layers: learned.layers } : {}),
+          report: memoryReport,
         }))
       : undefined;
   // 决策 360：worker（委派策略在场）的提示只介绍它有的工具，并交代作用范围；主会话的工具一律在场，提示不变
@@ -1036,6 +1040,7 @@ export function buildRuntime(deps: RuntimeDeps): RuntimeBundle {
           limits: memoryLimits,
           writable: memoryWrite !== undefined,
           ...(learned.layers !== undefined ? { layers: learned.layers } : {}),
+          report: memoryReport,
         }).section
       : "";
   // Skill 根的变动指纹：每次请求之前比一次（只 stat），变了才重取文件类各节、重新登记（load_skill 拒绝时说的"下一次请求之前

@@ -27,8 +27,8 @@ import { openSessionRuntime } from "./session-runtime.ts";
 import { statusTextOf } from "./status-fixtures.ts";
 import { createSessionWorkers } from "./workers.ts";
 
-const PROJECT_ENTRY = "- [P1] 提交信息用英文祈使句 〔2026-09-30 · 终端界面 · 会话 sess_A〕\n";
-const USER_ENTRY = "- [U1] 回复用中文 〔2026-09-30 · 命令行对话 · 会话 sess_B〕\n";
+const PROJECT_ENTRY = "- [P1] 提交信息用英文祈使句 (recorded 2026-09-30 · tui · session sess_A)\n";
+const USER_ENTRY = "- [U1] 回复用中文 (recorded 2026-09-30 · cli · session sess_B)\n";
 const TODAY = new Date(2026, 9, 1, 9, 0);
 
 // 用户级记忆所在的主目录：放在临时根下的 home/（不与项目级同一个文件）
@@ -124,7 +124,7 @@ test("只推送：推送段在开工状态块里、排在人写的说明与 Skil
       const [start] = runStarts(root, bundle.adapter.sessionId);
       const hash = (text: string) => createHash("sha256").update(text).digest("hex");
       assert.deepEqual(start?.pushedMemory, {
-        textVersion: "v4",
+        textVersion: "v5",
         layers: [
           {
             layer: "project",
@@ -148,6 +148,47 @@ test("只推送：推送段在开工状态块里、排在人写的说明与 Skil
     } finally {
       await disposeRuntime(bundle);
     }
+  }));
+
+test("读到旧格式的记忆文件（决策 431）：开工状态块里是新格式（英文尾巴），文件已改写、原文已备份；迁移的说明走运行期告警的出口、只说一次", () =>
+  withRoot("pigeon-pushed-legacy-", async (root) => {
+    writeMemory(
+      root,
+      "project",
+      "# 学到的记忆（本项目）\n" +
+        "<!-- 由 Pigeon 的 update_memory 维护，也可以用终端界面的 /memory edit project 修改。一行一条：编号、内容，〔〕里是记下的日期、来源与会话编号。 -->\n" +
+        "\n" +
+        "- [P1] 提交信息用英文祈使句 〔2026-09-30 · 终端界面 · 会话 sess_A〕\n"
+    );
+    writeMemory(
+      root,
+      "user",
+      `${MEMORY_FILE_HEADERS.user}- [U1] 回复用中文 〔2026-09-30 · 命令行对话 · 会话 sess_B〕\n`
+    );
+    const warnings: string[] = [];
+    const streamFn = createFakeStreamFn({ replies: [{ text: "好" }, { text: "好" }] });
+    const bundle = buildRuntime(
+      deps(root, { learnedMemory: {}, streamFn, storeWarn: (line) => warnings.push(line) })
+    );
+    try {
+      await bundle.adapter.run("你好");
+      await bundle.adapter.run("再来");
+      const prompt = statusTextOf(streamFn.calls[0]);
+      assert.ok(prompt.includes(PROJECT_ENTRY.trimEnd()), prompt);
+      assert.ok(prompt.includes(USER_ENTRY.trimEnd()), prompt);
+      assert.doesNotMatch(prompt, /〔|终端界面 ·|命令行对话 ·/);
+    } finally {
+      await disposeRuntime(bundle);
+    }
+    assert.equal(readMemory(root, "project"), MEMORY_FILE_HEADERS.project + PROJECT_ENTRY);
+    assert.equal(readMemory(root, "user"), MEMORY_FILE_HEADERS.user + USER_ENTRY);
+    assert.deepEqual(
+      warnings.map((line) => line.replace(/备份在 .*$/, "备份在 …")),
+      [
+        "[记忆] .pigeon/state/memory.md 是旧格式，已一次性改写成新格式；原文件备份在 …",
+        "[记忆] ~/.pigeon/state/memory.md 是旧格式，已一次性改写成新格式；原文件备份在 …",
+      ]
+    );
   }));
 
 test("关着（缺省）：没有推送段、不注册 update_memory、Run 开始条目不带推送的记忆", () =>
@@ -207,7 +248,7 @@ test("带写入配置：注册 update_memory、推送段带写入说明与交互
     }
     assert.equal(
       readMemory(root, "user"),
-      `${MEMORY_FILE_HEADERS.user}- [U1] 回复先给结论 〔2026-10-01 · 命令行对话 · 会话 ${bundle.adapter.sessionId}〕\n`
+      `${MEMORY_FILE_HEADERS.user}- [U1] 回复先给结论 (recorded 2026-10-01 · cli · session ${bundle.adapter.sessionId})\n`
     );
     assert.deepEqual(notices, [
       { layer: "user", action: "add", id: "U1", content: "回复先给结论" },
@@ -254,7 +295,9 @@ test("两层上限取设置的 memory 一节：推送段与记忆工具都按它
       JSON.stringify(streamFn.calls[1]?.context.messages),
       /Added P2 to the project memory \(now \d+\/1234 characters\)\./
     );
-    assert.ok(readMemory(root, "project").includes("- [P2] 甲 〔2026-10-01 · 终端界面 · 会话 "));
+    assert.ok(
+      readMemory(root, "project").includes("- [P2] 甲 (recorded 2026-10-01 · tui · session ")
+    );
   }));
 
 test("入口：终端界面与 --line（openSessionRuntime 给写入配置）有 update_memory 与写入说明；pigeon run（headless）只推送", () =>
@@ -416,7 +459,7 @@ test("功能：记下纠正、下次照做——第一会话经 update_memory �
     } finally {
       await disposeRuntime(first.bundle);
     }
-    const expected = `- [U2] 回复先给结论 〔2026-10-01 · 命令行对话 · 会话 ${firstSessionId}〕`;
+    const expected = `- [U2] 回复先给结论 (recorded 2026-10-01 · cli · session ${firstSessionId})`;
     assert.ok(readMemory(root, "user").includes(expected), "落盘到用户级");
     // 第二会话：开工状态块里出现这一条
     const secondStream = createFakeStreamFn({ replies: [{ text: "好" }] });

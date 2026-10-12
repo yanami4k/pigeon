@@ -1,5 +1,6 @@
 // /memory 的命令层（决策 331）：查看两层的内容、文件位置与用量；按层编辑——存盘后校验格式与上限，不合格、编辑器出错、
 // 编辑期间原文件被改都保留原内容并报错；没有编辑器时给出文件路径；保存时别处在写即排队，可取消，取消时编辑稿保留。
+// 决策 431：查看与编辑读到旧格式时一次性迁移，结果与告警附在回话末尾。
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -17,7 +18,13 @@ import {
   resolveEditor,
 } from "./memory-command.ts";
 
-const PROJECT = "- [P1] 提交信息用英文祈使句 〔2026-10-01 · 终端界面 · 会话 sess_A〕\n";
+const PROJECT = "- [P1] 提交信息用英文祈使句 (recorded 2026-10-01 · tui · session sess_A)\n";
+// 决策 431 之前的旧格式（中文文件头、〔〕尾巴）；改写后即为 MEMORY_FILE_HEADERS.project + PROJECT
+const LEGACY_PROJECT =
+  "# 学到的记忆（本项目）\n" +
+  "<!-- 由 Pigeon 的 update_memory 维护，也可以用终端界面的 /memory edit project 修改。一行一条：编号、内容，〔〕里是记下的日期、来源与会话编号。 -->\n" +
+  "\n" +
+  "- [P1] 提交信息用英文祈使句 〔2026-10-01 · 终端界面 · 会话 sess_A〕\n";
 
 function withCtx(
   body: (ctx: MemoryCommandContext, file: (layer: MemoryLayer) => string) => Promise<void> | void
@@ -158,6 +165,51 @@ test("编辑：格式不对、超出上限、编辑器出错、编辑期间原�
       `项目级记忆没有保存：编辑期间这一层被另一处改过；原内容未动，改过的内容留在 ${draft}`
     );
     assert.equal(readFileSync(file("project"), "utf8"), `${original}- [P2] 另一处写的\n`);
+  }));
+
+test("查看读到旧格式：一次性改写成新格式并备份，列出的是新格式，末尾说一行备份位置；再看不再改写", () =>
+  withCtx((ctx, file) => {
+    write(file("project"), LEGACY_PROJECT);
+    const view = memoryViewText(ctx);
+    assertInOrder(view, [
+      `共 1 条，${[...PROJECT].length}/200 字符\n${PROJECT.trimEnd()}`,
+      "用户级",
+      "[记忆] .pigeon/state/memory.md 是旧格式，已一次性改写成新格式；原文件备份在 ",
+    ]);
+    assert.doesNotMatch(view, /〔/);
+    assert.equal(readFileSync(file("project"), "utf8"), MEMORY_FILE_HEADERS.project + PROJECT);
+    const backupDir = memoryLocation("project", ctx).backupDir;
+    assert.equal(readFileSync(join(backupDir, "state", "memory.md"), "utf8"), LEGACY_PROJECT);
+    const again = memoryViewText(ctx);
+    assert.doesNotMatch(again, /旧格式/);
+  }));
+
+test("编辑打开旧格式而这一次拿不到锁：编辑稿是转换后的新格式、文件不动并告警；保存时在锁内补上迁移（先备份）再保存", () =>
+  withCtx(async (ctx, file) => {
+    write(file("project"), LEGACY_PROJECT);
+    const location = memoryLocation("project", ctx);
+    const release = acquireExclusiveLock(location.lock, "测试持锁");
+    const edited = `${MEMORY_FILE_HEADERS.project}${PROJECT}- [P2] 人手加的一条\n`;
+    const saved = await editMemoryLayer(ctx, "project", {
+      editor: "vi",
+      run: (_editor, draft) => {
+        assert.equal(readFileSync(draft, "utf8"), MEMORY_FILE_HEADERS.project + PROJECT);
+        assert.equal(readFileSync(file("project"), "utf8"), LEGACY_PROJECT, "打开时文件不动");
+        writeFileSync(draft, edited);
+        release();
+        return { ok: true };
+      },
+    });
+    assertInOrder(saved, [
+      "已保存项目级记忆",
+      "[记忆] .pigeon/state/memory.md 是旧格式，这次没能改写成新格式（另一处正在写这一层）",
+      "[记忆] .pigeon/state/memory.md 是旧格式，已一次性改写成新格式；原文件备份在 ",
+    ]);
+    assert.equal(readFileSync(file("project"), "utf8"), edited);
+    assert.equal(
+      readFileSync(join(location.backupDir, "state", "memory.md"), "utf8"),
+      LEGACY_PROJECT
+    );
   }));
 
 test("编辑器：$VISUAL 优先，其次 $EDITOR；都没有或为空即不给", () => {

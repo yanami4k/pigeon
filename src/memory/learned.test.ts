@@ -1,5 +1,5 @@
-// 学到的记忆的文件格式（决策 332）：一行一条，编号带层前缀，〔〕里是日期、来源与会话编号；逐字往返、改坏时指出行号、
-// 上限只计条目区且按码点计。
+// 学到的记忆的文件格式（决策 332、431）：一行一条，编号带层前缀，行末 (recorded 日期 · 来源 · session 会话号)；逐字往返、
+// 改坏时指出行号、上限只计条目区且按码点计；内容里的括号与形如尾巴的文字不误判成尾巴；日常解析不认旧的〔〕尾巴。
 import assert from "node:assert/strict";
 import { test } from "vitest";
 import {
@@ -18,8 +18,8 @@ import {
 
 const PROJECT =
   `${MEMORY_FILE_HEADERS.project}` +
-  "- [P1] 提交信息用英文祈使句，不加类型前缀 〔2026-10-01 · 终端界面 · 会话 sess_01A〕\n" +
-  "- [P3] 设计文档在内部 wiki 的 Pigeon 空间 〔2026-10-02 · 命令行对话 · 会话 sess_01B〕\n" +
+  "- [P1] 提交信息用英文祈使句，不加类型前缀 (recorded 2026-10-01 · tui · session sess_01A)\n" +
+  "- [P3] 设计文档在内部 wiki 的 Pigeon 空间 (recorded 2026-10-02 · cli · session sess_01B)\n" +
   "- [P4] 人手加的一条，没有来处\n";
 
 test("逐字往返：规范写法的文件解析后序列化回去逐字相同；各条的编号、内容与来处按格式取出", () => {
@@ -30,12 +30,12 @@ test("逐字往返：规范写法的文件解析后序列化回去逐字相同�
     {
       id: 1,
       content: "提交信息用英文祈使句，不加类型前缀",
-      origin: { date: "2026-10-01", source: "终端界面", sessionId: "sess_01A" },
+      origin: { date: "2026-10-01", source: "tui", sessionId: "sess_01A" },
     },
     {
       id: 3,
       content: "设计文档在内部 wiki 的 Pigeon 空间",
-      origin: { date: "2026-10-02", source: "命令行对话", sessionId: "sess_01B" },
+      origin: { date: "2026-10-02", source: "cli", sessionId: "sess_01B" },
     },
     { id: 4, content: "人手加的一条，没有来处" },
   ]);
@@ -90,21 +90,86 @@ test("改坏时指出第一处不对的行号：层前缀不符、缺编号、�
   assert.deepEqual(parseMemory("- [P1] 项目级写进了用户级\n", "user"), { ok: false, line: 1 });
 });
 
-test("来处的写法：〔日期 · 来源 · 会话 编号〕补在行尾；内容里自带的〔〕不当作来处", () => {
+test("来处的写法：(recorded 日期 · 来源 · session 编号) 补在行尾；内容里自带的括号不当作来处", () => {
   assert.equal(
     serializeEntry(
       {
         id: 2,
         content: "甲",
-        origin: { date: "2026-10-01", source: "终端界面", sessionId: "sess_X" },
+        origin: { date: "2026-10-01", source: "tui", sessionId: "sess_X" },
       },
       "user"
     ),
-    "- [U2] 甲 〔2026-10-01 · 终端界面 · 会话 sess_X〕"
+    "- [U2] 甲 (recorded 2026-10-01 · tui · session sess_X)"
   );
-  const parsed = parseMemory("- [U1] 〔不是来处〕的内容\n", "user");
+  for (const content of [
+    "〔不是来处〕的内容",
+    "(不是来处) 的内容",
+    "用 pnpm (不用 npm)",
+    "见 (recorded 2026-10-01 · tui · session sess_X) 之前的写法",
+  ]) {
+    const parsed = parseMemory(`- [U1] ${content}\n`, "user");
+    assert.ok(parsed.ok, content);
+    assert.deepEqual(parsed.doc.entries, [{ id: 1, content }], content);
+  }
+});
+
+test("日常解析只认新格式：旧的〔〕尾巴整段算内容，不取出来处", () => {
+  const legacy = "- [P1] 甲 〔2026-10-01 · 终端界面 · 会话 sess_X〕";
+  const parsed = parseMemory(`${legacy}\n`, "project");
   assert.ok(parsed.ok);
-  assert.deepEqual(parsed.doc.entries, [{ id: 1, content: "〔不是来处〕的内容" }]);
+  assert.deepEqual(parsed.doc.entries, [
+    { id: 1, content: "甲 〔2026-10-01 · 终端界面 · 会话 sess_X〕" },
+  ]);
+});
+
+test("内容本身以形如尾巴的文字结尾：工具补的尾巴在最后，解析取最后一段，内容逐字取回；往返不变", () => {
+  const tricky = [
+    "旧写法是 (recorded 2026-09-01 · cli · session sess_OLD)",
+    "(recorded 2026-09-01 · tui · session sess_OLD)",
+    "括号没闭合 (recorded 2026-09-01 · tui · session",
+    "多段 (a) (b) (recorded 2026-09-01 · x · session y) (c)",
+    "〔2026-10-01 · 终端界面 · 会话 sess_Y〕",
+  ];
+  for (const content of tricky) {
+    const entry = {
+      id: 7,
+      content,
+      origin: { date: "2026-10-12", source: "tui", sessionId: "sess_NOW" },
+    };
+    const line = serializeEntry(entry, "project");
+    assert.ok(line.endsWith(" (recorded 2026-10-12 · tui · session sess_NOW)"), line);
+    const parsed = parseMemory(`${line}\n`, "project");
+    assert.ok(parsed.ok, line);
+    assert.deepEqual(parsed.doc.entries, [entry], line);
+    assert.equal(serializeMemory(parsed.doc, "project"), `${line}\n`);
+  }
+});
+
+test("没有尾巴的人手条目以形如尾巴的文字结尾：按尾巴读出，写回逐字相同（文字不变、推送不变）", () => {
+  const text = "- [P2] 人手写的 (recorded 2026-10-01 · wiki · session 无)\n";
+  const parsed = parseMemory(text, "project");
+  assert.ok(parsed.ok);
+  assert.deepEqual(parsed.doc.entries, [
+    { id: 2, content: "人手写的", origin: { date: "2026-10-01", source: "wiki", sessionId: "无" } },
+  ]);
+  assert.equal(serializeMemory(parsed.doc, "project"), text);
+  assert.equal(renderForWrite(parsed.doc, "project"), text);
+});
+
+test("文件头为英文：标题与一行注释，说明一行一条的写法", () => {
+  assert.equal(
+    MEMORY_FILE_HEADERS.project,
+    "# Learned memory (this project)\n" +
+      "<!-- Maintained by Pigeon's update_memory; you can also edit it with /memory edit project in the terminal UI. One entry per line: ID and content, followed by (recorded date · source · session ID). -->\n" +
+      "\n"
+  );
+  assert.equal(
+    MEMORY_FILE_HEADERS.user,
+    "# Learned memory (all projects)\n" +
+      "<!-- Maintained by Pigeon's update_memory; you can also edit it with /memory edit user in the terminal UI. One entry per line: ID and content, followed by (recorded date · source · session ID). -->\n" +
+      "\n"
+  );
 });
 
 test("已用字符：只计条目区、按码点计、每条连同结尾换行；文件头不计", () => {

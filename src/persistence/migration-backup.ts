@@ -2,10 +2,20 @@
 // （项目按规范化路径分目录，见路径模块），原名不变；仓库里不留备份，含 key 的旧文件不进快照、沙箱容器、worker 工作树与提交。
 // 一般原文照挪；含 key 的旧文件（web.json）由调用方给出去掉 key 的内容写进备份，原文件删掉，备份里也不留 key 的值。
 // 迁移的各步共用这一组函数（钩子一段的 verify.json、记忆一段的 memory-review.json 与旧记忆同样经它备份）。
-import { cpSync, existsSync, mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
+// 决策 431：学到的记忆的旧格式文件在第一次被读到时一次性改写，改写前把原文复制进备份目录（原文件留在原处、随即被改写）；
+// 项目级进本项目的目录，用户级进 user/ 目录。
+import {
+  cpSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
-import { migrationBackupDirOf } from "../state/paths.ts";
+import { migrationBackupDirOf, userMigrationBackupDirOf } from "../state/paths.ts";
 import { normalizeProjectPath } from "./config-trust-store.ts";
 
 export class MigrationBackupError extends Error {}
@@ -13,6 +23,11 @@ export class MigrationBackupError extends Error {}
 // 本项目的备份目录（迁移结束打印给人看）
 export function migrationBackupLocation(root: string, homeDir: string = homedir()): string {
   return migrationBackupDirOf(normalizeProjectPath(root), homeDir);
+}
+
+// 不属于某个项目的用户级文件的备份目录（决策 431）
+export function userMigrationBackupLocation(homeDir: string = homedir()): string {
+  return userMigrationBackupDirOf(homeDir);
 }
 
 // 某个旧文件（相对 .pigeon 的名字）的备份位置
@@ -68,4 +83,23 @@ export function writeRedactedMigrationBackup(
   writeFileSync(target, text, { flag: "wx", mode: 0o600 });
   rmSync(source);
   return target;
+}
+
+// 把旧文件的原文（调用方读到的字节）复制进备份目录，原文件留在原处（决策 431：调用方随即把它改写成新格式）；返回备份位置。
+// 不覆盖已有备份：同名备份已在时，内容与这份原文相同即沿用（同一份旧文件重试迁移不多留副本），不同则依次改用
+// 「名字.1.扩展名」「名字.2.扩展名」……
+export function copyToMigrationBackup(dir: string, name: string, bytes: Uint8Array): string {
+  const ext = path.extname(name);
+  const stem = name.slice(0, name.length - ext.length);
+  for (let index = 0; ; index += 1) {
+    const target = path.join(dir, index === 0 ? name : `${stem}.${index}${ext}`);
+    mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });
+    try {
+      writeFileSync(target, bytes, { flag: "wx", mode: 0o600 });
+      return target;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      if (Buffer.from(bytes).equals(readFileSync(target))) return target;
+    }
+  }
 }

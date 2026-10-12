@@ -3,11 +3,17 @@
 // - 位置：项目级在治理根的 .pigeon/state/memory.md，用户级在 ~/.pigeon/state/memory.md（主目录可注入，测试指到临时目录）。
 // - 锁：同一层的多个写入方（并行的会话、/memory edit）靠一把独占锁串行；写满判定在锁内做，拿到锁后现读现判。
 //   锁被占时等它释放（写一次只需几毫秒），等满仍拿不到即报错；/memory edit 保存时不设上限，可由人取消。
+//   同步的读路径（旧格式的一次性迁移，决策 431）只试一次、不等（tryMemoryLock）。
+// - 迁移备份（决策 431）：项目级进用户级本项目的迁移备份目录，用户级进 user/ 目录（见 persistence/migration-backup.ts）。
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 import { writeFileAtomic } from "../persistence/atomic-write.ts";
 import { acquireExclusiveLock, ExclusiveLockError } from "../persistence/exclusive-lock.ts";
+import {
+  migrationBackupLocation,
+  userMigrationBackupLocation,
+} from "../persistence/migration-backup.ts";
 import { sha256Hex } from "../state/hashing.ts";
 import {
   projectMemoryLockPathOf,
@@ -21,32 +27,41 @@ import { MEMORY_DISPLAY_PATHS, type MemoryLayer } from "./learned.ts";
 const LOCK_WAIT_MS = 10_000;
 const LOCK_POLL_MS = 20;
 
-// 一层的位置：文件、锁与展示写法
+// 一层的位置：文件、锁、展示写法与旧格式迁移时的备份目录（决策 431）
 export interface MemoryLocation {
   layer: MemoryLayer;
   file: string;
   lock: string;
   display: string;
+  backupDir: string;
 }
+
+// 备份目录里的名字（相对 .pigeon 的写法，两层相同、目录不同）
+export const MEMORY_BACKUP_NAME = path.join("state", "memory.md");
+
+// 记忆锁被占时报错里的说法
+const MEMORY_LOCK_DETAIL = "学到的记忆正被另一处写入";
 
 export function memoryLocation(
   layer: MemoryLayer,
   input: { governanceRoot: string; homeDir?: string }
 ): MemoryLocation {
+  const home = input.homeDir ?? homedir();
   if (layer === "project") {
     return {
       layer,
       file: projectMemoryPathOf(input.governanceRoot),
       lock: projectMemoryLockPathOf(input.governanceRoot),
       display: MEMORY_DISPLAY_PATHS.project,
+      backupDir: migrationBackupLocation(input.governanceRoot, home),
     };
   }
-  const home = input.homeDir ?? homedir();
   return {
     layer,
     file: userMemoryPathOf(home),
     lock: userMemoryLockPathOf(home),
     display: MEMORY_DISPLAY_PATHS.user,
+    backupDir: userMigrationBackupLocation(home),
   };
 }
 
@@ -89,6 +104,11 @@ export function writeMemoryMaxId(file: string, id: number): void {
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
+// 只试一次、不等：拿到即返回释放函数；锁被占（ExclusiveLockError）或建不了锁文件即抛错。同步的读路径用
+export function tryMemoryLock(lockPath: string): () => void {
+  return acquireExclusiveLock(lockPath, MEMORY_LOCK_DETAIL);
+}
+
 // 等锁途中被取消（signal 触发）：没有拿到锁，work 没有执行
 export class MemoryLockAbortedError extends Error {}
 
@@ -114,7 +134,7 @@ export async function withMemoryLock<T>(
     }
     let release: (() => void) | undefined;
     try {
-      release = acquireExclusiveLock(lockPath, "学到的记忆正被另一处写入");
+      release = acquireExclusiveLock(lockPath, MEMORY_LOCK_DETAIL);
     } catch (error) {
       if (!(error instanceof ExclusiveLockError) || Date.now() >= deadline) {
         throw error;

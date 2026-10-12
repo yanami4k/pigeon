@@ -195,6 +195,12 @@ export function migrationBackupDirOf(normalizedRoot: string, homeDir: string = h
   );
 }
 
+// 不属于某个项目的用户级文件的迁移备份（决策 431：用户级学到的记忆的一次性迁移）：同一目录下的 user/。
+// 项目的目录名总带"-哈希"后缀，与它不相撞
+export function userMigrationBackupDirOf(homeDir: string = homedir()): string {
+  return path.join(userStateDir(homeDir), "migration-backup", "user");
+}
+
 // 会执行命令的配置的内容指纹记录（决策 326 ③）
 export function configTrustPathOf(homeDir: string = homedir()): string {
   return path.join(userStateDir(homeDir), "config-trust.json");

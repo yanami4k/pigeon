@@ -1,9 +1,18 @@
-// 记忆工具 update_memory（决策 328、329、331、332、428）：说明、参数与返回文字为记忆文字 v4；两层各自增、按编号替换与删除；
+// 记忆工具 update_memory（决策 328、329、331、332、428）：说明、参数与返回文字为记忆文字 v5；两层各自增、按编号替换与删除；
 // 编号、日期、来源与会话编号由工具补在行内；新增被拒与替换被拒分开写、数字准确；替换后不比替换前长即放行；写满判定在锁内；
 // 人改坏格式时拒写并指出行号；写入后经 onWritten 交出一行提示；等锁超时按固定文字回话；两个进程同时写同一层，条目不丢不重。
+// 决策 431：尾巴为英文 (recorded 日期 · 来源短名 · session 会话号)，内容里的括号原样；锁内读到旧格式先迁移再写。
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "vitest";
@@ -24,8 +33,8 @@ import {
 
 const SESSION = "sess_01TEST";
 const TODAY = new Date(2026, 9, 1, 12, 0);
-// 工具补在行尾的来处（终端界面、本会话、2026-10-01）
-const ORIGIN = ` 〔2026-10-01 · 终端界面 · 会话 ${SESSION}〕`;
+// 工具补在行尾的来处（终端界面、本会话、2026-10-01；决策 431 的英文写法，来源取短名 tui）
+const ORIGIN = ` (recorded 2026-10-01 · tui · session ${SESSION})`;
 
 interface Fixture {
   root: string;
@@ -87,7 +96,7 @@ function assertIncludesAll(text: string, fragments: readonly string[]): void {
 
 // 说明与参数说明全仓只在这里逐字检查：守"改这段文字必须升 MEMORY_TEXT_VERSION"（版本号进跑批身份，文字一改即换条件）。
 // 例外（决策 383）："新增前去重"与"纠正过时条目"两句不升版本——跑批不注册 update_memory，说明的变化到不了跑批
-test("工具说明与参数说明为记忆文字 v4：两层、只写内容、取向、写满时新增或改长都会被拒绝；新增前去重与纠正过时条目（383，不升版本）", () => {
+test("工具说明与参数说明为记忆文字 v5：两层、只写内容、取向、写满时新增或改长都会被拒绝；新增前去重与纠正过时条目（383，不升版本）", () => {
   assert.equal(
     UPDATE_MEMORY_DESCRIPTION,
     "Add, rewrite, or delete learned memory entries. Memory has two layers: project applies only to this project (.pigeon/state/memory.md), and user applies to all projects (~/.pigeon/state/memory.md). This tool only writes and does not read: both layers are already in the startup status.\n" +
@@ -157,11 +166,11 @@ test("新增、替换、删除：两层各写各的文件；工具补编号、�
     assert.equal(user.text, `Added U1 to the user memory (now ${u1}/4000 characters).`);
     assert.equal(fx.file("user"), join(fx.home, ".pigeon", "state", "memory.md"));
     assert.equal(fx.read("user"), `${MEMORY_FILE_HEADERS.user}- [U1] 回复用中文${ORIGIN}\n`);
-    // 内容里的换行并成一个空格，〔〕换成普通括号（〔〕留给来处）
+    // 内容里的换行并成一个空格；括号原样（决策 431 起不再替换〔〕）
     await fx.call({ action: "add", content: "设计文档\n在〔内部〕wiki" });
-    assert.match(fx.read("project"), /- \[P2\] 设计文档 在（内部）wiki 〔/);
+    assert.ok(fx.read("project").includes(`- [P2] 设计文档 在〔内部〕wiki${ORIGIN}\n`));
     const replaced = await fx.call({ action: "replace", id: "p1", content: "提交信息用英文" });
-    const p2 = lineChars("P2", "设计文档 在（内部）wiki");
+    const p2 = lineChars("P2", "设计文档 在〔内部〕wiki");
     const p1b = lineChars("P1", "提交信息用英文");
     assert.equal(
       replaced.text,
@@ -179,9 +188,9 @@ test("新增、替换、删除：两层各写各的文件；工具补编号、�
     assert.deepEqual(fx.notices.map(memoryWriteNoticeLine), [
       "[记忆] 已记下（项目级 P1）：提交信息用英文祈使句",
       "[记忆] 已记下（用户级 U1）：回复用中文",
-      "[记忆] 已记下（项目级 P2）：设计文档 在（内部）wiki",
+      "[记忆] 已记下（项目级 P2）：设计文档 在〔内部〕wiki",
       "[记忆] 已改写（项目级 P1）：提交信息用英文",
-      "[记忆] 已删除（项目级 P2）：设计文档 在（内部）wiki",
+      "[记忆] 已删除（项目级 P2）：设计文档 在〔内部〕wiki",
       "[记忆] 已记下（项目级 P3）：另一条",
     ]);
   }));
@@ -196,7 +205,7 @@ test("新增被拒（328）：写明当前用量、该条字数与还差多少�
     const used = a + b;
     const needed = lineChars("P3", "丙丙丙丙丙丙丙😀");
     const full = await fx.call({ action: "add", content: "丙丙丙丙丙丙丙😀" }, { project: limit });
-    // 写满被拒的文字属记忆文字 v4，全仓只在这里逐字检查：守"改这段文字必须升 MEMORY_TEXT_VERSION"
+    // 写满被拒的文字属记忆文字 v5，全仓只在这里逐字检查：守"改这段文字必须升 MEMORY_TEXT_VERSION"
     assert.equal(
       full.text,
       `The project memory is full, so this entry was not added: currently ${used}/${limit} characters; this entry needs ${needed} characters (including the ID, date, source, and session ID the tool adds), ${used + needed - limit} characters more than is left. Shorten this entry, or first merge similar entries with replace and delete outdated ones with remove, then add it. Existing entries (ID: characters): P1: ${a}, P2: ${b}.`
@@ -222,7 +231,7 @@ test("替换被拒（328）：写明被替换条目现有字数、新内容字�
       { action: "replace", id: "P1", content: "甲甲甲甲甲甲" },
       { project: limit }
     );
-    // 写满被拒的文字属记忆文字 v4，全仓只在这里逐字检查：守"改这段文字必须升 MEMORY_TEXT_VERSION"
+    // 写满被拒的文字属记忆文字 v5，全仓只在这里逐字检查：守"改这段文字必须升 MEMORY_TEXT_VERSION"
     assert.equal(
       rejected.text,
       `Replacing would exceed the project memory limit, so P1 was not replaced: P1 currently has ${a} characters, the new content has ${newChars} characters (including the ID, date, source, and session ID the tool adds), and after replacing the total would be ${after}/${limit} characters, ${after - limit} characters over. Shorten the new content by at least ${after - limit} characters, or first delete other outdated entries with remove, then replace it. Existing entries (ID: characters): P1: ${a}, P2: ${b}.`
@@ -380,7 +389,84 @@ test("人改坏格式：拒绝写入并指出文件与行号，文件原样不�
 test("Unicode 行分隔符也折叠：\\u2028 与 \\u2029 当换行并成一个空格", () =>
   withFixture(async (fx) => {
     await fx.call({ action: "add", content: "第一段\u2028第二段\u2029第三段" });
-    assert.match(fx.read("project"), /- \[P1\] 第一段 第二段 第三段 〔/);
+    assert.ok(fx.read("project").includes(`- [P1] 第一段 第二段 第三段${ORIGIN}\n`));
+  }));
+
+test("内容本身以形如尾巴的文字结尾：工具照常补真尾巴，读回的内容逐字不变，不误当来处", () =>
+  withFixture(async (fx) => {
+    const content = "旧条目写成 (recorded 2026-09-01 · cli · session sess_OLD)";
+    await fx.call({ action: "add", content });
+    assert.equal(fx.read("project"), `${MEMORY_FILE_HEADERS.project}- [P1] ${content}${ORIGIN}\n`);
+    const parsed = parseMemory(fx.read("project"), "project");
+    assert.ok(parsed.ok);
+    assert.deepEqual(parsed.doc.entries, [
+      {
+        id: 1,
+        content,
+        origin: { date: "2026-10-01", source: "tui", sessionId: SESSION },
+      },
+    ]);
+    // 同样的内容再加一次：按内容判重
+    assert.equal((await fx.call({ action: "add", content })).details.rejected, "duplicate");
+  }));
+
+test("来源取英文短名：命令行对话记为 cli", () =>
+  withFixture(async (fx) => {
+    await applyMemoryUpdate(
+      {
+        governanceRoot: fx.root,
+        homeDir: fx.home,
+        sessionId: SESSION,
+        source: "line",
+        limits: { project: 4000, user: 4000 },
+        now: () => TODAY,
+      },
+      { action: "add", layer: "user", content: "回复用中文" }
+    );
+    assert.equal(
+      fx.read("user"),
+      `${MEMORY_FILE_HEADERS.user}- [U1] 回复用中文 (recorded 2026-10-01 · cli · session ${SESSION})\n`
+    );
+  }));
+
+// 决策 431 之前的旧格式
+const LEGACY_PROJECT =
+  "# 学到的记忆（本项目）\n" +
+  "<!-- 由 Pigeon 的 update_memory 维护，也可以用终端界面的 /memory edit project 修改。一行一条：编号、内容，〔〕里是记下的日期、来源与会话编号。 -->\n" +
+  "\n" +
+  "- [P1] 甲 〔2026-09-30 · 命令行对话 · 会话 sess_OLD〕\n" +
+  "- [P2] 人手加的\n";
+
+test("锁内读到旧格式（推送时没能迁移）：先备份、整份改写成新格式，再照常写入；之后不再备份", () =>
+  withFixture(async (fx) => {
+    const location = memoryLocation("project", { governanceRoot: fx.root, homeDir: fx.home });
+    mkdirSync(dirname(location.file), { recursive: true });
+    writeFileSync(location.file, LEGACY_PROJECT);
+    await fx.call({ action: "add", content: "乙" });
+    assert.equal(
+      fx.read("project"),
+      `${MEMORY_FILE_HEADERS.project}` +
+        "- [P1] 甲 (recorded 2026-09-30 · cli · session sess_OLD)\n" +
+        "- [P2] 人手加的\n" +
+        `- [P3] 乙${ORIGIN}\n`
+    );
+    const backup = join(location.backupDir, "state", "memory.md");
+    assert.equal(readFileSync(backup, "utf8"), LEGACY_PROJECT);
+    await fx.call({ action: "remove", id: "P3" });
+    assert.deepEqual(readdirSync(join(location.backupDir, "state")), ["memory.md"]);
+  }));
+
+test("锁内读到旧格式而备份不成：照常抛出、不写文件（没有备份时不覆盖旧文件）", () =>
+  withFixture(async (fx) => {
+    const location = memoryLocation("project", { governanceRoot: fx.root, homeDir: fx.home });
+    mkdirSync(dirname(location.file), { recursive: true });
+    writeFileSync(location.file, LEGACY_PROJECT);
+    // 备份目录的位置被一个普通文件占着：建不了目录
+    mkdirSync(dirname(location.backupDir), { recursive: true });
+    writeFileSync(location.backupDir, "占位");
+    await assert.rejects(fx.call({ action: "add", content: "乙" }));
+    assert.equal(fx.read("project"), LEGACY_PROJECT);
+    assert.equal(fx.notices.length, 0);
   }));
 
 // 子进程：等开跑文件出现后，向同一项目级记忆连续新增若干条（argv：被测模块、治理根、主目录、标签、条数、开跑文件）

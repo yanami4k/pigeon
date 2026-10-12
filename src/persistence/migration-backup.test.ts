@@ -1,5 +1,5 @@
 // 迁移备份（决策 341）：旧文件挪进用户级 ~/.pigeon/state/migration-backup/ 下本项目的目录，原文不变、仓库里不留；
-// 已有同名备份时不覆盖；经符号链接打开的同一项目落到同一目录。用户主目录一律指到临时目录。
+// 已有同名备份时不覆盖；经符号链接打开的同一项目落到同一目录；记忆迁移的复制备份（决策 431）。用户主目录一律指到临时目录。
 import assert from "node:assert/strict";
 import {
   existsSync,
@@ -15,10 +15,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, test } from "vitest";
 import {
+  copyToMigrationBackup,
   MigrationBackupError,
   migrationBackupConflict,
   migrationBackupLocation,
   moveToMigrationBackup,
+  userMigrationBackupLocation,
 } from "./migration-backup.ts";
 
 const made: string[] = [];
@@ -73,4 +75,23 @@ test.skipIf(NO_SYMLINKS)("经符号链接打开的同一项目落到同一备份
   const link = join(temp("pigeon-backup-link-"), "via");
   symlinkSync(root, link);
   assert.equal(migrationBackupLocation(link, home), migrationBackupLocation(root, home));
+});
+
+test("复制进备份（决策 431）：原文件不动；同名备份已在时不覆盖——内容相同即沿用，不同则依次另取 .1、.2", () => {
+  const home = temp("pigeon-backup-home-");
+  const dir = userMigrationBackupLocation(home);
+  assert.equal(dir, join(home, ".pigeon", "state", "migration-backup", "user"));
+  const name = join("state", "memory.md");
+  const first = copyToMigrationBackup(dir, name, Buffer.from("旧一"));
+  assert.equal(first, join(dir, "state", "memory.md"));
+  assert.equal(copyToMigrationBackup(dir, name, Buffer.from("旧一")), first, "相同即沿用");
+  const second = copyToMigrationBackup(dir, name, Buffer.from("旧二"));
+  assert.equal(second, join(dir, "state", "memory.1.md"));
+  const third = copyToMigrationBackup(dir, name, Buffer.from("旧三"));
+  assert.equal(third, join(dir, "state", "memory.2.md"));
+  assert.equal(copyToMigrationBackup(dir, name, Buffer.from("旧二")), second);
+  assert.deepEqual(
+    [first, second, third].map((file) => readFileSync(file, "utf8")),
+    ["旧一", "旧二", "旧三"]
+  );
 });
