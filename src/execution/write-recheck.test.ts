@@ -106,7 +106,8 @@ for (const kind of ["local", "container"] as const) {
           await assert.rejects(
             () => edit(host),
             (error: unknown) =>
-              error instanceof WorkspaceWriteRefusedError && /路径已变/.test(error.message)
+              error instanceof WorkspaceWriteRefusedError &&
+              /the path changed after it was checked/.test(error.message)
           );
           assert.equal(readFileSync(join(f.outside, "a.txt"), "utf8"), "outside\n");
           assert.equal(readFileSync(join(f.root, "sub-moved", "a.txt"), "utf8"), "old\n");

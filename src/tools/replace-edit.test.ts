@@ -30,7 +30,7 @@ test("replace 编辑：原文唯一时替换并写回；回执以「已在 X 应
       new_string: "BETA",
     });
     assert.equal(readFileSync(join(root, "a.ts"), "utf8"), "alpha\nBETA\ngamma\n");
-    assert.ok(textOf(result).startsWith("已在 a.ts 应用 1 处替换（+1 −1 行）"));
+    assert.ok(textOf(result).startsWith("Applied 1 replacement in a.ts (+1 −1 lines)"));
 
     const multi = await tool.execute("tc-2", {
       path: "a.ts",
@@ -38,7 +38,7 @@ test("replace 编辑：原文唯一时替换并写回；回执以「已在 X 应
       new_string: "delta",
     });
     assert.equal(readFileSync(join(root, "a.ts"), "utf8"), "alpha\ndelta\n");
-    assert.ok(textOf(multi).startsWith("已在 a.ts 应用 1 处替换（+1 −2 行）"));
+    assert.ok(textOf(multi).startsWith("Applied 1 replacement in a.ts (+1 −2 lines)"));
   } finally {
     cleanup();
   }
@@ -54,27 +54,28 @@ test("replace 编辑：未找到、不唯一（出现次数与各处起始行号
       (error: unknown) =>
         error instanceof Error &&
         error.message.startsWith(
-          "未找到 old_string：请重新 read_file 核对原文，含缩进与空白，不要带行号前缀"
+          "old_string not found: read the file again with read_file and check the original text, " +
+            "including indentation and whitespace, without the line-number prefix"
         )
     );
     await assert.rejects(
       () => tool.execute("tc-2", { path: "a.ts", old_string: "x = 1", new_string: "x = 9" }),
       (error: unknown) =>
         error instanceof Error &&
-        error.message.startsWith("old_string 不唯一") &&
-        error.message.includes("出现 2 次") &&
-        error.message.includes("起始行 1、3") &&
-        error.message.includes("上下文")
+        error.message.startsWith("old_string is not unique") &&
+        error.message.includes("appears 2 times") &&
+        error.message.includes("starting at lines 1, 3") &&
+        error.message.includes("surrounding context")
     );
     await assert.rejects(
       () => tool.execute("tc-3", { path: "a.ts", old_string: "y = 2", new_string: "y = 2" }),
       (error: unknown) =>
-        error instanceof Error && error.message.startsWith("编辑没有产生任何实际变化")
+        error instanceof Error && error.message.startsWith("The edit makes no actual change")
     );
     // 精确匹配、不做空白宽松：缩进不同即未找到
     await assert.rejects(
       () => tool.execute("tc-4", { path: "a.ts", old_string: "  y = 2", new_string: "y = 3" }),
-      (error: unknown) => error instanceof Error && error.message.startsWith("未找到 old_string")
+      (error: unknown) => error instanceof Error && error.message.startsWith("old_string not found")
     );
     assert.equal(readFileSync(join(root, "a.ts"), "utf8"), original);
   } finally {
@@ -163,12 +164,13 @@ test("replace 编辑多处：顺序不限、逐段回执与审批 diff；同一�
     const text = textOf(result);
     assert.ok(
       text.startsWith(
-        "已在 a.txt 应用 2 处替换（+2 −2 行），共 2 段\n第 1 段；删去处在新文件第 2 行之前"
+        "Applied 2 replacements in a.txt (+2 −2 lines); 2 changed regions\n" +
+          "Region 1: deleted before line 2 of the new file"
       ),
       text
     );
     assert.ok(
-      text.includes("第 2 段；新文件第 7–8 行：\n5| l6\n6| l7\n7| L8a\n8| L8b\n9| l9"),
+      text.includes("Region 2: lines 7–8 of the new file:\n5| l6\n6| l7\n7| L8a\n8| L8b\n9| l9"),
       text
     );
     assert.equal((result.details.diff.match(/^@@ /gm) ?? []).length, 2);
@@ -181,7 +183,11 @@ test("replace 编辑多处：顺序不限、逐段回执与审批 diff；同一�
       ],
     });
     assert.equal(readFileSync(join(root, "b.ts"), "utf8"), "foo(x, y)\n");
-    assert.ok(textOf(same).startsWith("已在 b.ts 应用 2 处替换（+1 −1 行）；新文件第 1–1 行"));
+    assert.ok(
+      textOf(same).startsWith(
+        "Applied 2 replacements in b.ts (+1 −1 lines); lines 1–1 of the new file"
+      )
+    );
   } finally {
     cleanup();
   }
@@ -200,35 +206,35 @@ test("replace 编辑多处：任一处不通过、交叠或两种写法混用，
         { old_string: "x = 1", new_string: "q = 1" },
         { old_string: "q = 1", new_string: "r" },
       ],
-      / edits\[1\] 未找到 old_string：.*按改动前的原文定位/
+      /: old_string not found in edits\[1\]: .*located in the original text before any change/
     );
     await rejects(
       [
         { old_string: "y = 2", new_string: "Y" },
         { old_string: " = ", new_string: "==" },
       ],
-      / edits\[1\] old_string 不唯一：在 a\.ts 中出现 3 次/
+      /: old_string is not unique in edits\[1\]: it appears 3 times in a\.ts/
     );
     await rejects(
       [
         { old_string: "y = 2", new_string: "Y" },
         { old_string: "z = 3", new_string: "z = 3" },
       ],
-      / edits\[1\] 编辑没有产生任何实际变化/
+      /: The edit makes no actual change in edits\[1\]/
     );
     await rejects(
       [
         { old_string: "y = 2", new_string: "b" },
         { old_string: "x = 1\ny", new_string: "a" },
       ],
-      / edits\[0\] 与 edits\[1\] 的 old_string 在原文里交叠/
+      /The old_string of edits\[0\] and edits\[1\] overlap in the original text/
     );
     await rejects(
       [
         { old_string: "z = 3", new_string: "Z" },
         { old_string: "z = 3", new_string: "W" },
       ],
-      /交叠/
+      /overlap/
     );
     await assert.rejects(
       () =>
@@ -238,11 +244,11 @@ test("replace 编辑多处：任一处不通过、交叠或两种写法混用，
           new_string: "X",
           edits: [{ old_string: "y = 2", new_string: "Y" }],
         }),
-      /二选一/
+      /Use either edits or the top-level old_string and new_string, not both/
     );
     await assert.rejects(
       () => tool.execute("tc", { path: "a.ts" }),
-      /缺少 old_string 或 new_string/
+      /Missing old_string or new_string/
     );
     assert.equal(readFileSync(join(root, "a.ts"), "utf8"), original);
   } finally {

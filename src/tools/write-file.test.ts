@@ -61,14 +61,16 @@ test("覆盖已存在的文件：没读过拒写；读过（分段读也算）�
     const { read, write } = tools(root);
     await assert.rejects(
       () => write.execute("w1", { path: "f.txt", content: "x\n" }),
-      (error: unknown) => error instanceof WriteFileError && /读过它/.test(error.message)
+      (error: unknown) =>
+        error instanceof WriteFileError &&
+        /already exists: read it with read_file in this session/.test(error.message)
     );
     assert.equal(readFileSync(file, "utf8"), "1\n2\n3\n");
     await read.execute("r1", { path: "f.txt", offset: 2, limit: 1 });
     writeFileSync(file, "changed\n");
     await assert.rejects(
       () => write.execute("w2", { path: "f.txt", content: "x\n" }),
-      /在你读过之后被改过/
+      /has changed since you read it/
     );
     assert.equal(readFileSync(file, "utf8"), "changed\n");
     await read.execute("r2", { path: "f.txt" });
@@ -98,7 +100,7 @@ test("长命令（4000 字符以上）照常执行", () =>
       command: `node -e "console.log('${payload}'.length)"`,
     });
     const text = result.content.map((block) => ("text" in block ? block.text : "")).join("");
-    assert.match(text, /退出码：0\n20000/);
+    assert.match(text, /Exit code: 0\n20000/);
   }));
 
 test("路径含换行或其他控制字符一律拒写，什么也不建", () =>
@@ -182,7 +184,8 @@ test("放权时 write_file 与 edit_file（两种模式）可写工作区以外�
       });
       const closed = toolsWith(false);
       const refused = (error: unknown) =>
-        error instanceof WorkspacePathError && /越出工作区根/.test(error.message);
+        error instanceof WorkspacePathError &&
+        /Path is outside the workspace root/.test(error.message);
       await assert.rejects(
         () => closed.write.execute("w", { path: created, content: "x" }),
         refused
@@ -217,11 +220,17 @@ test("失败的读取不算读过；读后未变按文件字节判断（不同�
     writeFileSync(join(root, "f.txt"), "1\n");
     const { read, write } = tools(root);
     await assert.rejects(() => read.execute("r", { path: "f.txt", offset: 9 }));
-    await assert.rejects(() => write.execute("w", { path: "f.txt", content: "x" }), /读过它/);
+    await assert.rejects(
+      () => write.execute("w", { path: "f.txt", content: "x" }),
+      /read it with read_file in this session before overwriting it/
+    );
     writeFileSync(join(root, "bin.txt"), Buffer.from([0x61, 0xff, 0x0a]));
     await read.execute("r2", { path: "bin.txt" });
     writeFileSync(join(root, "bin.txt"), Buffer.from([0x61, 0xfe, 0x0a]));
-    await assert.rejects(() => write.execute("w2", { path: "bin.txt", content: "x" }), /被改过/);
+    await assert.rejects(
+      () => write.execute("w2", { path: "bin.txt", content: "x" }),
+      /has changed since you read it/
+    );
   }));
 
 test("审批预览按行比对：分散的两处改动各成一段", () => {

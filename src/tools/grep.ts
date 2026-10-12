@@ -10,6 +10,7 @@ import type { CommandOutputStore } from "./command-output.ts";
 import { basenamePrefilter, fileFilter } from "./glob-match.ts";
 import {
   detectSearchBackend,
+  filesText,
   type GrepRecord,
   inGitDir,
   MAX_LINE_CHARS,
@@ -76,20 +77,25 @@ export const GREP_OUTPUT_BUDGET = 16_000;
 
 export function grepDescription(maxResults: number): string {
   return (
-    "在工作区内按正则搜索文件内容（优先用 ripgrep）。缺省遵守 .gitignore、跳过 .git，含隐藏文件。" +
-    "pattern 为正则；path 只搜这个目录或文件（缺省整个工作区）；glob 只搜文件名匹配的文件" +
-    "（如 *.ts；含 / 时按相对 path 的路径匹配，如 src/**/*.ts）；context 每处匹配前后各带几行；" +
-    "files_only 只列出有匹配的文件；ignore_case 忽略大小写。" +
-    "结果按文件分组、按路径排序：每个文件先写一行路径，其下逐行「行号: 内容」（上下文行为「行号- 内容」），" +
-    `文件之间空一行。最多列 ${maxResults} 条（files_only 时为文件数），超出时给出总数，请缩小范围再搜；` +
-    `单行超过 ${MAX_LINE_CHARS} 字符截断；列出的部分超过 ${GREP_OUTPUT_BUDGET} 字时只给前面一部分，全文另存可读。` +
-    "宽泛的搜索先用 files_only 只列文件，再按文件细查。" +
-    "pattern 用扩展正则（ERE）写法最稳：\\d、\\w 等简写在部分环境不支持，可写成 [0-9]、[A-Za-z0-9_]。"
+    "Searches file contents in the workspace by regular expression (using ripgrep when available). " +
+    "By default it respects .gitignore, skips .git, and includes hidden files. " +
+    "pattern is the regular expression; path limits the search to that directory or file (default: the whole workspace); " +
+    "glob limits it to files whose names match (such as *.ts; with a /, it matches the path relative to path, " +
+    "such as src/**/*.ts); context adds that many lines before and after each match; files_only lists only the files " +
+    "with matches; ignore_case ignores case. " +
+    "Results are grouped by file and sorted by path: each file starts with a line giving its path, followed by " +
+    '"lineNumber: content" lines (context lines are "lineNumber- content"), with a blank line between files. ' +
+    `At most ${maxResults} matches are listed (files, with files_only); beyond that, the total is given, so narrow the search and try again. ` +
+    `Lines longer than ${MAX_LINE_CHARS} characters are truncated. If the listed part exceeds ${GREP_OUTPUT_BUDGET} characters, ` +
+    "only the first part is given, and the full result is saved where you can read it. " +
+    "For broad searches, list the files first with files_only, then look into them one by one. " +
+    "Extended regular expression (ERE) syntax is the safest for pattern: shorthands such as \\d and \\w are not " +
+    "supported everywhere, so write [0-9] and [A-Za-z0-9_] instead."
   );
 }
 
 function clip(text: string): string {
-  return text.length > MAX_LINE_CHARS ? `${text.slice(0, MAX_LINE_CHARS)}…（本行截断）` : text;
+  return text.length > MAX_LINE_CHARS ? `${text.slice(0, MAX_LINE_CHARS)}… [line truncated]` : text;
 }
 
 // 一个文件的结果：路径与其下各行（匹配行、上下文行与不相连的段之间的 --）
@@ -150,7 +156,7 @@ export function backendCache(
     const backend = await detected;
     if (backend === undefined) {
       throw new SearchEnvironmentError(
-        "本环境没有可用的搜索程序（ripgrep、git、grep 都没有）；可改用 run_command"
+        "No search program is available in this environment (none of ripgrep, git, or grep); use run_command instead"
       );
     }
     return backend;
@@ -208,17 +214,18 @@ export function createGrepTool(
       const lead =
         backend.kind === "rg"
           ? []
-          : [`本次用 ${backend.kind === "git" ? "git grep" : "grep -r"} 搜索（扩展正则）`];
+          : [
+              `Searched with ${backend.kind === "git" ? "git grep" : "grep -r"} (extended regular expressions)`,
+            ];
       const countNotes = (total: number, shown: number) =>
         resultNotes({
           total,
           shown,
           incomplete: run.incomplete,
           omitted: run.omitted,
-          unit: filesOnly ? "个文件" : "条匹配",
-          measure: filesOnly ? "个" : "条",
-          none: filesOnly ? "没有匹配的文件" : "没有匹配",
-          narrow: "更具体的 pattern、path 或 glob",
+          unit: filesOnly ? "files" : "matches",
+          none: filesOnly ? "No matching files" : "No matches",
+          narrow: "a more specific pattern, path, or glob",
         });
       const common = { backend: backend.kind, incomplete: run.incomplete };
       // 内容结果：分组的正文与末尾的说明之间空一行
@@ -298,18 +305,20 @@ export function createGrepTool(
         try {
           savedOutput = { uri: options.outputs.save(bytes), bytes: bytes.length };
           archive =
-            `${listed < total ? `前 ${listed} 条匹配的` : ""}全文已存为 ${savedOutput.uri}，` +
-            `可用 read_file 按 offset 读取需要的一段；${VIRTUAL_PATH_HINT}`;
+            `The full result${listed < total ? ` for the first ${listed} matches` : ""} is saved as ${savedOutput.uri}; ` +
+            `read the part you need with read_file using offset; ${VIRTUAL_PATH_HINT}`;
         } catch (error) {
-          archive = `全文未能保存（${error instanceof Error ? error.message : String(error)}）`;
+          archive = `The full result could not be saved (${error instanceof Error ? error.message : String(error)})`;
         }
       }
+      const matches = (count: number) => `${count} match${count === 1 ? "" : "es"}`;
       const totals = run.incomplete
-        ? `至少 ${total} 条匹配、${byFile.size} 个文件（输出过大，未统计完）`
-        : `共 ${total} 条匹配、${byFile.size} 个文件`;
+        ? `At least ${matches(total)} in ${filesText(byFile.size)} (the output was too large to count them all)`
+        : `${matches(total)} in ${filesText(byFile.size)} in total`;
       const budgetNote =
-        `${totals}；列出的部分超过 ${GREP_OUTPUT_BUDGET} 字，上面只列出前 ${fitted.files} 个文件里的 ` +
-        `${fitted.matches} 条。宽泛的搜索请先用 files_only 只列文件，或缩小 path，再按文件细查`;
+        `${totals}; the listing exceeds ${GREP_OUTPUT_BUDGET} characters, so only ${matches(fitted.matches)} ` +
+        `in the first ${filesText(fitted.files)} are shown above. For broad searches, list the files first with ` +
+        "files_only or narrow path, then look into them one by one";
       return {
         content: [
           {

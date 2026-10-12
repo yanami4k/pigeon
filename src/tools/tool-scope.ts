@@ -166,10 +166,13 @@ export function scopePathLinkProblem(workspaceRoot: string, scopePath: string): 
       const real = realOf(path.join(root, scopePath));
       const relative = real !== undefined ? path.relative(root, real) : undefined;
       if (relative === undefined || isOutsideRelative(relative)) {
-        return `范围路径 ${scopePath} 经符号链接指向工作树之外或不存在的位置，不能用作作用范围`;
+        return (
+          `Scope path ${scopePath} goes through a symbolic link to a location outside the worktree or one ` +
+          "that does not exist, so it cannot be used as a scope"
+        );
       }
       const target = relative === "" ? "." : relative.replaceAll("\\", "/");
-      return `范围路径 ${scopePath} 经符号链接指向 ${target}，请改用真实路径 ${target}`;
+      return `Scope path ${scopePath} goes through a symbolic link to ${target}; use the real path ${target} instead`;
     }
   }
   return undefined;
@@ -183,15 +186,15 @@ export function scopeViolation(
 ): string | undefined {
   if (scope.paths !== undefined) {
     const target = (call.args as { path?: unknown } | null)?.path;
-    const allowed = scope.paths.join("、");
+    const allowed = scope.paths.join(", ");
     if (typeof target !== "string" || target === "") {
-      return `本 worker 的 ${scope.tool} 限定了作用范围（${allowed}），调用须给出其中的 path`;
+      return `This worker's ${scope.tool} is limited in scope (${allowed}); the call must give a path within it`;
     }
     if (
       call.workspaceRoot === undefined ||
       !pathWithinScope(call.workspaceRoot, scope.paths, target)
     ) {
-      return `路径 ${target} 不在本 worker 的 ${scope.tool} 作用范围内：只能用于 ${allowed} 之内`;
+      return `Path ${target} is outside the scope of this worker's ${scope.tool}: it can only be used within ${allowed}`;
     }
     return undefined;
   }
@@ -212,8 +215,9 @@ export function scopeViolation(
       return undefined;
     }
     return (
-      `命令不在本 worker 的 ${scope.tool} 作用范围内：只能运行以${scope.commandPrefixes.map((prefix) => `「${prefix}」`).join("、")}开头、` +
-      "不经 shell 的单条命令（不能含管道、重定向、串联、命令替换或换行）"
+      `The command is outside the scope of this worker's ${scope.tool}: it can only run single commands that start with ` +
+      `${scope.commandPrefixes.map((prefix) => `"${prefix}"`).join(", ")} and do not go through a shell ` +
+      "(no pipes, redirection, chaining, command substitution, or line breaks)"
     );
   }
   return undefined;

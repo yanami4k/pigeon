@@ -30,7 +30,7 @@ test("长命令只回显开头并注明共几行或共几字；短命令照旧�
     const firstLine = textOf(multi).split("\n")[0];
     assert.equal(
       firstLine,
-      `$ ${MULTI.split("\n")[0]}（共 31 行，其余已省略，完整命令见本次调用）`
+      `$ ${MULTI.split("\n")[0]} (31 lines; the rest is omitted, the full command is in this call's arguments)`
     );
     assert.ok(!textOf(multi).includes(LINES[29] as string), textOf(multi));
     assert.equal(multi.details.command, MULTI);
@@ -39,7 +39,7 @@ test("长命令只回显开头并注明共几行或共几字；短命令照旧�
     const long = await tool.execute("c2", { command: LONG });
     assert.equal(
       textOf(long).split("\n")[0],
-      `$ ${LONG.slice(0, COMMAND_ECHO_CHARS)}…（共 ${LONG.length} 字，其余已省略，完整命令见本次调用）`
+      `$ ${LONG.slice(0, COMMAND_ECHO_CHARS)}… (${LONG.length} characters; the rest is omitted, the full command is in this call's arguments)`
     );
 
     const short = `${NODE} -e "process.stdout.write('ok')"`;
@@ -50,12 +50,12 @@ test("用了短名时照旧给出展开后的完整命令", () =>
   withRoot(async (root) => {
     const tool = createRunCommandTool({ workspaceRoot: root, commands: { gen: MULTI } });
     const text = textOf(await tool.execute("c1", { command: "gen" }));
-    assert.ok(text.startsWith(`$ ${MULTI}（短名 gen）`), text);
+    assert.ok(text.startsWith(`$ ${MULTI} (short name gen)`), text);
   }));
 
 test("作业列表等处的简短标识：首行至多 80 字，多行注明共几行", () => {
   assert.equal(commandLabel("npm test"), "npm test");
-  assert.equal(commandLabel(`cat > a.py <<'EOF'\nprint(1)\nEOF`), "cat > a.py <<'EOF'…（共 3 行）");
+  assert.equal(commandLabel(`cat > a.py <<'EOF'\nprint(1)\nEOF`), "cat > a.py <<'EOF'… (3 lines)");
   assert.equal(commandLabel("y".repeat(100)), `${"y".repeat(80)}…`);
   // 末尾的换行不算一行，短命令原样
   assert.equal(commandEcho("ls\n"), "ls\n");

@@ -238,7 +238,7 @@ test("deny 清单仍绝对：钩子 allow 与 updatedInput 都不豁免 deny 名
   assert.equal(blocked.kind, "block");
   assert.match(
     blocked.kind === "block" ? blocked.reason : "",
-    /deny 清单精确匹配，任何模式一律拒绝：edit_file/
+    /The tool is on the deny list \(exact match\), which applies in every approval mode: edit_file/
   );
   const decision = h.governance.decisionOf("tc-1");
   assert.equal(decision?.outcome, "rejected");
@@ -260,7 +260,7 @@ test("ask 只收紧不放行：deny 清单工具配 ask 钩子仍被拒绝，不
   const blocked = await h.governance.decide(call("edit_file", { path: "a.ts" }));
   assert.match(
     blocked.kind === "block" ? blocked.reason : "",
-    /deny 清单精确匹配，任何模式一律拒绝：edit_file/
+    /The tool is on the deny list \(exact match\), which applies in every approval mode: edit_file/
   );
   assert.equal(asked, 0);
   const decision = h.governance.decisionOf("tc-1");

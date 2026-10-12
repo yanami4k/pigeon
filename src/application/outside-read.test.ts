@@ -137,7 +137,7 @@ test("放手模式：工作区外读取自动放行并读到内容，家目录�
     ]);
     assert.match(results[0] ?? "", /lib a/);
     assert.match(results[1] ?? "", /\| key$/m);
-    assert.match(results[2] ?? "", /路径越出工作区根/);
+    assert.match(results[2] ?? "", /Path is outside the workspace root/);
     assert.equal(readFileSync(outside, "utf8"), "lib a\n");
   } finally {
     for (const [name, value] of Object.entries(saved)) {

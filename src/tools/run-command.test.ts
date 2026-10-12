@@ -83,7 +83,7 @@ test("执行：参数数组直接 spawn，结果 details 记退出码、输出�
     const result = await tool.execute("tc-1", { command: `${NODE} -e "${script}"` });
     const text = result.content[0];
     assert.ok(
-      text?.type === "text" && text.text.includes("退出码：3") && text.text.includes("你好")
+      text?.type === "text" && text.text.includes("Exit code: 3") && text.text.includes("你好")
     );
 
     const evidence = result.details;
@@ -103,7 +103,7 @@ test("执行：参数数组直接 spawn，结果 details 记退出码、输出�
 });
 
 // 决策 410：超时那一刻命令本身已退出、是它放到后台的进程占着输出时，点明原因并给出做法；命令本身没退出的超时不出这一句
-const HELD = "仍占着输出";
+const HELD = "still held its output open";
 
 test("超时：终止进程并抛环境类错误", async () => {
   await withRoot(async (root) => {
@@ -112,7 +112,9 @@ test("超时：终止进程并抛环境类错误", async () => {
       tool.execute("tc-2", { command: `${NODE} -e "setTimeout(() => {}, 20000)"` }),
       (error: unknown) =>
         error instanceof RunCommandTimeoutError &&
-        /命令超时（300 毫秒）已终止/.test(error.message) &&
+        /The command timed out after 300 ms, and its whole process group was killed/.test(
+          error.message
+        ) &&
         !error.message.includes(HELD)
     );
   });
@@ -142,7 +144,10 @@ test("决策 411：timeout_seconds 超过上限按上限执行，结果里注明
     const quick = await tool.execute("tc-c1", { command: `${NODE} -e "1"`, timeout_seconds: 30 });
     assert.deepEqual(quick.details.timeoutClamped, { requestedSeconds: 30, appliedSeconds: 1 });
     const text = quick.content[0];
-    assert.ok(text?.type === "text" && text.text.includes("夹到上限 1 秒"), JSON.stringify(text));
+    assert.ok(
+      text?.type === "text" && text.text.includes("ran with the maximum of 1 second;"),
+      JSON.stringify(text)
+    );
     // 按上限（1 秒）到时终止，而不是等到给的 30 秒
     await assert.rejects(
       tool.execute("tc-c2", {
@@ -151,8 +156,8 @@ test("决策 411：timeout_seconds 超过上限按上限执行，结果里注明
       }),
       (error: unknown) =>
         error instanceof RunCommandTimeoutError &&
-        error.message.includes("命令超时（1 秒）") &&
-        error.message.includes("夹到上限")
+        error.message.includes("The command timed out after 1 second,") &&
+        error.message.includes("ran with the maximum of")
     );
   });
 });
@@ -178,7 +183,7 @@ test("决策 418：超时超过剩余时间（扣余量）按剩余时间执行�
       tight.execute("tc-b3", { command: `${NODE} -e "setTimeout(() => {}, 20000)"` }),
       (error: unknown) =>
         error instanceof RunCommandTimeoutError &&
-        error.message.includes("命令超时（1 秒）") &&
+        error.message.includes("The command timed out after 1 second,") &&
         error.message.includes(fallback)
     );
     // 上限 2 秒、剩余可用 1 秒：取剩余时间，不报夹到上限
@@ -214,7 +219,7 @@ test("输出按字节截断并标记，哈希按全量输出", async () => {
     assert.equal(evidence.truncated, true);
     assert.equal(evidence.outputHash, sha256("x".repeat(100)));
     const text = result.content[0];
-    assert.ok(text?.type === "text" && text.text.includes("输出已截断：共 100 字节"));
+    assert.ok(text?.type === "text" && text.text.includes("output truncated: 100 bytes in total"));
   });
 });
 
@@ -250,7 +255,7 @@ test("短名与角色允许清单：清单内短名与其展开命令放行，�
     await assert.rejects(
       tool.execute("tc-c", { command: `${NODE} -e "1"` }),
       (error: unknown) =>
-        error instanceof RunCommandError && /不在本角色允许清单内/.test(error.message)
+        error instanceof RunCommandError && /is not on this role's allowlist/.test(error.message)
     );
 
     const preview = await tool.preview({ command: "hello" });
@@ -265,7 +270,8 @@ test("命令不存在：域错误", async () => {
     const tool = createRunCommandTool({ workspaceRoot: root });
     await assert.rejects(
       tool.execute("tc-5", { command: "pigeon-no-such-command-xyz --flag" }),
-      (error: unknown) => error instanceof RunCommandError && /命令不存在/.test(error.message)
+      (error: unknown) =>
+        error instanceof RunCommandError && /Command not found/.test(error.message)
     );
   });
 });

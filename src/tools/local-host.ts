@@ -231,7 +231,7 @@ export function resolveHelperProgram(
 
 // 找不到程序：与启动失败同一形态（spawnError 的 code 为 ENOENT）
 function programNotFound(program: string): HostExecResult {
-  const error: NodeJS.ErrnoException = new Error(`找不到程序：${program}`);
+  const error: NodeJS.ErrnoException = new Error(`Program not found: ${program}`);
   error.code = "ENOENT";
   const empty = createHeadCollector(0).finish();
   return {
@@ -344,7 +344,7 @@ export function createHeadCollector(maxBytes: number, extras: CollectorExtras = 
       // 普通文件也可能只写进一部分（如磁盘将满）：写到全部写完，写不进去即出错
       for (let done = 0; done < piece.length; ) {
         const wrote = writeSync(spill.fd, piece, done);
-        if (wrote <= 0) throw new Error("落盘写不进去");
+        if (wrote <= 0) throw new Error("could not write to the output file");
         spill.hash.update(piece.subarray(done, done + wrote));
         done += wrote;
         spill.written += wrote;

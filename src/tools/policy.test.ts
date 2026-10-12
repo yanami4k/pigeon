@@ -68,7 +68,7 @@ test("未注册工具一律 deny（fail-closed），两种模式同罪", () => {
   for (const approvalMode of ["prompt", "yolo"] as const) {
     const decision = evaluateToolPolicy(registry, "rm_rf", makePolicy({ approvalMode }));
     assert.equal(decision.kind, "deny");
-    assert.match(decision.reason, /未注册工具/);
+    assert.match(decision.reason, /Unregistered tool \(fail-closed\)/);
   }
 });
 

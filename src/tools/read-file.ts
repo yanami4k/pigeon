@@ -128,8 +128,10 @@ export interface OutsideReadTool {
 
 // 放手模式下写工具也可写工作区以外（决策 407），allowed 的说法因此不说只读
 const OUTSIDE_SENTENCES: Readonly<Record<OutsideReadMode, string>> = {
-  allowed: "工作区以外的文件也可读（用绝对路径）。",
-  approval: "工作区以外的文件也可读（用绝对路径），须经人批准（可按目录放权），只读、不能改。",
+  allowed: "Files outside the workspace can be read too (use absolute paths).",
+  approval:
+    "Files outside the workspace can be read too (use absolute paths) with the user's approval " +
+    "(which can be granted per directory); they are read-only and cannot be changed.",
   refused: "",
 };
 
@@ -149,7 +151,8 @@ export function createReadFileTool(
     host.resolveForRead !== undefined
       ? host.resolveForRead(inputPath)
       : { path: await host.resolveExisting(inputPath), outside: false };
-  const lead = outsideReads === "refused" ? "读取工作区内文本文件。" : "读取文本文件。";
+  const lead =
+    outsideReads === "refused" ? "Reads a text file in the workspace." : "Reads a text file.";
   const maxBytes = options.limits?.maxBytes ?? DEFAULT_READ_FILE_MAX_BYTES;
   const maxLineChars = options.limits?.maxLineChars ?? DEFAULT_READ_FILE_MAX_LINE_CHARS;
   // 取内容：虚拟路径先于路径判定，流式读会话落盘目录、只留需要的那段行；其余经执行端围栏后按字节整读。
@@ -162,7 +165,7 @@ export function createReadFileTool(
   ): Promise<Loaded | WholeFile> => {
     if (isOutputsUri(inputPath)) {
       if (options.outputs === undefined) {
-        throw new OutputPathError(`本会话没有落盘的命令输出：${inputPath}`);
+        throw new OutputPathError(`This session has no saved command output: ${inputPath}`);
       }
       const window = await options.outputs.readWindow(inputPath, offset, limit);
       return {
@@ -177,12 +180,12 @@ export function createReadFileTool(
     const target = await resolveTarget(inputPath);
     if (target.outside && !approved) {
       throw new OutsideReadNotApprovedError(
-        `路径越出工作区根：${inputPath}（工作区以外的文件须经批准才能读）`
+        `Path is outside the workspace root: ${inputPath} (files outside the workspace can only be read with approval)`
       );
     }
     const resolvedPath = target.path;
     if (!(await host.isFile(resolvedPath))) {
-      throw new ReadFileError(`不是常规文件：${inputPath}`);
+      throw new ReadFileError(`Not a regular file: ${inputPath}`);
     }
     const bytes =
       host.readBytes !== undefined
@@ -212,15 +215,20 @@ export function createReadFileTool(
   return {
     name: "read_file",
     label: "read_file",
-    description:
-      (replaceMode
-        ? `${lead}输出每行形如「行号| 内容」，头部 [PATH] 给出总行数与窗口。` +
-          "edit_file 的 old_string 取自内容部分，不要带行号前缀；文件被截断时按提示的 offset 继续读取。"
-        : `${lead}输出每行带锚点前缀 N#TAG（N 为行号，TAG 为内容哈希），` +
-          "头部 [PATH#TAG] 是全文件快照。edit_file 编辑时必须使用本工具给出的锚点与快照；" +
-          "文件被截断时按提示的 offset 继续读取。") +
-      (options.imageInput === true ? IMAGE_SENTENCE : "") +
+    description: [
+      lead,
+      replaceMode
+        ? 'Each output line has the form "lineNumber| content", and the [PATH] header gives the total line count ' +
+          "and the window shown. Take edit_file's old_string from the content part, without the line-number prefix. " +
+          "When the file is cut off, continue reading at the offset given in the hint."
+        : "Each output line has an anchor prefix N#TAG (N is the line number, TAG a hash of the line's content), " +
+          "and the [PATH#TAG] header is a snapshot of the whole file. edit_file must use the anchors and snapshot " +
+          "given by this tool. When the file is cut off, continue reading at the offset given in the hint.",
+      options.imageInput === true ? IMAGE_SENTENCE : "",
       OUTSIDE_SENTENCES[outsideReads],
+    ]
+      .filter((part) => part !== "")
+      .join(" "),
     parameters: ReadFileParamsSchema,
     executionMode: "parallel",
     async inspectOutsideRead(params) {
@@ -263,7 +271,7 @@ export function createReadFileTool(
           content: [
             {
               type: "text",
-              text: `[${replaceMode ? args.path : `${args.path}#${snapshot}`}] 空文件`,
+              text: `[${replaceMode ? args.path : `${args.path}#${snapshot}`}] empty file`,
             },
           ],
           details: {
@@ -278,7 +286,7 @@ export function createReadFileTool(
       }
       if (offset > totalLines) {
         throw new ReadFileError(
-          `offset ${offset} 超出文件范围（共 ${totalLines} 行）；请给出 1-${totalLines} 之间的 offset`
+          `offset ${offset} is past the end of the file (${linesText(totalLines)}); give an offset between 1 and ${totalLines}`
         );
       }
       const last = Math.min(offset + limit - 1, totalLines);
@@ -304,14 +312,14 @@ export function createReadFileTool(
       const remaining = totalLines - end;
       const hint =
         remaining > 0
-          ? `\n${byteLimited ? `本次输出已达 ${maxBytes} 字节上限；` : ""}还有 ${remaining} 行未读，下一窗口参数 offset=${end + 1}`
+          ? `\n${byteLimited ? `This output reached the ${maxBytes}-byte limit; ` : ""}${linesText(remaining)} not read yet; next window: offset=${end + 1}`
           : "";
       loaded.done();
       return {
         content: [
           {
             type: "text",
-            text: `[${replaceMode ? args.path : `${args.path}#${snapshot}`}] 共 ${totalLines} 行（窗口 ${offset}-${end}）\n${rendered.join("\n")}${hint}`,
+            text: `[${replaceMode ? args.path : `${args.path}#${snapshot}`}] ${linesText(totalLines)} (showing ${offset}-${end})\n${rendered.join("\n")}${hint}`,
           },
         ],
         details: {
@@ -329,11 +337,16 @@ export function createReadFileTool(
   };
 }
 
+// 行数的说法（单复数）
+function linesText(count: number): string {
+  return `${count} line${count === 1 ? "" : "s"}`;
+}
+
 // 决策 414：模型能看图时工具说明另加的一句
 const IMAGE_SENTENCE =
-  "图片（PNG、JPEG、GIF、WebP）以图片交回，可直接看图，不必为看图另写脚本或装库；" +
-  `长边超过 ${IMAGE_MAX_EDGE} 像素或编码后超过 ${IMAGE_MAX_MB} 的先自动缩小再交出。` +
-  "其他二进制文件只给类型与大小。";
+  "Images (PNG, JPEG, GIF, WebP) are returned as images you can look at directly; there is no need to write scripts " +
+  `or install libraries to view them. Images whose longer side exceeds ${IMAGE_MAX_EDGE} pixels or whose encoded size ` +
+  `exceeds ${IMAGE_MAX_MB} are shrunk automatically first. For other binary files, only the type and size are given.`;
 
 // 图片与其他二进制：一行元信息；能交出的图片附图片内容（决策 417：先过关口——完整解码一遍，超出单张上限的先缩小）
 async function wholeFileResult(
@@ -342,7 +355,7 @@ async function wholeFileResult(
   imageInput: boolean,
   prepare: ImagePreparer
 ): Promise<PigeonToolResult<ReadFileWholeDetails>> {
-  const size = `${file.bytes.length} 字节`;
+  const size = `${file.bytes.length} bytes`;
   const { image } = file;
   if (image === undefined) {
     const details: ReadFileWholeDetails = {
@@ -355,7 +368,7 @@ async function wholeFileResult(
   }
   const { width, height } = image;
   const dims = width !== undefined && height !== undefined ? ` ${width}×${height}` : "";
-  const head = `[${path}] 图片 ${image.format}${dims}，${size}`;
+  const head = `[${path}] ${image.format} image${dims}, ${size}`;
   const details: ReadFileWholeDetails = {
     resolvedPath: file.resolvedPath,
     kind: "image",
@@ -364,13 +377,16 @@ async function wholeFileResult(
     ...(width !== undefined && height !== undefined ? { width, height } : {}),
   };
   if (!imageInput) {
-    return { content: [{ type: "text", text: `${head}。${NO_VISION_TEXT}` }], details };
+    return { content: [{ type: "text", text: `${head}. ${NO_VISION_TEXT}` }], details };
   }
   const gated = await gateImage(file.bytes, prepare);
   if ("withheld" in gated) {
     return {
       content: [
-        { type: "text", text: `${head}。${gated.withheld}，未交出图片内容；${WITHHELD_HINT}` },
+        {
+          type: "text",
+          text: `${head}. The image content was not returned: ${gated.withheld}. ${WITHHELD_HINT}`,
+        },
       ],
       details,
     };
@@ -378,7 +394,7 @@ async function wholeFileResult(
   const sent = gated.image;
   return {
     content: [
-      { type: "text", text: sent.resized ? `${head}；${resizedNote(gated.info, sent)}` : head },
+      { type: "text", text: sent.resized ? `${head}; ${resizedNote(gated.info, sent)}` : head },
       { type: "image", data: sent.data.toString("base64"), mimeType: sent.mimeType },
     ],
     details: {
@@ -399,22 +415,26 @@ async function wholeFileResult(
 }
 
 const NO_VISION_TEXT =
-  "当前模型不能看图，未交出图片内容；需要图片里的信息时可用命令行工具处理" +
-  "（如 file、identify 看属性，tesseract 识别文字，python 的图像库分析像素）。";
+  "The current model cannot view images, so the image content was not returned. If you need information from the image, " +
+  "use command-line tools (for example file or identify for its properties, tesseract to read text, or a Python imaging " +
+  "library to analyze pixels).";
 const WITHHELD_HINT =
-  "可用命令行工具查看或处理（如 file、identify 看属性，ImageMagick 或 python 的图像库修复、缩小）。";
+  "You can inspect or process it with command-line tools (for example file or identify for its properties, " +
+  "and ImageMagick or a Python imaging library to repair or shrink it).";
 
 function binaryText(path: string, size: string, binary: BinaryInfo | undefined): string {
   if (binary?.reason === "encoding") {
     const share = Math.round((binary.invalidShare ?? 0) * 100);
     return (
-      `[${path}] 不是 UTF-8 文本（开头部分约 ${share}% 是非法字节序列），${size}，未显示内容。` +
-      "若是其他编码的文本，可用 iconv 转成 UTF-8 后再读（如 iconv -f GBK -t UTF-8 文件）；其余可用 file、xxd 等命令行工具查看。"
+      `[${path}] not UTF-8 text (about ${share}% of the beginning is invalid byte sequences), ${size}; content not shown. ` +
+      "If it is text in another encoding, convert it to UTF-8 with iconv and read it again (for example " +
+      "iconv -f GBK -t UTF-8 <file>); otherwise inspect it with command-line tools such as file or xxd."
     );
   }
   return (
-    `[${path}] 二进制文件（${binary?.format ?? "类型未认出"}），${size}，未显示内容；` +
-    "可用命令行工具查看（如 file 看类型、xxd 文件 | head 看开头字节、strings 取可读字符串）。"
+    `[${path}] binary file (${binary?.format ?? "unrecognized type"}), ${size}; content not shown. ` +
+    "Inspect it with command-line tools (for example file for its type, xxd <file> | head for the first bytes, " +
+    "or strings for readable strings)."
   );
 }
 
@@ -424,7 +444,7 @@ function clipLine(line: string, maxChars: number, number: number): string {
   const code = line.charCodeAt(cut - 1);
   if (code >= 0xd800 && code <= 0xdbff) cut -= 1;
   return (
-    `${line.slice(0, cut)}…（本行共 ${line.length} 字符，超过 ${maxChars} 已截断；` +
-    `其余部分可用 run_command 按字符截取，例如 sed -n '${number}p' 文件 | cut -c${cut + 1}-${cut + maxChars}）`
+    `${line.slice(0, cut)}… [line truncated: ${line.length} characters, over the ${maxChars} limit; ` +
+    `get the rest with run_command, for example sed -n '${number}p' <file> | cut -c${cut + 1}-${cut + maxChars}]`
   );
 }

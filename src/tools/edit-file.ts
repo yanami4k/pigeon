@@ -85,13 +85,14 @@ export function createEditFileTool(
     label: "edit_file",
     description:
       (outside
-        ? `编辑已存在的文本文件。${OUTSIDE_WRITE_SENTENCE}`
-        : "编辑工作区内已存在的文本文件。") +
-      "必须先用 read_file 读取：edits 按 N#TAG 锚点寻址" +
-      "（read 输出的行前缀），snapshot 填 read 输出的 [PATH#TAG] 中的快照标签。" +
-      "操作：replace（换 anchor 到 endAnchor 的行）/ insertAfter（anchor 后插入）/ delete（删行）。" +
-      "同一文件的多处修改放进一次调用的 edits 里（各处锚点都按同一次读取给出、互不重叠），" +
-      "全部预检通过才一起落盘，任一处不通过整组不写；文件读后已变化（快照过期）会被拒绝，需重新 read_file。",
+        ? `Edits an existing text file. ${OUTSIDE_WRITE_SENTENCE}`
+        : "Edits an existing text file in the workspace.") +
+      " Read the file with read_file first: edits are addressed by N#TAG anchors (the line prefixes in the read_file output), " +
+      "and snapshot is the snapshot tag from the [PATH#TAG] header of the read_file output. " +
+      "Operations: replace (replaces the lines from anchor to endAnchor) / insertAfter (inserts after anchor) / " +
+      "delete (deletes lines). Put several changes to the same file into the edits of one call (all anchors from the same read, " +
+      "not overlapping); they are written together only if all pass the checks, and if any fails, none is written. " +
+      "If the file has changed since it was read (stale snapshot), the edit is refused and you need to read_file again.",
     parameters: EditFileParamsSchema,
     // 写工具强制串行执行器（对齐上游 executionMode 语义 + M3 决策 2）
     executionMode: "sequential",
@@ -125,8 +126,8 @@ export function createEditFileTool(
           {
             type: "text",
             text:
-              `已在 ${args.path} 应用 ${plan.applied.length} 处编辑（+${addedLines} −${removedLines} 行）。` +
-              `新快照 [${args.path}#${afterSnapshot}]`,
+              `Applied ${plan.applied.length} edit${plan.applied.length === 1 ? "" : "s"} to ${args.path} ` +
+              `(+${addedLines} −${removedLines} lines). New snapshot: [${args.path}#${afterSnapshot}]`,
           },
         ],
         details: {
@@ -149,14 +150,14 @@ async function planEdits(host: WorkspaceHost, args: EditFileParams, pathOptions:
   assertWritePathText(args.path);
   const resolvedPath = await host.resolveForWrite(args.path, pathOptions);
   if (!(await host.isFile(resolvedPath))) {
-    throw new EditFileError(`不是常规文件：${args.path}`);
+    throw new EditFileError(`Not a regular file: ${args.path}`);
   }
   const raw = await host.readText(resolvedPath);
   const beforeSnapshot = snapshotTag(raw);
   if (beforeSnapshot !== args.snapshot) {
     throw new EditFileError(
-      `快照过期：文件自读取后已变化（期望 ${args.snapshot}，实际 ${beforeSnapshot}）。` +
-        `请重新 read_file 获取最新锚点与快照后再编辑`
+      `Stale snapshot: the file has changed since it was read (expected ${args.snapshot}, found ${beforeSnapshot}). ` +
+        "Read it again with read_file to get current anchors and a new snapshot before editing"
     );
   }
   const split = splitContent(raw);

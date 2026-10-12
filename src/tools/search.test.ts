@@ -176,7 +176,7 @@ test("列出的部分超过字数预算：只放预算内的整行，写明总�
       [300, 3, true]
     );
     assert.ok(result.details.shown < 250, String(result.details.shown));
-    assert.match(out, /300 条匹配、3 个文件/);
+    assert.match(out, /300 matches in 3 files in total/);
     assert.match(out, /files_only/);
     const uri = result.details.savedOutput?.uri ?? "";
     assert.ok(out.includes(uri) && uri !== "", out);

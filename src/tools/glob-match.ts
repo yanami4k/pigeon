@@ -13,7 +13,7 @@ function compile(source: string, pattern: string): RegExp {
   try {
     return new RegExp(source);
   } catch {
-    throw new GlobPatternError(`文件名模式有误：${pattern}`);
+    throw new GlobPatternError(`Invalid file name pattern: ${pattern}`);
   }
 }
 

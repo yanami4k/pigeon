@@ -89,7 +89,7 @@ test("多段预检原子性：第二处锚点坏 → 整单拒绝，文件逐字
             { op: "replace", anchor: `3#${lineTag("已不存在的行")}`, lines: ["X"] },
           ],
         }),
-      /未命中/
+      /The anchor of edits\[1\] does not match: line 3 now has the tag/
     );
     assert.equal(readFileSync(join(root, "a.ts"), "utf8"), original);
   } finally {

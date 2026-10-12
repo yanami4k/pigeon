@@ -55,11 +55,15 @@ export function evaluateToolPolicy(
   context: { outsideWorkspaceRead?: boolean } = {}
 ): PolicyDecision {
   const registration = registry.get(toolName);
+  // 决策 428：拒绝理由逐字交给模型，用英文；放行与要人批准的理由只留在判定结果里、不外显，仍为中文
   if (registration === undefined) {
-    return { kind: "deny", reason: `未注册工具（fail-closed）：${toolName}` };
+    return { kind: "deny", reason: `Unregistered tool (fail-closed): ${toolName}` };
   }
   if (policy.deny.includes(toolName)) {
-    return { kind: "deny", reason: `deny 清单精确匹配，任何模式一律拒绝：${toolName}` };
+    return {
+      kind: "deny",
+      reason: `The tool is on the deny list (exact match), which applies in every approval mode: ${toolName}`,
+    };
   }
   if (grant !== undefined) {
     const origin =

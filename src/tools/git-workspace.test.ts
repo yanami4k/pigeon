@@ -80,7 +80,7 @@ test("写工具不写版本库元数据：.git 下的文件一律拒写", () =>
         old_string: "[core]",
         new_string: "[core]\n\tfsmonitor = x",
       }),
-      /版本库元数据/
+      /Repository metadata \(\.git\) cannot be written/
     );
   }));
 
@@ -113,7 +113,7 @@ test("git status 失败（命令删了 .git）：改用全量扫描并注明，�
       'rmSync(".git", { recursive: true, force: true }); writeFileSync("b.txt", "b\\n");'
     );
     assert.equal(changes.truncated, true);
-    assert.match(changes.note ?? "", /改用全量扫描/);
+    assert.match(changes.note ?? "", /a full scan was used/);
   }));
 
 test("工作区是外层仓库里被忽略的子目录：按非 git 工作区扫描，改动照常报出", () =>

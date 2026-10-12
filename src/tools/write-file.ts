@@ -48,9 +48,11 @@ export interface WriteFileDetails {
 // 决策 407：放权时说明可写工作区以外
 export function writeFileDescription(outsideWrites: boolean): string {
   return (
-    `新建文本文件，或用给出的内容整体覆盖已存在的文件${outsideWrites ? `。${OUTSIDE_WRITE_SENTENCE}` : "（限工作区内）。"}` +
-    "覆盖已存在的文件前须先在本会话用 read_file 读过它，且读后文件没有被改过；只改其中一部分请用 edit_file。" +
-    "目录不存在会自动创建；目标是符号链接时拒写。"
+    "Creates a text file, or overwrites an existing file with the given content" +
+    `${outsideWrites ? `. ${OUTSIDE_WRITE_SENTENCE}` : " (within the workspace only)."} ` +
+    "Before overwriting an existing file, you must have read it with read_file in this session, and it must not have " +
+    "changed since; to change only part of a file, use edit_file. " +
+    "Missing directories are created automatically; writing to a symbolic link is refused."
   );
 }
 
@@ -92,8 +94,8 @@ export function createWriteFileTool(
           {
             type: "text",
             text: plan.created
-              ? `已新建 ${args.path}（${lines} 行）`
-              : `已覆盖 ${args.path}（${lines} 行；+${plan.addedLines} −${plan.removedLines} 行）`,
+              ? `Created ${args.path} (${linesText(lines)})`
+              : `Overwrote ${args.path} (${linesText(lines)}; +${plan.addedLines} −${plan.removedLines} lines)`,
           },
         ],
         details: {
@@ -110,6 +112,10 @@ export function createWriteFileTool(
   };
 }
 
+function linesText(count: number): string {
+  return `${count} line${count === 1 ? "" : "s"}`;
+}
+
 // 围栏 + 读过且读后未变的检查 + 内存里算出改动（零写副作用）
 async function planWrite(
   host: WorkspaceHost,
@@ -118,14 +124,14 @@ async function planWrite(
   pathOptions: WritePathOptions
 ) {
   if (host.resolveForCreate === undefined || host.createText === undefined) {
-    throw new WriteFileError("当前执行端不支持 write_file");
+    throw new WriteFileError("This execution environment does not support write_file");
   }
   assertWritePathText(args.path);
   const target = await host.resolveForCreate(args.path, pathOptions);
   let oldLines: string[] = [];
   if (target.exists) {
     if (!(await host.isFile(target.path))) {
-      throw new WriteFileError(`不是常规文件：${args.path}`);
+      throw new WriteFileError(`Not a regular file: ${args.path}`);
     }
     const oldBytes =
       host.readBytes !== undefined
@@ -133,11 +139,14 @@ async function planWrite(
         : Buffer.from(await host.readText(target.path), "utf8");
     if (!reads.hasRead(target.path)) {
       throw new WriteFileError(
-        `${args.path} 已存在：覆盖前须先在本会话用 read_file 读过它；只改其中一部分请用 edit_file`
+        `${args.path} already exists: read it with read_file in this session before overwriting it; ` +
+          "to change only part of it, use edit_file"
       );
     }
     if (!reads.unchangedSinceRead(target.path, oldBytes)) {
-      throw new WriteFileError(`${args.path} 在你读过之后被改过（例如被命令改了），请先重新读取`);
+      throw new WriteFileError(
+        `${args.path} has changed since you read it (for example, a command changed it); read it again first`
+      );
     }
     oldLines = splitContent(oldBytes.toString("utf8")).lines;
   }

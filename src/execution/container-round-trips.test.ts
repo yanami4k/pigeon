@@ -216,7 +216,7 @@ test("直连执行只跑外部程序：eval 等内建命令按程序不存在拒
     const tool = createRunCommandTool({ workspaceRoot: h.root, host: h.host });
     await assert.rejects(
       tool.execute("c", { command: `eval 'printf "%s" "$M"'` }, undefined),
-      /命令不存在/
+      /Command not found/
     );
   } finally {
     h.cleanup();
@@ -244,7 +244,7 @@ test("容器：写工具不写 .git；嵌套仓库里的改动照常报出；命
         old_string: "[core]",
         new_string: "[core] ",
       }),
-      /版本库元数据/
+      /Repository metadata \(\.git\) cannot be written/
     );
     const tool = createRunCommandTool({ workspaceRoot: h.root, host: h.host });
     tool.authorizeShell("n");
@@ -263,7 +263,7 @@ test("容器：写工具不写 .git；嵌套仓库里的改动照常报出；命
     const broken = await tool.execute("r", { command: "rm -rf .git && echo b > b.txt" }, undefined);
     assert.equal(existsSync(join(h.root, ".git")), false);
     assert.equal(broken.details.fileChanges.truncated, true);
-    assert.match(broken.details.fileChanges.note ?? "", /改用全量扫描/);
+    assert.match(broken.details.fileChanges.note ?? "", /a full scan was used/);
   } finally {
     h.cleanup();
   }

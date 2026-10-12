@@ -73,19 +73,21 @@ export function commandTooLong(
   const bytes = Buffer.byteLength(command, "utf8");
   const limits: string[] = [];
   if (platform !== "win32" && bytes > POSIX_COMMAND_MAX_BYTES) {
-    limits.push(`单个参数至多约 ${POSIX_COMMAND_MAX_BYTES} 字节（UTF-8）`);
+    limits.push(`a single argument can be at most about ${POSIX_COMMAND_MAX_BYTES} bytes (UTF-8)`);
   }
   if (localPlatform === "win32" || platform === "win32") {
     const viaCmd = platform === "win32" && (mode === "shell" || mode === "launcher");
     const max = viaCmd ? WINDOWS_CMD_MAX_CHARS : WINDOWS_COMMAND_MAX_CHARS;
     if (command.length > max) {
-      limits.push(`Windows ${viaCmd ? "经 cmd.exe 的命令行" : "命令行"}至多约 ${max} 字符`);
+      limits.push(
+        `a Windows command line${viaCmd ? " run through cmd.exe" : ""} can be at most about ${max} characters`
+      );
     }
   }
   if (limits.length === 0) return undefined;
   return (
-    `命令过长（${bytes} 字节、${command.length} 字符），超过本执行端能执行的上限：${limits.join("；")}。` +
-    "请先用 write_file 把内容写成脚本文件，再用 run_command 运行该脚本"
+    `The command is too long (${bytes} bytes, ${command.length} characters) for this execution environment: ${limits.join("; ")}. ` +
+    "Write the content to a script file with write_file first, then run that script with run_command"
   );
 }
 // 工作树文件清单上限：超出不做完整差异比对（标记 truncated），避免大目录拖垮每次执行
@@ -139,20 +141,24 @@ export class RunCommandError extends Error {
 export class ShellSyntaxError extends RunCommandError {
   readonly reason: string;
   constructor(reason: string, command: string) {
-    super(`命令${reason}（${command}），需要经 shell 运行`);
+    super(`The command ${reason} (${command}), so it needs a shell`);
     this.reason = reason;
   }
 }
 
-// 需 shell 的两类原因：符号类 shell 语法；决策 413：引号外的换行（多行命令，与 ; 同等）
-const SHELL_SYNTAX_REASON = "含管道、重定向、命令串联或命令替换";
-const MULTILINE_REASON = "含引号外的换行（多行命令）";
+// 需 shell 的两类原因：符号类 shell 语法；决策 413：引号外的换行（多行命令，与 ; 同等）。
+// 决策 428：原因同时进审批面板与给模型的报错，用英文
+const SHELL_SYNTAX_REASON =
+  "contains a pipe, redirection, command chaining, or command substitution";
+const MULTILINE_REASON = "contains a line break outside quotes (a multi-line command)";
 
 // 决策 415：本机 Windows 经 cmd.exe 运行的命令不能含换行——cmd.exe /c 只执行第一个换行之前的部分（引号内的换行也一样），
 // 其余各行不执行也不报错。这类命令在只读检查即判为无法执行，说明与报错共用写法建议
 const WINDOWS_MULTILINE_ADVICE =
-  "多条命令用 && 连成一行，或先用 write_file 写成脚本文件再运行该脚本";
-const WINDOWS_MULTILINE_ERROR = `命令含换行：在 Windows 上它要经 cmd.exe 运行，而 cmd.exe 只会执行第一行，已拒绝，未执行任何命令。${WINDOWS_MULTILINE_ADVICE}。`;
+  "join the commands into one line with &&, or write them to a script file with write_file and run that script";
+const WINDOWS_MULTILINE_ERROR =
+  "The command contains a line break. On Windows it would run through cmd.exe, which only runs the first line, " +
+  `so it was refused and nothing was run. Instead, ${WINDOWS_MULTILINE_ADVICE}.`;
 
 // 超时终止——环境类
 export class RunCommandTimeoutError extends Error {
@@ -262,13 +268,13 @@ export interface RunCommandOptions {
 export type RunCommandApproval = "yolo" | "prompt" | "none";
 
 export interface RunCommandTexts {
-  // 工具登记里的描述
+  // 工具登记里的描述（只留在注册表里、不发给模型，故仍为中文）
   registry: string;
   // 系统提示里介绍 run_command 的一句（决策 363：与审批无关，续跑与 /reload 后不变；决策 428 起为英文）
   prompt: string;
-  // 开工状态块「审批」一节里命令的说法（随本会话的审批状态）
+  // 开工状态块「审批」一节里命令的说法（随本会话的审批状态；决策 428 起为英文）
   approval: string;
-  // 发给模型的工具说明
+  // 发给模型的工具说明（决策 428 起为英文）
   tool: string;
 }
 
@@ -288,77 +294,97 @@ export function runCommandTexts(input: {
     (input.maxTimeoutMs ?? DEFAULT_RUN_COMMAND_MAX_TIMEOUT_MS) / 1000
   );
   const timeoutText =
-    `单次超时缺省 ${timeoutSeconds} 秒，可用 timeout_seconds 另设，上限 ${maxTimeoutSeconds} 秒（给得更大按上限执行）；` +
-    "到时整个进程组（命令和它起的子进程）都被终止。";
+    `The default timeout is ${timeoutSeconds} seconds; set timeout_seconds to change it, up to ${maxTimeoutSeconds} seconds ` +
+    "(larger values run with the maximum). On timeout, the whole process group (the command and the processes it started) is killed.";
   const backgroundText =
     input.backgroundJobs === undefined
       ? ""
-      : "开发服务器、watch、长构建这类长时间运行的命令可带 background: true 在后台运行：立即交回作业号，输出持续落盘，" +
-        "结束时会通知你；用 job_output 查看状态与新增输出（可带 wait_seconds 等它结束），用 job_kill 停掉。" +
-        `后台作业不受单次超时约束；本会话同时在跑的至多 ${input.backgroundJobs} 个，超出即拒绝。` +
-        "后台作业与之后的命令同时运行，可能互相干扰（改同一批文件、占同一个端口），这期间的文件变化报告也会因此不精确。" +
-        "人按 Esc 中断当前一轮时后台作业照跑，会话结束时停止。" +
-        `起服务、守护进程，或判分、使用者在会话结束后还要用到的长时间进程，再加 ${KEEP_AFTER_SESSION_PARAM}: true：` +
-        "会话结束时不等它、不停它，进程留着继续跑，输出照样写进那个文件；会话里照常可用 job_output 查看、job_kill 停掉。";
+      : "Long-running commands such as dev servers, watchers, and long builds can run in the background with background: true: " +
+        "you get a job ID right away, the output is written to a file as it arrives, and you are notified when the job ends. " +
+        "Use job_output to check its status and new output (with wait_seconds to wait for it to end) and job_kill to stop it. " +
+        `Background jobs are not subject to the timeout; at most ${input.backgroundJobs} can run at once in this session, and more are refused. ` +
+        "Background jobs run alongside later commands and can interfere with them (changing the same files, using the same port), " +
+        "which also makes the file changes reported meanwhile imprecise. " +
+        "When the user presses Esc to interrupt the current turn, background jobs keep running; they stop when the session ends. " +
+        "For servers, daemons, or other long-running processes that grading or the user still needs after the session ends, " +
+        `also pass ${KEEP_AFTER_SESSION_PARAM}: true: when the session ends, the job is neither waited for nor stopped, the process ` +
+        "keeps running, and its output still goes to the same file; during the session, job_output and job_kill work as usual.";
   // 决策 410：命令以输出全部关闭为结束——放到后台又没把输出重定向走的进程会让命令一直等到超时
   const heldText =
-    `命令要等输出全部关闭才算结束：命令里${input.platform === "win32" ? "用 start /b" : "用 &"}放到后台、又没把输出重定向走的进程` +
-    `会一直占着输出，命令要等到超时才结束，连同那个进程一起被终止。${heldOutputAdvice(input.platform, input.backgroundJobs !== undefined)}`;
+    "A command ends only when all of its output is closed: a process put in the background with " +
+    `${input.platform === "win32" ? "start /b" : "&"} inside the command, without redirecting its output, keeps the output open, ` +
+    "so the command runs until the timeout and is killed along with that process. " +
+    heldOutputAdvice(input.platform, input.backgroundJobs !== undefined);
   const shell = input.platform === "win32" ? "cmd.exe" : "/bin/sh -c";
   // 决策 413：多行命令经 /bin/sh -c 逐行执行；决策 415：cmd.exe /c 只执行第一行，Windows 上写明不支持与改法
   const multiline = input.platform !== "win32";
   const windowsMultiline = multiline
     ? ""
-    : `不支持多行命令（cmd.exe 只执行第一行，含换行的命令会被拒绝）：${WINDOWS_MULTILINE_ADVICE}。`;
+    : "Multi-line commands are not supported (cmd.exe only runs the first line, so commands containing line breaks are refused): " +
+      `${WINDOWS_MULTILINE_ADVICE}.`;
   const shellKinds = multiline
-    ? "管道、重定向、&& 串联、多行命令（逐行执行）"
-    : "管道、重定向、&& 串联";
+    ? "pipes, redirection, && chaining, and multi-line commands (run line by line)"
+    : "pipes, redirection, and && chaining";
   const shellContains = multiline
-    ? "含管道、重定向、&& 串联或多行的命令"
-    : "含管道、重定向或 && 串联的命令";
-  // 决策 428：系统提示为英文
-  const shellContainsEn = multiline
     ? "commands with pipes, redirection, && chaining, or multiple lines"
     : "commands with pipes, redirection, or && chaining";
   const toolShell = {
-    yolo: `${shellKinds}等需要 shell 的命令经 ${shell} 运行。`,
-    prompt: `${shellKinds}等需要 shell 的命令只在人确认后经 ${shell} 运行，尽量拆成单条命令。`,
-    none: `${shellKinds}等需要 shell 的命令须有放权规则允许才经 ${shell} 运行。`,
+    yolo: `Commands that need a shell, such as ${shellKinds}, run through ${shell}.`,
+    prompt:
+      `Commands that need a shell, such as ${shellKinds}, run through ${shell} only after the user confirms them; ` +
+      "split them into single commands where possible.",
+    none: `Commands that need a shell, such as ${shellKinds}, run through ${shell} only if a permission rule allows them.`,
   }[input.approval];
   const toolApproval = {
-    yolo: "本会话的命令自动批准。",
-    prompt: "每条命令都需要人工批准，除非本会话已放行这条一模一样的命令。",
-    none: "本会话没有人工审批通道：未被放权规则放行的命令会被拒绝。",
+    yolo: "Commands are approved automatically in this session.",
+    prompt:
+      "Every command needs the user's approval, unless this exact command has already been allowed in this session.",
+    none: "This session has no human approval channel: commands not allowed by a permission rule are refused.",
   }[input.approval];
   const promptShell = {
-    yolo: `经 ${shell} 执行`,
-    prompt: `须经人确认后经 ${shell} 执行，尽量拆成单条命令`,
-    none: `须有放权规则允许才经 ${shell} 执行`,
+    yolo: `run through ${shell}`,
+    prompt: `run through ${shell} only after the user confirms them; split them into single commands where possible`,
+    none: `run through ${shell} only if a permission rule allows them`,
   }[input.approval];
   const promptApproval = {
-    yolo: "命令自动批准",
-    prompt: "每条命令都要人工批准",
-    none: "本会话没有人工审批通道，未被放权规则放行的命令会被拒绝",
+    yolo: "commands are approved automatically",
+    prompt: "every command needs the user's approval",
+    none: "this session has no human approval channel, so commands not allowed by a permission rule are refused",
   }[input.approval];
   return {
     registry: `在工作区根运行一条命令（普通命令直接执行，需要 shell 语义的经 ${shell} 执行）`,
-    prompt: `run_command runs plain commands directly; ${shellContainsEn} run through ${shell}.`,
-    approval: `run_command：${promptApproval}；${shellContains}${promptShell}。`,
-    tool:
-      `在工作区根运行一条命令。普通命令不经 shell 直接执行；${toolShell}${windowsMultiline}${toolApproval}` +
-      `可用设置 commands 一节登记的短名。结果带退出码、输出与执行前后的文件变化（不含 Pigeon 自己的治理目录 ${PIGEON_DIR}）。` +
-      `输出过长时自动保留开头与结尾，中间注明省略的行数，并把全文存为 ${OUTPUTS_URI_PREFIX}<会话号>/<编号>，可用 read_file 按需读取，` +
-      `不必自己用 tail、head 截取。${timeoutText}${backgroundText}${heldText}`,
+    prompt: `run_command runs plain commands directly; ${shellContains} run through ${shell}.`,
+    approval: `run_command: ${promptApproval}; ${shellContains} ${promptShell}.`,
+    tool: [
+      "Runs a command at the workspace root. Plain commands run directly, without a shell.",
+      toolShell,
+      windowsMultiline,
+      toolApproval,
+      "You can also use the short names registered in the commands section of the settings.",
+      "The result reports the exit code, the output, and the file changes the command made " +
+        `(excluding Pigeon's own governance directory ${PIGEON_DIR}).`,
+      "When the output is too long, the start and end are kept, the number of omitted lines is noted in between, " +
+        `and the full output is saved as ${OUTPUTS_URI_PREFIX}<session-id>/<number>, which you can read with read_file as needed; ` +
+        "there is no need to cut it down yourself with tail or head.",
+      timeoutText,
+      backgroundText,
+      heldText,
+    ]
+      .filter((part) => part !== "")
+      .join(" "),
   };
 }
 
 // 决策 410：一直运行的进程怎么起——有后台作业时用后台作业（服务标保留）；非放到后台不可时先把输出重定向到文件
 export function heldOutputAdvice(platform: NodeJS.Platform, backgroundJobs: boolean): string {
-  const redirect = platform === "win32" ? "start /b 命令 > 文件 2>&1" : "命令 > 文件 2>&1 &";
+  const redirect =
+    platform === "win32" ? "start /b <command> > <file> 2>&1" : "<command> > <file> 2>&1 &";
   return backgroundJobs
-    ? `一直运行的进程用 background: true 作为后台作业启动（服务、会话结束后还要用的进程再加 ${KEEP_AFTER_SESSION_PARAM}: true）；` +
-        `非放到后台不可时，先把输出重定向到文件（${redirect}）。`
-    : `一直运行的进程非放到后台不可时，先把输出重定向到文件（${redirect}）。`;
+    ? "Start processes that keep running as background jobs with background: true " +
+        `(add ${KEEP_AFTER_SESSION_PARAM}: true for servers and processes still needed after the session ends); ` +
+        `if one must be put in the background inside the command, redirect its output to a file first (${redirect}).`
+    : "If a process that keeps running must be put in the background inside the command, " +
+        `redirect its output to a file first (${redirect}).`;
 }
 
 // 命令串 → 参数数组：空白切分；单引号内原样；双引号内只认 \" 与 \\ 两种转义；
@@ -420,13 +446,13 @@ export function parseCommandLine(command: string): string[] {
     inToken = true;
   }
   if (quote !== null) {
-    throw new RunCommandError(`引号未闭合：${command}`);
+    throw new RunCommandError(`Unclosed quote: ${command}`);
   }
   if (inToken) {
     argv.push(current);
   }
   if (argv.length === 0) {
-    throw new RunCommandError("命令为空");
+    throw new RunCommandError("The command is empty");
   }
   return argv;
 }
@@ -510,7 +536,7 @@ export function createRunCommandTool(
           mode: "invalid",
           needsShell: false,
           argv,
-          error: `在 PATH 里找不到程序 ${first}（带命令前缀范围时不从工作树里找程序）`,
+          error: `Program ${first} not found on PATH (with a command prefix scope, programs are not looked up in the worktree)`,
         };
       }
     }
@@ -541,8 +567,8 @@ export function createRunCommandTool(
       scriptPath,
       shellReason:
         offending !== undefined
-          ? `参数「${offending}」含保守字符集（字母、数字与 _ . - / : = @）之外的字符`
-          : `脚本路径含 cmd 特殊字符：${scriptPath}`,
+          ? `argument "${offending}" contains characters outside the safe set (letters, digits, and _ . - / : = @)`
+          : `the script path contains characters that are special to cmd: ${scriptPath}`,
     };
   };
 
@@ -582,11 +608,14 @@ export function createRunCommandTool(
     const { command, alias } = inspection;
     const jobs = options.jobs;
     if (jobs === undefined || !jobs.available) {
-      throw new RunCommandError("本会话不能开后台作业：去掉 background 在前台运行");
+      throw new RunCommandError(
+        "Background jobs are not available in this session; run the command in the foreground, without background"
+      );
     }
     if (timeoutSeconds !== undefined) {
       throw new RunCommandError(
-        "后台作业不受单次超时约束，不要同时给 timeout_seconds 与 background；要停掉作业用 job_kill"
+        "Background jobs are not subject to the timeout, so do not pass timeout_seconds together with background; " +
+          "use job_kill to stop a job"
       );
     }
     const periodChanges = await periodObserver(host);
@@ -623,9 +652,10 @@ export function createRunCommandTool(
         {
           type: "text",
           text: [
-            `已在后台启动作业 ${job.id}${keep ? "（会话结束后保留）" : ""}：$ ${echoOf(command, alias)}${alias !== undefined ? `（短名 ${alias}）` : ""}`,
+            `Started background job ${job.id}${keep ? " (kept after the session ends)" : ""}: $ ${echoOf(command, alias)}${alias !== undefined ? ` (short name ${alias})` : ""}`,
             jobOutputText(job),
-            "用 job_output 查看状态与新增输出（可带 wait_seconds 等它结束），用 job_kill 停掉；作业结束时会通知你。",
+            "Use job_output to check its status and new output (with wait_seconds to wait for it to end) and job_kill to stop it; " +
+              "you will be notified when the job ends.",
           ].join("\n"),
         },
       ],
@@ -682,17 +712,19 @@ export function createRunCommandTool(
         options.budgetRemainingMs?.()
       );
       if (!permitted(inspection.input, command)) {
-        const names = options.allowlist?.join("、") ?? "";
+        const names = options.allowlist?.join(", ") ?? "";
         throw new RunCommandError(
-          `命令不在本角色允许清单内：${inspection.input}（只能运行设置 commands 一节为该角色登记的命令：${names === "" ? "未登记任何命令" : names}）`
+          `The command is not on this role's allowlist: ${inspection.input} (only the commands registered for this role ` +
+            `in the commands section of the settings can run: ${names === "" ? "none are registered" : names})`
         );
       }
       if (inspection.mode === "invalid") {
-        throw new RunCommandError(inspection.error ?? `无法执行：${echoOf(command, alias)}`);
+        throw new RunCommandError(inspection.error ?? `Cannot run: ${echoOf(command, alias)}`);
       }
       if (inspection.mode === "shell" && !authorized) {
         throw new RunCommandError(
-          `需要经 shell 运行（${inspection.shellReason}），未经人确认 shell，拒绝执行：${echoOf(command, alias)}`
+          `Refused to run: the command needs a shell (${inspection.shellReason}), and running it through a shell ` +
+            `was not confirmed by a person: ${echoOf(command, alias)}`
         );
       }
       const tooLong = commandTooLong(command, platform, inspection.mode);
@@ -702,7 +734,7 @@ export function createRunCommandTool(
       const plan = spawnPlan(inspection, env, platform);
       if (parsed.keep_after_session === true && parsed.background !== true) {
         throw new RunCommandError(
-          `${KEEP_AFTER_SESSION_PARAM} 只用于后台作业：要同时给 background: true`
+          `${KEEP_AFTER_SESSION_PARAM} only applies to background jobs; pass background: true as well`
         );
       }
       if (parsed.background === true) {
@@ -756,10 +788,10 @@ export function createRunCommandTool(
               ...observedChanges,
               note: [
                 observedChanges.note,
-                `有后台作业在跑（${backgroundJobs.map((job) => job.id).join("、")}），这里的变化可能含作业所做的`,
+                `background jobs were running (${backgroundJobs.map((job) => job.id).join(", ")}), so these changes may include theirs`,
               ]
                 .filter((part) => part !== undefined)
-                .join("；"),
+                .join("; "),
             }
           : observedChanges;
       // 写成即改名并记进索引；写到一半出错的删掉临时文件、编号照常前进
@@ -812,7 +844,7 @@ export function createRunCommandTool(
       if (run.spawnError !== undefined) {
         if (run.spawnError.code === "ENOENT") {
           host.forgetLauncherScript?.(inspection.argv?.[0] ?? plan.program);
-          throw new RunCommandError(`命令不存在：${plan.program}`);
+          throw new RunCommandError(`Command not found: ${plan.program}`);
         }
         throw run.spawnError;
       }
@@ -820,14 +852,16 @@ export function createRunCommandTool(
         // 决策 410：命令本身已退出、是它放到后台的进程占着输出才没结束的，点明原因并给出两种做法
         const held =
           run.outputHeldAfterExit === true
-            ? `命令本身已经退出，是它放到后台的进程仍占着输出，命令才没有结束。${heldOutputAdvice(platform, options.jobs?.available === true)}\n`
+            ? "The command itself had already exited, but a process it put in the background still held its output open, " +
+              `so the command did not end. ${heldOutputAdvice(platform, options.jobs?.available === true)}\n`
             : "";
         throw new RunCommandTimeoutError(
-          `命令超时（${durationText(timeoutMs)}）已终止整个进程组：${command}\n${held}${resultText(evidence, headBytes)}`
+          `The command timed out after ${durationText(timeoutMs)}, and its whole process group was killed: ${command}\n` +
+            `${held}${resultText(evidence, headBytes)}`
         );
       }
       if (signal?.aborted === true) {
-        throw new Error(`命令被中止：${echoOf(command, alias)}`);
+        throw new Error(`The command was aborted: ${echoOf(command, alias)}`);
       }
       return {
         content: [{ type: "text", text: resultText(evidence, headBytes) }],
@@ -841,7 +875,9 @@ type SpawnPlan = HostExecPlan;
 
 // 毫秒 → 说法：整秒说秒，否则说毫秒
 export function durationText(ms: number): string {
-  return ms % 1000 === 0 ? `${ms / 1000} 秒` : `${ms} 毫秒`;
+  if (ms % 1000 !== 0) return `${ms} ms`;
+  const seconds = ms / 1000;
+  return `${seconds} second${seconds === 1 ? "" : "s"}`;
 }
 
 // 本次命令的超时：给了 timeout_seconds 用它，否则用缺省。决策 411：超过上限按上限执行，交回夹取的情形（结果里注明，
@@ -884,8 +920,8 @@ function commandTimeout(
 // 决策 411：夹取的说明一句
 function timeoutClampedText(clamped: NonNullable<ExecEvidence["timeoutClamped"]>): string {
   return (
-    `timeout_seconds 给的是 ${clamped.requestedSeconds}，超过上限，已夹到上限 ${clamped.appliedSeconds} 秒执行；` +
-    "更久的命令请用 background 在后台运行"
+    `timeout_seconds was ${clamped.requestedSeconds}, above the maximum, so the command ran with the maximum of ` +
+    `${durationText(clamped.appliedSeconds * 1000)}; run longer commands in the background with background`
   );
 }
 
@@ -894,8 +930,9 @@ export function timeoutShortenedText(
   shortened: NonNullable<ExecEvidence["timeoutShortened"]>
 ): string {
   return (
-    `本次运行的剩余时间不够，超时已按剩余时间缩短为 ${shortened.appliedSeconds} 秒执行（原为 ${durationText(shortened.fromMs)}，` +
-    `剩余时间里留出 ${COMMAND_BUDGET_MARGIN_MS / 1000} 秒收尾）`
+    "Not enough time is left in this run, so the timeout was shortened to " +
+    `${durationText(shortened.appliedSeconds * 1000)} (from ${durationText(shortened.fromMs)}), ` +
+    `keeping ${durationText(COMMAND_BUDGET_MARGIN_MS)} of the remaining time to wrap up`
   );
 }
 
@@ -994,10 +1031,14 @@ function echoOf(command: string, alias: string | undefined): string {
 
 function resultText(evidence: ExecEvidence, headBytes: number): string {
   const changes = evidence.fileChanges;
-  const route = evidence.shell ? "（经 shell）" : evidence.launcher ? "（经 cmd.exe 启动器）" : "";
+  const route = evidence.shell
+    ? " (via shell)"
+    : evidence.launcher
+      ? " (via the cmd.exe launcher)"
+      : "";
   const lines = [
-    `$ ${echoOf(evidence.command, evidence.alias)}${evidence.alias !== undefined ? `（短名 ${evidence.alias}）` : ""}${route}`,
-    `退出码：${evidence.exitCode ?? "无"}${evidence.signal !== undefined ? `（信号 ${evidence.signal}）` : ""}`,
+    `$ ${echoOf(evidence.command, evidence.alias)}${evidence.alias !== undefined ? ` (short name ${evidence.alias})` : ""}${route}`,
+    `Exit code: ${evidence.exitCode ?? "none"}${evidence.signal !== undefined ? ` (signal ${evidence.signal})` : ""}`,
     ...(evidence.timeoutClamped !== undefined ? [timeoutClampedText(evidence.timeoutClamped)] : []),
     ...(evidence.timeoutShortened !== undefined
       ? [timeoutShortenedText(evidence.timeoutShortened)]
@@ -1008,7 +1049,7 @@ function resultText(evidence: ExecEvidence, headBytes: number): string {
     // 决策 365：内存超限时注明期间在跑的后台作业（内存可能是它们占的）
     ...(evidence.memoryLimitExceeded !== undefined && evidence.backgroundJobs !== undefined
       ? [
-          `期间在跑的后台作业：${evidence.backgroundJobs.map((job) => `${job.id}（${commandLabel(job.command)}）`).join("、")}，内存也可能是它们占用的`,
+          `Background jobs running meanwhile: ${evidence.backgroundJobs.map((job) => `${job.id} (${commandLabel(job.command)})`).join(", ")}; they may also account for the memory use`,
         ]
       : []),
   ];
@@ -1025,17 +1066,23 @@ function resultText(evidence: ExecEvidence, headBytes: number): string {
     const saved = evidence.savedOutput;
     if (saved !== undefined) {
       lines.push(
-        `全文共 ${evidence.outputLines ?? 0} 行，已存为 ${saved.uri}，可用 read_file 按 offset 读取需要的一段` +
-          (saved.partial ? `（全文超过落盘上限，只存了前 ${saved.bytes} 字节）` : "") +
-          `；${VIRTUAL_PATH_HINT}`
+        `Full output (${evidence.outputLines ?? 0} lines) saved as ${saved.uri}` +
+          (saved.partial
+            ? ` (it exceeded the storage limit, so only the first ${saved.bytes} bytes were saved)`
+            : "") +
+          `; read the part you need with read_file using offset; ${VIRTUAL_PATH_HINT}`
       );
     } else if (evidence.savedOutputError !== undefined) {
-      lines.push(`全文未能保存（${evidence.savedOutputError}），只有上面的开头与末尾`);
+      lines.push(
+        `The full output could not be saved (${evidence.savedOutputError}); only the start and end above are available`
+      );
     }
   } else {
     lines.push(evidence.output);
     if (evidence.truncated) {
-      lines.push(`…（输出已截断：共 ${evidence.outputBytes} 字节，保留前 ${headBytes} 字节）`);
+      lines.push(
+        `… [output truncated: ${evidence.outputBytes} bytes in total, only the first ${headBytes} bytes kept]`
+      );
     }
   }
   const listed = (label: string, files: string[]) =>
@@ -1089,7 +1136,9 @@ async function observedRun(
       fileChanges:
         after !== undefined
           ? diffStates(observed.before, after)
-          : incompleteChanges("命令后的取证没有取到，差异不完整"),
+          : incompleteChanges(
+              "the file state after the command could not be captured, so the diff is incomplete"
+            ),
     };
   }
   if (host.fileState !== undefined) {
@@ -1118,7 +1167,10 @@ async function periodObserver(host: WorkspaceHost): Promise<() => Promise<FileCh
   return async () => diffFiles(before, await host.listFiles(FILE_SNAPSHOT_LIMIT));
 }
 
-const SCAN_FALLBACK_NOTE = "git status 失败，改用全量扫描";
+const SCAN_FALLBACK_NOTE = "git status failed, so a full scan was used";
+// 取法前后不一时差异说法的后半句
+const STATES_MISMATCH =
+  "which cannot be compared with the state captured before the command, so the diff is incomplete";
 
 function incompleteChanges(note: string): FileChanges {
   return { added: [], removed: [], modified: [], truncated: true, note };
@@ -1137,8 +1189,8 @@ export function diffStates(before: HostFileState, after: HostFileState): FileCha
   if (before.kind !== "git" || after.kind !== "git") {
     return incompleteChanges(
       after.kind === "scan" && after.fallback === true
-        ? `命令后${SCAN_FALLBACK_NOTE}，与命令前的取证对不上，差异不完整`
-        : "命令执行期间建了版本库，与命令前的取证对不上，差异不完整"
+        ? `${SCAN_FALLBACK_NOTE} after the command, ${STATES_MISMATCH}`
+        : `a repository was created while the command ran, ${STATES_MISMATCH}`
     );
   }
   const truncated = before.truncated || after.truncated;

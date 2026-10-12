@@ -57,7 +57,8 @@ test.skipIf(!onWindows)(
       assert.equal(inspection.needsShell, true);
       await assert.rejects(
         tool.execute("tc-3", { command }),
-        (error: unknown) => error instanceof RunCommandError && error.message.includes("「a b」")
+        (error: unknown) =>
+          error instanceof RunCommandError && error.message.includes('argument "a b" contains')
       );
     });
   }
@@ -74,7 +75,8 @@ test("shell 语法判定需 shell：未确认拒绝，确认后以 shell 运行�
 
     await assert.rejects(
       tool.execute("tc-4", { command }),
-      (error: unknown) => error instanceof RunCommandError && /需要经 shell/.test(error.message)
+      (error: unknown) =>
+        error instanceof RunCommandError && /the command needs a shell/.test(error.message)
     );
 
     tool.authorizeShell("tc-5");

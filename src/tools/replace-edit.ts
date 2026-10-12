@@ -34,8 +34,8 @@ import type { PigeonAgentTool, PigeonToolResult, PreviewableTool } from "./wrap.
 
 // 域错误（模型给的原文不对、不唯一或无变化）；带归类标记，tools/error-kind.ts 读标记归 domain
 // 报错文案的稳定前缀（抛错处共用同一常量）
-export const REPLACE_NOT_FOUND_PREFIX = "未找到 old_string";
-export const REPLACE_NOT_UNIQUE_PREFIX = "old_string 不唯一";
+export const REPLACE_NOT_FOUND_PREFIX = "old_string not found";
+export const REPLACE_NOT_UNIQUE_PREFIX = "old_string is not unique";
 
 export class ReplaceEditError extends Error {
   readonly pigeonToolErrorKind = "domain";
@@ -68,17 +68,21 @@ export interface ReplaceEditDetails {
 }
 
 export function replaceEditDescription(outsideWrites: boolean): string {
-  return (
-    `${outsideWrites ? "编辑已存在的文本文件" : "编辑工作区内已存在的文本文件"}：把 old_string 替换为 new_string。` +
-    (outsideWrites ? OUTSIDE_WRITE_SENTENCE : "") +
-    "必须先用 read_file 读取；" +
-    "old_string 须与文件原文逐字一致（含缩进与空白，不带行号前缀），且在文件里恰好出现一次，" +
-    "出现多次时加上前后文使其唯一；old_string 与 new_string 相同会被拒绝。" +
-    "同一文件的多处修改放进一次调用：用 edits 给出一组 {old_string, new_string}（此时不填顶层的 old_string 与 new_string），" +
-    "每处都按改动前的原文定位、各自须唯一且互不交叠，全部通过才一起写入，任一处不通过整组不写。" +
-    "几个文件的修改可以在同一次回复里连发几个 edit_file，会按顺序执行。" +
-    "回执给出改动在新文件里的行区间与上下各两行。"
-  );
+  return [
+    `Edits an existing text file${outsideWrites ? "" : " in the workspace"} by replacing old_string with new_string.`,
+    outsideWrites ? OUTSIDE_WRITE_SENTENCE : "",
+    "Read the file with read_file first.",
+    "old_string must match the file's text exactly (including indentation and whitespace, without the line-number prefix) " +
+      "and appear exactly once in the file; if it appears more than once, add surrounding context to make it unique. " +
+      "An old_string identical to new_string is refused.",
+    "Put several changes to the same file into one call: give edits as a list of {old_string, new_string} " +
+      "(and omit the top-level old_string and new_string). Every edit is located in the original text before any change, " +
+      "each must be unique, and they must not overlap; they are written together only if all pass, and if any fails, none is written.",
+    "Changes to several files can be sent as several edit_file calls in one reply; they run in order.",
+    "The receipt gives the changed lines' range in the new file, with two lines of context above and below.",
+  ]
+    .filter((part) => part !== "")
+    .join(" ");
 }
 
 // 决策 098：workspace 给目录即本地工作区，给执行端实现即由它承接读写；reads 为本会话的读取记录（决策 358）
@@ -122,7 +126,7 @@ export function createReplaceEditTool(
           {
             type: "text",
             text:
-              `已在 ${args.path} 应用 ${plan.count} 处替换（+${addedLines} −${removedLines} 行）` +
+              `Applied ${plan.count} replacement${plan.count === 1 ? "" : "s"} in ${args.path} (+${addedLines} −${removedLines} lines)` +
               receiptSpans(splitContent(plan.newRaw).lines, plan.applied),
           },
         ],
@@ -150,7 +154,7 @@ async function planReplace(
   assertWritePathText(args.path);
   const resolvedPath = await host.resolveForWrite(args.path, pathOptions);
   if (!(await host.isFile(resolvedPath))) {
-    throw new ReplaceEditError(`不是常规文件：${args.path}`);
+    throw new ReplaceEditError(`Not a regular file: ${args.path}`);
   }
   const raw = await host.readText(resolvedPath);
   const split = splitContent(raw);
@@ -165,14 +169,17 @@ async function planReplace(
     if (after.start < before.end) {
       const [first, second] = [before.index, after.index].sort((a, b) => a - b);
       throw new ReplaceEditError(
-        `edits[${first}] 与 edits[${second}] 的 old_string 在原文里交叠：各处都按改动前的原文定位，请合并成一处`
+        `The old_string of edits[${first}] and edits[${second}] overlap in the original text: ` +
+          "every edit is located in the original text before any change, so merge them into one"
       );
     }
   }
   const replaced = spliceSpans(text, 0, text.length, ordered);
   // 各处单看都有变化，合起来仍可能与原文相同（例如一处删掉的正是另一处补上的）
   if (replaced === text) {
-    throw new ReplaceEditError(`${EDIT_NO_CHANGE_PREFIX}：几处替换合起来与原文相同`);
+    throw new ReplaceEditError(
+      `${EDIT_NO_CHANGE_PREFIX}: taken together, the replacements leave the text unchanged`
+    );
   }
   const newLines = linesOf(replaced);
   const newRaw = joinContent(newLines, {
@@ -200,13 +207,15 @@ async function planReplace(
 function pairsOf(args: ReplaceEditParams): { pairs: readonly ReplacePair[]; batch: boolean } {
   if (args.edits !== undefined) {
     if (args.old_string !== undefined || args.new_string !== undefined) {
-      throw new ReplaceEditError("edits 与顶层的 old_string、new_string 只能二选一");
+      throw new ReplaceEditError(
+        "Use either edits or the top-level old_string and new_string, not both"
+      );
     }
     return { pairs: args.edits, batch: true };
   }
   if (args.old_string === undefined || args.new_string === undefined) {
     throw new ReplaceEditError(
-      "缺少 old_string 或 new_string：单处修改两项都要给，同一文件的多处修改用 edits"
+      "Missing old_string or new_string: a single change needs both; for several changes to the same file, use edits"
     );
   }
   return { pairs: [{ old_string: args.old_string, new_string: args.new_string }], batch: false };
@@ -221,11 +230,14 @@ interface LocatedSpan {
 }
 
 function locate(text: string, pair: ReplacePair, path: string, index: number): LocatedSpan {
-  const label = index >= 0 ? `edits[${index}] ` : "";
+  // 报错以稳定前缀开头，edits 的第几项写在前缀之后
+  const where = index >= 0 ? ` in edits[${index}]` : "";
   const oldString = pair.old_string.replaceAll("\r\n", "\n");
   const newString = pair.new_string.replaceAll("\r\n", "\n");
   if (oldString === newString) {
-    throw new ReplaceEditError(`${label}${EDIT_NO_CHANGE_PREFIX}：old_string 与 new_string 相同`);
+    throw new ReplaceEditError(
+      `${EDIT_NO_CHANGE_PREFIX}${where}: old_string and new_string are identical`
+    );
   }
   const positions: number[] = [];
   for (
@@ -238,15 +250,18 @@ function locate(text: string, pair: ReplacePair, path: string, index: number): L
   const first = positions[0];
   if (first === undefined) {
     throw new ReplaceEditError(
-      `${label}${REPLACE_NOT_FOUND_PREFIX}：请重新 read_file 核对原文，含缩进与空白，不要带行号前缀` +
-        (index >= 0 ? "；各处都按改动前的原文定位，不能引用别处改出的文字" : "")
+      `${REPLACE_NOT_FOUND_PREFIX}${where}: read the file again with read_file and check the original text, ` +
+        "including indentation and whitespace, without the line-number prefix" +
+        (index >= 0
+          ? "; every edit is located in the original text before any change, so it cannot refer to text produced by another edit"
+          : "")
     );
   }
   if (positions.length > 1) {
     const startLines = positions.map((position) => lineNumberAt(text, position));
     throw new ReplaceEditError(
-      `${label}${REPLACE_NOT_UNIQUE_PREFIX}：在 ${path} 中出现 ${positions.length} 次（起始行 ${startLines.join("、")}），` +
-        "请加上下文使其唯一"
+      `${REPLACE_NOT_UNIQUE_PREFIX}${where}: it appears ${positions.length} times in ${path} ` +
+        `(starting at lines ${startLines.join(", ")}); add surrounding context to make it unique`
     );
   }
   return { index, start: first, end: first + oldString.length, newString };
@@ -316,9 +331,10 @@ function receiptSpans(newLines: readonly string[], applied: readonly AppliedEdit
   const parts = applied.map((span, index) => {
     const start = span.startLine + shift;
     shift += span.added.length - span.removed.length;
-    return `\n第 ${index + 1} 段${changeContext(newLines, start, span.added.length)}`;
+    // changeContext 以 "; " 开头，段号之后改用冒号接上
+    return `\nRegion ${index + 1}: ${changeContext(newLines, start, span.added.length).slice(2)}`;
   });
-  return `，共 ${applied.length} 段${parts.join("")}`;
+  return `; ${applied.length} changed regions${parts.join("")}`;
 }
 
 function lineNumberAt(text: string, position: number): number {
@@ -349,21 +365,21 @@ export function changeContext(newLines: readonly string[], start: number, count:
   if (count === 0) {
     const where =
       start > newLines.length
-        ? `新文件末尾（第 ${newLines.length} 行之后）`
-        : `新文件第 ${start} 行之前`;
-    return `；删去处在${where}：\n${numbered(start - CONTEXT_LINES, start + CONTEXT_LINES - 1).join("\n")}`;
+        ? `at the end of the new file (after line ${newLines.length})`
+        : `before line ${start} of the new file`;
+    return `; deleted ${where}:\n${numbered(start - CONTEXT_LINES, start + CONTEXT_LINES - 1).join("\n")}`;
   }
   const end = start + count - 1;
   const span =
     count > SPAN_SHOWN_WHOLE
       ? [
           ...numbered(start, start + SPAN_EDGE - 1),
-          `…（中间 ${count - 2 * SPAN_EDGE} 行）`,
+          `… (${count - 2 * SPAN_EDGE} more lines)`,
           ...numbered(end - SPAN_EDGE + 1, end),
         ]
       : numbered(start, end);
   return (
-    `；新文件第 ${start}–${end} 行：\n` +
+    `; lines ${start}–${end} of the new file:\n` +
     [
       ...numbered(start - CONTEXT_LINES, start - 1),
       ...span,

@@ -34,12 +34,12 @@ export const INVALID_UTF8_SHARE = 0.1;
 // 认得的二进制格式：偏移、文件头字节与名称。只收文件头足够特别、不会是文本开头的
 const SIGNATURES: ReadonlyArray<{ at: number; magic: readonly number[] | string; name: string }> = [
   { at: 0, magic: "%PDF-", name: "PDF" },
-  { at: 0, magic: [0x50, 0x4b, 0x03, 0x04], name: "ZIP（含 docx、xlsx、jar 等）" },
+  { at: 0, magic: [0x50, 0x4b, 0x03, 0x04], name: "ZIP, including docx, xlsx, jar, etc." },
   { at: 0, magic: [0x1f, 0x8b], name: "gzip" },
   { at: 0, magic: [0xfd, 0x37, 0x7a, 0x58, 0x5a, 0x00], name: "xz" },
   { at: 0, magic: [0x37, 0x7a, 0xbc, 0xaf, 0x27, 0x1c], name: "7z" },
-  { at: 0, magic: [0x7f, 0x45, 0x4c, 0x46], name: "ELF 可执行文件" },
-  { at: 0, magic: "SQLite format 3\0", name: "SQLite 数据库" },
+  { at: 0, magic: [0x7f, 0x45, 0x4c, 0x46], name: "ELF executable" },
+  { at: 0, magic: "SQLite format 3\0", name: "SQLite database" },
   { at: 0, magic: [0x00, 0x61, 0x73, 0x6d], name: "WebAssembly" },
   { at: 0, magic: [0x49, 0x49, 0x2a, 0x00], name: "TIFF" },
   { at: 0, magic: [0x4d, 0x4d, 0x00, 0x2a], name: "TIFF" },

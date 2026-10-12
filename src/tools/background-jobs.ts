@@ -88,7 +88,7 @@ class JobOutputFile {
     const stat = fstatSync(fd, { bigint: true });
     if (String(stat.dev) !== this.dev || String(stat.ino) !== this.ino) {
       closeSync(fd);
-      throw new Error("作业的输出文件已被替换");
+      throw new Error("The job's output file has been replaced");
     }
     this.#external = true;
     return fd;
@@ -113,7 +113,7 @@ class JobOutputFile {
   #writeAt(buffer: Buffer, position: number): void {
     for (let done = 0; done < buffer.length; ) {
       const wrote = writeSync(this.#fd, buffer, done, buffer.length - done, position + done);
-      if (wrote <= 0) throw new Error("落盘写不进去");
+      if (wrote <= 0) throw new Error("could not write to the output file");
       done += wrote;
     }
   }
@@ -396,7 +396,8 @@ export interface JobStartInput {
 }
 
 const PERIOD_NOTE =
-  "作业开始与结束时的取证比出，已扣除这期间 Pigeon 已知的前台改动；作业与前台改了同一个文件、或有不经 Pigeon 的改动时不精确";
+  "compared between the job's start and end, excluding the foreground changes Pigeon knows about from that period; " +
+  "imprecise if the job and the foreground changed the same file, or if changes were made outside Pigeon";
 
 // 一个会话的后台作业
 export class SessionJobs {
@@ -462,7 +463,7 @@ export class SessionJobs {
     if (job === undefined) {
       const known = this.list().map((item) => item.id);
       throw new BackgroundJobError(
-        `本会话没有作业 ${id}${known.length > 0 ? `（本会话的作业：${known.join("、")}）` : "（本会话还没有后台作业）"}`
+        `This session has no job ${id}${known.length > 0 ? ` (jobs in this session: ${known.join(", ")})` : " (this session has no background jobs yet)"}`
       );
     }
     return job;
@@ -543,24 +544,26 @@ export class SessionJobs {
   async start(input: JobStartInput): Promise<BackgroundJob> {
     const host = this.#options.host;
     if (host.startJob === undefined) {
-      throw new BackgroundJobError("本执行端不支持后台作业");
+      throw new BackgroundJobError("This execution environment does not support background jobs");
     }
     if (this.#closed !== undefined) {
-      throw new BackgroundJobError(`不再接受新的后台作业：${this.#closed}`);
+      throw new BackgroundJobError(`New background jobs are no longer accepted: ${this.#closed}`);
     }
     const running = this.running();
     if (running.length >= this.#options.perSession) {
       throw new BackgroundJobError(
-        `本会话同时在跑的后台作业已达上限（${this.#options.perSession} 个），拒绝启动、不排队。${listRunning(running)}` +
-          "可以用 job_output 等它们结束，或用 job_kill 停掉不需要的"
+        `This session already has the maximum of ${jobsText(this.#options.perSession)} running; ` +
+          `the job was not started and is not queued. ${listRunning(running)} ` +
+          "Use job_output to wait for them to end, or job_kill to stop the ones you no longer need"
       );
     }
     const pool = this.#options.pool;
     const all = pool.running();
     if (all.length >= pool.total) {
       throw new BackgroundJobError(
-        `整次运行同时在跑的后台作业已达上限（${pool.total} 个，含 worker 的），拒绝启动、不排队。${listRunning(all)}` +
-          "可以用 job_output 等本会话的作业结束，或用 job_kill 停掉不需要的"
+        `This run already has the maximum of ${jobsText(pool.total)} running (including workers' jobs); ` +
+          `the job was not started and is not queued. ${listRunning(all)} ` +
+          "Use job_output to wait for this session's jobs to end, or job_kill to stop the ones you no longer need"
       );
     }
     const slot = this.#options.store.next();
@@ -640,7 +643,7 @@ export class SessionJobs {
           removed: keep(changes.removed),
           modified: keep(changes.modified),
           truncated: changes.truncated,
-          note: changes.note !== undefined ? `${PERIOD_NOTE}；${changes.note}` : PERIOD_NOTE,
+          note: changes.note !== undefined ? `${PERIOD_NOTE}; ${changes.note}` : PERIOD_NOTE,
         };
       } catch (error) {
         job.fileChanges = {
@@ -648,7 +651,7 @@ export class SessionJobs {
           removed: [],
           modified: [],
           truncated: true,
-          note: `作业结束时的取证失败（${error instanceof Error ? error.message : String(error)}），期间变化未知`,
+          note: `capturing the file state when the job ended failed (${error instanceof Error ? error.message : String(error)}), so the changes during the job are unknown`,
         };
       }
     }
@@ -774,53 +777,60 @@ function raceWithTimeout(
 // 毫秒 → 时长说法
 export function elapsedText(ms: number): string {
   const seconds = Math.max(0, Math.round(ms / 1000));
-  if (seconds < 60) return `${seconds} 秒`;
-  if (seconds < 3600) return `${Math.floor(seconds / 60)} 分 ${seconds % 60} 秒`;
-  return `${Math.floor(seconds / 3600)} 小时 ${Math.floor((seconds % 3600) / 60)} 分`;
+  if (seconds < 60) return `${seconds}s`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
+  return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`;
+}
+
+function jobsText(count: number): string {
+  return `${count} background job${count === 1 ? "" : "s"}`;
 }
 
 function listRunning(jobs: readonly BackgroundJob[]): string {
   const now = Date.now();
-  return `在跑的作业：${jobs.map((job) => `${job.id}（${commandLabel(job.command)}，已 ${elapsedText(now - job.startedAt)}）`).join("；")}。`;
+  return `Running jobs: ${jobs.map((job) => `${job.id} (${commandLabel(job.command)}, running for ${elapsedText(now - job.startedAt)})`).join("; ")}.`;
 }
 
 // 一个作业的状态一句
 export function jobStateText(job: BackgroundJob, now = Date.now()): string {
   if (job.state === "running") {
-    return `在跑（已 ${elapsedText(now - job.startedAt)}${job.keep ? "；会话结束后保留" : ""}）`;
+    return `running (for ${elapsedText(now - job.startedAt)}${job.keep ? "; kept after the session ends" : ""})`;
   }
-  const took = `用时 ${elapsedText((job.endedAt ?? now) - job.startedAt)}`;
+  const took = `took ${elapsedText((job.endedAt ?? now) - job.startedAt)}`;
   const exit = job.exit;
   if (job.state === "failed") {
     return exit?.spawnError?.code === "ENOENT"
-      ? `没有启动：命令不存在`
-      : `没有启动：${exit?.spawnError?.message ?? "未知原因"}`;
+      ? "did not start: command not found"
+      : `did not start: ${exit?.spawnError?.message ?? "unknown reason"}`;
   }
-  const code = `退出码 ${exit?.exitCode ?? "无"}${exit?.signal !== undefined ? `（信号 ${exit.signal}）` : ""}`;
+  const code = `exit code ${exit?.exitCode ?? "none"}${exit?.signal !== undefined ? ` (signal ${exit.signal})` : ""}`;
   if (job.state === "killed") {
     const by = {
-      job_kill: "已用 job_kill 停止",
-      aborted: "会话结束时停止",
-      closeout: "无人值守收尾的总时限到了，已停止",
+      job_kill: "stopped with job_kill",
+      aborted: "stopped when the session ended",
+      closeout: "stopped because the time limit for the unattended wrap-up was reached",
     }[job.killedBy ?? "job_kill"];
-    return `${by}（${code}，${took}）`;
+    return `${by} (${code}, ${took})`;
   }
-  return `已结束（${code}，${took}）`;
+  return `ended (${code}, ${took})`;
 }
 
 // 作业的输出去向一句：结束后可用 read_file 读全文；在跑时用 job_output
 export function jobOutputText(job: BackgroundJob): string {
   const dropped =
     job.outputDropped > 0
-      ? `；输出超过单个文件的上限，文件里只留了末尾，前面 ${job.outputDropped} 字节已丢弃`
+      ? `; the output exceeded the per-file limit, so only its end was kept and the first ${job.outputDropped} bytes were discarded`
       : "";
   if (job.state === "running") {
-    return `输出共 ${job.outputBytes} 字节，持续写入 ${job.outputUri}（作业结束后可用 read_file 读取；在跑时用 job_output 读新增的）；${VIRTUAL_PATH_HINT}${dropped}`;
+    return (
+      `Output so far: ${job.outputBytes} bytes, being written to ${job.outputUri} ` +
+      `(read it with read_file after the job ends; while it runs, use job_output to read new output); ${VIRTUAL_PATH_HINT}${dropped}`
+    );
   }
   if (job.outputSaved) {
-    return `输出共 ${job.outputBytes} 字节，全文存为 ${job.outputUri}，可用 read_file 按 offset 读取；${VIRTUAL_PATH_HINT}${dropped}`;
+    return `Output: ${job.outputBytes} bytes, saved in full as ${job.outputUri}; read it with read_file using offset; ${VIRTUAL_PATH_HINT}${dropped}`;
   }
-  return `输出共 ${job.outputBytes} 字节，全文未能保存（${job.outputError ?? "未知原因"}）`;
+  return `Output: ${job.outputBytes} bytes; the full output could not be saved (${job.outputError ?? "unknown reason"})`;
 }
 
 // 期间变化一句（没取证的不写）
@@ -829,12 +839,12 @@ export function jobChangesText(job: BackgroundJob): string | undefined {
   if (changes === undefined) return undefined;
   const listed = (label: string, files: string[]) =>
     files.length > 0
-      ? `；${label}：${files.slice(0, 20).join("、")}${files.length > 20 ? " 等" : ""}`
+      ? `; ${label}: ${files.slice(0, 20).join(", ")}${files.length > 20 ? ", ..." : ""}`
       : "";
   return (
-    `作业期间的文件变化：新增 ${changes.added.length} / 删除 ${changes.removed.length} / 修改 ${changes.modified.length}` +
-    `${listed("新增", changes.added)}${listed("删除", changes.removed)}${listed("修改", changes.modified)}` +
-    `（${changes.note ?? PERIOD_NOTE}）`
+    `File changes during the job: added ${changes.added.length} / removed ${changes.removed.length} / modified ${changes.modified.length}` +
+    `${listed("Added", changes.added)}${listed("Removed", changes.removed)}${listed("Modified", changes.modified)}` +
+    ` (${changes.note ?? PERIOD_NOTE})`
   );
 }
 
@@ -842,8 +852,10 @@ export function jobChangesText(job: BackgroundJob): string | undefined {
 export function takeNewOutput(job: BackgroundJob, maxBytes: number): string {
   const read = (job as Job).output.read(job.readOffset, maxBytes);
   job.readOffset = read.end;
-  if (read.text === "" && read.skipped === 0) return "（没有新输出）";
-  return read.skipped > 0 ? `…（新增输出前面省略 ${read.skipped} 字节）\n${read.text}` : read.text;
+  if (read.text === "" && read.skipped === 0) return "(no new output)";
+  return read.skipped > 0
+    ? `… [the first ${read.skipped} bytes of the new output were omitted]\n${read.text}`
+    : read.text;
 }
 
 // 输出末尾一段（通知用；不动已读位置）
