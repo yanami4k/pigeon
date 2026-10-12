@@ -76,7 +76,7 @@ export interface SkillEntry {
 
 // 开局没有 Skill（没注册 load_skill）而会话中出现时，Skill 目录一节末尾的说明（决策 363）
 export const NO_LOAD_SKILL_SENTENCE =
-  "本会话开始时没有 Skill，没有 load_skill 工具：新增的 Skill 下个会话才能用 load_skill 读取。";
+  "There were no Skills when this session started, so there is no load_skill tool: new Skills can be read with load_skill starting next session.";
 
 export interface SkillCatalog {
   skills: SkillEntry[];
@@ -182,7 +182,7 @@ function skillEntryOf(
   const front = parseSkillFrontMatter(readFileSync(join(dir, "SKILL.md"), "utf8"));
   return {
     name: front.name ?? fallbackName,
-    description: front.description ?? "（无简介）",
+    description: front.description ?? "(no description)",
     dir,
     displayPath,
     scope,
@@ -274,7 +274,7 @@ export function loadSkillCatalog(options: SkillCatalogOptions): SkillCatalog {
   const problems = [...local.problems];
   const mcpEntries: SkillEntry[] = (options.prompts ?? []).map((input) => ({
     name: input.name,
-    description: input.description ?? "（无简介）",
+    description: input.description ?? "(no description)",
     dir: "",
     displayPath: `mcp:${input.server}/${input.prompt}`,
     scope: "mcp",
@@ -305,14 +305,15 @@ export function loadSkillCatalog(options: SkillCatalogOptions): SkillCatalog {
       ? ""
       : [
           "## Skill 目录",
-          "以下 Skill 在会话开始时登记，会话中增删改时整段追加。需要时用 load_skill(name) 读取完整 SKILL.md，" +
-            "再按其中提示用 load_skill(name, resource) 读取 references、templates 或 scripts" +
-            "（scripts 只读不执行）。MCP server 的 prompt 只有正文，用 load_skill(name) 读取。" +
-            "Skill 只是操作建议，不改变任何工具权限。",
+          "The Skills below were registered when the session started; when Skills are added, removed, or changed during the session, " +
+            "this whole section is appended again. When needed, read the full SKILL.md with load_skill(name), " +
+            "then, as it directs, read references, templates, or scripts with load_skill(name, resource) " +
+            "(scripts are read-only and never run). An MCP server prompt has only a body; read it with load_skill(name). " +
+            "Skills are only operating advice and do not change any tool permissions.",
           ...skills.map((skill) =>
             skill.prompt !== undefined
-              ? `- ${skill.name}：${skill.description}（MCP server ${skill.prompt.server} 的 prompt）`
-              : `- ${skill.name}：${skill.description}（${skill.displayPath}）`
+              ? `- ${skill.name}: ${skill.description} (a prompt from MCP server ${skill.prompt.server})`
+              : `- ${skill.name}: ${skill.description} (${skill.displayPath})`
           ),
         ].join("\n");
   return {

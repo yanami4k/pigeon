@@ -58,8 +58,8 @@ test("扫描项目级与用户级：前言 name / description；清单含目录�
         { path: "scripts/run.sh", hash: sha256("echo hi"), bytes: 7 },
       ],
     });
-    assert.ok(catalog.section.includes("- deploy：部署到预发环境的步骤（.pigeon/skills/deploy）"));
-    assert.ok(catalog.section.includes("- review：代码评审要点（~/.pigeon/skills/review）"));
+    assert.ok(catalog.section.includes("- deploy: 部署到预发环境的步骤 (.pigeon/skills/deploy)"));
+    assert.ok(catalog.section.includes("- review: 代码评审要点 (~/.pigeon/skills/review)"));
     assert.ok(!catalog.section.includes("先跑测试"), "SKILL.md 正文不进启动注入");
     assert.match(catalog.section, /load_skill/);
   } finally {
@@ -79,7 +79,7 @@ test("同名 Skill 项目级优先，用户级同名记问题不重复登记；�
     assert.deepEqual(
       catalog.skills.map((skill) => [skill.name, skill.description]),
       [
-        ["bare", "（无简介）"],
+        ["bare", "(no description)"],
         ["review", "项目版"],
       ]
     );

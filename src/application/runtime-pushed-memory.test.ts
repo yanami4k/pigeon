@@ -108,7 +108,7 @@ test("只推送：推送段在开工状态块里、排在人写的说明与 Skil
       // 决策 363：推送段在开工状态块里，稳定的在前——人写的说明、Skill 目录之后才是记忆
       const prompt = statusTextOf(streamFn.calls[0]);
       const resident = prompt.indexOf("## 人写的说明（AGENTS.md）");
-      const skills = prompt.indexOf("- deploy：部署步骤（.pigeon/skills/deploy）");
+      const skills = prompt.indexOf("- deploy: 部署步骤 (.pigeon/skills/deploy)");
       const pushed = prompt.indexOf("## 学到的记忆");
       assert.ok(resident >= 0 && skills > resident && pushed > skills, prompt);
       // 三段都只在状态块里：系统提示里没有记忆、Skill 目录与人写的说明
