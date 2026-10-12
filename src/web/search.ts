@@ -1,7 +1,7 @@
 // 联网搜索的通用流程与结果整理（决策 287、288）：后端做成可换的接口，工具只认这个接口；结果统一为
 // 标题、链接、摘要的列表，服务端给出答案时一并交回。
 // 来源：@amaster.ai/pi-web-access 0.1.19 的 dist/types.js、dist/search.js 与 dist/index.js 里的结果整理（Apache-2.0，
-// 见 third_party/pi-web-access/），已修改：参数只留查询词与条数；结果整理改为中文文本；后端由装配方注入，不在这里按
+// 见 third_party/pi-web-access/），已修改：参数只留查询词与条数；结果整理改为 Pigeon 自己的文本格式；后端由装配方注入，不在这里按
 // 配置挑选。
 import type { TurnUsage } from "../state/runtime-events.ts";
 
@@ -39,7 +39,7 @@ export class SearchBackendError extends Error {}
 // 各后端共用：响应正文只截前 300 字符进报错文字（不把整页错误页塞给模型）
 export function describeHttpFailure(backend: string, status: number, body: string): string {
   const excerpt = body.replace(/\s+/g, " ").trim().slice(0, 300);
-  return `${backend} 搜索服务返回 HTTP ${status}${excerpt !== "" ? `：${excerpt}` : ""}`;
+  return `${backend} search service returned HTTP ${status}${excerpt !== "" ? `: ${excerpt}` : ""}`;
 }
 
 // 结果去重（按链接）并截到条数
@@ -67,13 +67,13 @@ export function normalizeResults(results: SearchResult[], maxResults: number): S
 export function formatSearchResponse(response: SearchResponse): string {
   const lines: string[] = [];
   lines.push(
-    `搜索：${response.query}（后端 ${response.backend}，${response.results.length} 条结果）`
+    `Search: ${response.query} (backend ${response.backend}, ${response.results.length} results)`
   );
   if (response.answer !== undefined && response.answer.trim() !== "") {
-    lines.push("答案：", response.answer.trim());
+    lines.push("Answer:", response.answer.trim());
   }
   if (response.results.length > 0) {
-    lines.push("结果：");
+    lines.push("Results:");
     for (const [index, result] of response.results.entries()) {
       lines.push(`${index + 1}. ${result.title}`, `   ${result.url}`);
       if (result.snippet !== "") {
@@ -82,7 +82,7 @@ export function formatSearchResponse(response: SearchResponse): string {
     }
   }
   if (response.results.length === 0 && (response.answer ?? "").trim() === "") {
-    lines.push("没有搜到结果，换个说法再试。");
+    lines.push("No results found; try rephrasing the query.");
   }
   return lines.join("\n");
 }

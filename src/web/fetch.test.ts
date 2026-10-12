@@ -87,7 +87,7 @@ test("HTML 页面：标题取 <title>（解实体、去空白），正文为 Mar
   assert.equal(page.finalUrl, "https://site.example/page");
   assert.match(page.content, /# 正文标题/);
   assert.match(page.content, /第一段 \[链接\]\(\/x\)/);
-  assert.match(page.content, /\[图：示意图\]/);
+  assert.match(page.content, /\[Image: 示意图\]/);
   assert.match(page.content, /const a = 1;/);
   assert.doesNotMatch(page.content, /STYLE_SCRIPT_MARKER|color:red|NOSCRIPT_MARKER|base64/);
   assert.equal(page.truncated, false);
@@ -117,7 +117,7 @@ test("超大页面截断：字节上限只读前 N 字节并标记；字符上�
 });
 
 test("非文本内容拒绝；HTTP 错误状态报错；JSON 原样交回", async () => {
-  await assert.rejects(fetchPage("https://site.example/bin", options), /不是文本内容/);
+  await assert.rejects(fetchPage("https://site.example/bin", options), /Not text content/);
   await assert.rejects(fetchPage("https://site.example/missing", options), /HTTP 404/);
   const json = await fetchPage("https://site.example/json", options);
   assert.equal(json.kind, "page");
@@ -158,7 +158,7 @@ test("内网地址在抓取之前就被拒绝，不发请求", async () => {
   };
   await assert.rejects(
     fetchPage("http://127.0.0.1/page", { ...options, transport: counting }),
-    (error: unknown) => (error as UnsafeUrlError).message.includes("只能访问公网")
+    (error: unknown) => (error as UnsafeUrlError).message.includes("Only public http(s) URLs")
   );
   assert.equal(called, 0);
 });

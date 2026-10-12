@@ -24,13 +24,17 @@ import { formatSearchResponse, type SearchBackend } from "./search.ts";
 // ---- web_search ----
 
 export const WEB_SEARCH_DESCRIPTION =
-  "联网搜索。按查询词搜索网上的资料，返回结果列表：每条有标题、链接与摘要；搜索服务给出答案时一并返回。" +
-  "摘要只是线索，需要细节时用 web_fetch 读取对应网页。";
+  "Search the web. Searches online sources for the query and returns a list of results, each with a title, link, and snippet; " +
+  "when the search service gives an answer, it is returned as well. Snippets are only leads; when you need details, read the page with web_fetch.";
 
 export const WebSearchParamsSchema = Type.Object({
-  query: Type.String({ minLength: 1, description: "查询词" }),
+  query: Type.String({ minLength: 1, description: "Search query" }),
   maxResults: Type.Optional(
-    Type.Integer({ minimum: 1, maximum: 20, description: "返回的结果条数（1 到 20，缺省 5）" })
+    Type.Integer({
+      minimum: 1,
+      maximum: 20,
+      description: "Number of results to return (1 to 20, default 5)",
+    })
   ),
 });
 export type WebSearchParams = Static<typeof WebSearchParamsSchema>;
@@ -78,7 +82,7 @@ export function createWebSearchTool(
       const args = Value.Parse(WebSearchParamsSchema, params);
       const backend = setup.backend;
       if (backend === undefined) {
-        throw new WebSearchUnavailableError(setup.unavailable ?? "没有可用的搜索后端");
+        throw new WebSearchUnavailableError(setup.unavailable ?? "No search backend is available");
       }
       const response = await backend.search(
         { query: args.query, maxResults: args.maxResults ?? setup.defaultMaxResults },
@@ -102,15 +106,17 @@ export function createWebSearchTool(
 // ---- web_fetch ----
 
 export const WEB_FETCH_DESCRIPTION =
-  "读取一个公开网页并从中找出你要的信息。给出网址与要从网页里找什么；Pigeon 抓取网页后按你的问题提炼，" +
-  "只交回提炼结果，不交回网页原文，所以问题要写具体。只接受公开的 http(s) 网址，内网与本机地址会被拒绝；" +
-  "跳到别的网站时不跟随，会告诉你跳到了哪里。";
+  "Read a public web page and find the information you need in it. Give the URL and what to look for on the page; Pigeon fetches the page, " +
+  "distills it according to your question, and returns only the distilled result, not the page text, so make the question specific. " +
+  "Only public http(s) URLs are accepted; private-network and local addresses are rejected. " +
+  "Redirects to another site are not followed; you are told where the redirect goes.";
 
 export const WebFetchParamsSchema = Type.Object({
-  url: Type.String({ minLength: 1, description: "要读取的网址（http 或 https）" }),
+  url: Type.String({ minLength: 1, description: "URL to read (http or https)" }),
   prompt: Type.String({
     minLength: 1,
-    description: "要从这个网页里找什么：问题或要提取的信息，写具体",
+    description:
+      "What to find on this page: a question or the information to extract. Be specific.",
   }),
 });
 export type WebFetchParams = Static<typeof WebFetchParamsSchema>;
@@ -148,8 +154,8 @@ export interface WebFetchDetails {
 // 各情形交回模型的文字
 export const WEB_FETCH_TEXTS = {
   redirect: (from: string, to: string, toHost: string) =>
-    `网页跳到了另一个网站：${to}（网站 ${toHost}，来自 ${from}）。没有跟随跳转；如需读取，请用 web_fetch 抓取该网址。`,
-  outputTruncatedNote: "（提炼结果撞上输出上限，末尾可能不完整）",
+    `The page redirects to another site: ${to} (site ${toHost}, from ${from}). The redirect was not followed; to read it, fetch that URL with web_fetch.`,
+  outputTruncatedNote: "(The distilled result hit the output limit; the end may be incomplete.)",
 } as const;
 
 export function createWebFetchTool(
@@ -194,11 +200,11 @@ export function createWebFetchTool(
         ...(signal !== undefined ? { signal } : {}),
       });
       const lines = [
-        `网页：${page.title}`,
-        `网址：${page.finalUrl}${page.finalUrl !== args.url ? `（原网址 ${args.url}，同站跳转）` : ""}`,
+        `Page: ${page.title}`,
+        `URL: ${page.finalUrl}${page.finalUrl !== args.url ? ` (original URL ${args.url}, redirected within the same site)` : ""}`,
         ...(page.truncated ? [truncatedNote(page.content.length)] : []),
-        `提炼结果（针对：${args.prompt}）：`,
-        distilled.text.trim() === "" ? "（提炼结果为空）" : distilled.text.trim(),
+        `Distilled result (for: ${args.prompt}):`,
+        distilled.text.trim() === "" ? "(The distilled result is empty.)" : distilled.text.trim(),
         ...(distilled.outputTruncated === true ? [WEB_FETCH_TEXTS.outputTruncatedNote] : []),
       ];
       return {

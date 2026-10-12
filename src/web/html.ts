@@ -13,7 +13,7 @@ function createConverter(): TurndownService {
     filter: "img",
     replacement: (_content, node) => {
       const alt = node.getAttribute("alt")?.trim() ?? "";
-      return alt === "" ? "" : `[图：${alt}]`;
+      return alt === "" ? "" : `[Image: ${alt}]`;
     },
   });
   return turndown;
