@@ -469,7 +469,7 @@ describe.skipIf(skip ?? false)("容器执行端（真容器）", () => {
     );
     await assert.rejects(
       tool.execute("c3", { command: "no-such-program-here" }, undefined),
-      /命令不存在/
+      /Command not found/
     );
   });
 

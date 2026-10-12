@@ -45,7 +45,10 @@ test("超长行截断显示并注明原长，其余行照常；没碰到上限�
     const read = createReadFileTool(root, { editMode: "replace" });
     const text = textOf(await read.execute("r", { path: "f.txt" }));
     assert.match(text, /^1\| short$/m);
-    assert.match(text, new RegExp(`^2\\| ${"y".repeat(2000)}…（本行共 5000 字符`, "m"));
+    assert.match(
+      text,
+      new RegExp(`^2\\| ${"y".repeat(2000)}… \\[line truncated: 5000 characters`, "m")
+    );
     assert.doesNotMatch(text, new RegExp("y".repeat(2001)));
     assert.match(text, /^3\| end$/m);
     assert.doesNotMatch(text, /offset=/);

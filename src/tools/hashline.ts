@@ -6,8 +6,8 @@ import { createHash } from "node:crypto";
 import { EDIT_NO_CHANGE_PREFIX } from "./edit-mode.ts";
 
 // 锚点类报错文案的稳定标记（抛错处模板共用）
-export const HASHLINE_ANCHOR_MISS_MARK = "未命中";
-export const HASHLINE_OUT_OF_RANGE_MARK = "越界";
+export const HASHLINE_ANCHOR_MISS_MARK = "does not match";
+export const HASHLINE_OUT_OF_RANGE_MARK = "is out of range";
 
 export class HashlineError extends Error {}
 
@@ -28,11 +28,13 @@ const ANCHOR_PATTERN = /^(\d+)#([0-9a-f]{4})$/;
 export function parseAnchor(anchor: string): { line: number; tag: string } {
   const match = ANCHOR_PATTERN.exec(anchor);
   if (match === null) {
-    throw new HashlineError(`畸形锚点：${JSON.stringify(anchor)}，期望形如 12#a1b2`);
+    throw new HashlineError(
+      `Malformed anchor: ${JSON.stringify(anchor)}; expected the form 12#a1b2`
+    );
   }
   const line = Number(match[1]);
   if (line < 1) {
-    throw new HashlineError(`锚点行号必须 ≥ 1：${JSON.stringify(anchor)}`);
+    throw new HashlineError(`The anchor's line number must be ≥ 1: ${JSON.stringify(anchor)}`);
   }
   return { line, tag: match[2] as string };
 }
@@ -101,7 +103,7 @@ export function applyHashlineEdits(
   edits: readonly HashlineEdit[]
 ): { lines: string[]; applied: AppliedEdit[] } {
   if (edits.length === 0) {
-    throw new HashlineError(" edits 为空：至少给一处编辑");
+    throw new HashlineError("edits is empty: give at least one edit");
   }
   // 预检一：解析全部锚点并校验 tag（行号漂移/内容变化在此现形）
   const resolved = edits.map((edit, index) => resolveEdit(lines, edit, index));
@@ -112,7 +114,7 @@ export function applyHashlineEdits(
       const b = resolved[j];
       if (a !== undefined && b !== undefined && a.start <= b.end && b.start <= a.end) {
         throw new HashlineError(
-          `多处编辑的行范围重叠（edits[${i}] 与 edits[${j}]），请合并成一处再提`
+          `The line ranges of edits[${i}] and edits[${j}] overlap; merge them into one edit and try again`
         );
       }
     }
@@ -158,7 +160,9 @@ function resolveEdit(
       ? checkAnchor(lines, edit.endAnchor, index, "endAnchor")
       : anchor;
   if (end < anchor) {
-    throw new HashlineError(`edits[${index}] 的 endAnchor 在 anchor 之前，范围倒置`);
+    throw new HashlineError(
+      `In edits[${index}], endAnchor comes before anchor, so the range is reversed`
+    );
   }
   // insertAfter 只在锚点行之后插入，不删除任何行；锚点行只决定位置（范围仍占锚点行，供重叠检测）
   const removed = edit.op === "insertAfter" ? [] : lines.slice(anchor, end + 1);
@@ -176,14 +180,15 @@ function checkAnchor(
   const { line, tag } = parseAnchor(anchor);
   if (line > lines.length) {
     throw new HashlineError(
-      `edits[${index}] 的 ${role} ${HASHLINE_OUT_OF_RANGE_MARK}：第 ${line} 行不存在（共 ${lines.length} 行）`
+      `The ${role} of edits[${index}] ${HASHLINE_OUT_OF_RANGE_MARK}: line ${line} does not exist ` +
+        `(the file has ${lines.length} line${lines.length === 1 ? "" : "s"})`
     );
   }
   const actual = lineTag(lines[line - 1] as string);
   if (actual !== tag) {
     throw new HashlineError(
-      `edits[${index}] 的 ${role} ${HASHLINE_ANCHOR_MISS_MARK}：第 ${line} 行当前标签为 ${actual}，` +
-        `锚点是 ${tag}——文件可能已变化，请重新 read_file 获取最新锚点`
+      `The ${role} of edits[${index}] ${HASHLINE_ANCHOR_MISS_MARK}: line ${line} now has the tag ${actual}, ` +
+        `but the anchor has ${tag}. The file may have changed; read it again with read_file to get current anchors`
     );
   }
   return line - 1;

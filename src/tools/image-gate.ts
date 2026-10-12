@@ -12,10 +12,10 @@ export const IMAGE_MAX_BASE64_BYTES = 5_000_000;
 export const IMAGE_MAX_MB = `${IMAGE_MAX_BASE64_BYTES / 1_000_000} MB`;
 
 const FAILURES: Readonly<Record<PrepareFailure, string>> = {
-  unavailable: "图像库载入失败，无法核验与缩放",
-  undecodable: "图片解不开（文件可能损坏或截断）",
-  failed: "图片处理出错",
-  "too-large": `超出单张图片上限（长边 ${IMAGE_MAX_EDGE} 像素、编码后 ${IMAGE_MAX_MB}），自动缩小后仍超限`,
+  unavailable: "the image library failed to load, so the image could not be checked or resized",
+  undecodable: "the image could not be decoded (the file may be corrupt or truncated)",
+  failed: "image processing failed",
+  "too-large": `it is still over the per-image limit (longer side ${IMAGE_MAX_EDGE} pixels, ${IMAGE_MAX_MB} encoded) after automatic shrinking`,
 };
 
 export type GateResult =
@@ -25,10 +25,13 @@ export type GateResult =
 // 一张图过关：交出的那份，或不交出的原因（一句话，不带句号）
 export async function gateImage(bytes: Uint8Array, prepare: ImagePreparer): Promise<GateResult> {
   const info = detectImage(bytes);
-  if (info === undefined) return { withheld: "不是 PNG、JPEG、GIF、WebP 图片" };
+  if (info === undefined) return { withheld: "it is not a PNG, JPEG, GIF, or WebP image" };
   const { width, height } = info;
   if (width === undefined || height === undefined) {
-    return { info, withheld: "读不出像素尺寸（文件头不完整或已损坏）" };
+    return {
+      info,
+      withheld: "its pixel size could not be read (the header is incomplete or corrupt)",
+    };
   }
   const result = await prepare(
     bytes,
@@ -45,8 +48,10 @@ export function resizedNote(info: ImageInfo, image: PreparedImage): string {
   const format = image.mimeType.slice("image/".length).toUpperCase();
   const scale = Math.round(((info.width ?? image.width) / image.width) * 100) / 100;
   return (
-    `超出单张上限，已缩小为 ${format} ${image.width}×${image.height}（${image.data.length} 字节）交出` +
-    (scale !== 1 ? `，图中坐标乘以 ${scale} 即原图坐标` : "")
+    `over the per-image limit, so it was shrunk to ${format} ${image.width}×${image.height} (${image.data.length} bytes)` +
+    (scale !== 1
+      ? `; multiply coordinates in it by ${scale} to get coordinates in the original`
+      : "")
   );
 }
 
@@ -64,7 +69,7 @@ async function gateBlocks(content: readonly Block[], prepare: ImagePreparer): Pr
     const gated = await gateImage(bytes, prepare);
     if ("image" in gated) {
       if (gated.image.resized)
-        out.push({ type: "text", text: `[${resizedNote(gated.info, gated.image)}]` });
+        out.push({ type: "text", text: `[Image ${resizedNote(gated.info, gated.image)}]` });
       out.push({
         type: "image",
         data: gated.image.resized ? gated.image.data.toString("base64") : block.data,
@@ -74,11 +79,11 @@ async function gateBlocks(content: readonly Block[], prepare: ImagePreparer): Pr
     }
     const what =
       gated.info !== undefined
-        ? `${gated.info.format}${gated.info.width !== undefined ? ` ${gated.info.width}×${gated.info.height}` : ""}，`
-        : `声明为 ${block.mimeType}，`;
+        ? `${gated.info.format}${gated.info.width !== undefined ? ` ${gated.info.width}×${gated.info.height}` : ""}, `
+        : `declared as ${block.mimeType}, `;
     out.push({
       type: "text",
-      text: `[图片未交出：${gated.withheld}（${what}${bytes.length} 字节）]`,
+      text: `[Image not returned: ${gated.withheld} (${what}${bytes.length} bytes)]`,
     });
   }
   return out;

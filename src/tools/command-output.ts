@@ -44,7 +44,8 @@ const NOFOLLOW = constants.O_NOFOLLOW ?? 0;
 const FILE_PATTERN = /^([1-9][0-9]*)\.log$/;
 const URI_PATTERN = /^pigeon:\/\/outputs\/([A-Za-z0-9_-]+)\/([1-9][0-9]*)$/;
 const INDEX_FILE = "index.json";
-const CHANGED = "落盘文件已被改动（不是 Pigeon 写下的那份），拒绝读取";
+const CHANGED =
+  "the saved output file has been changed (it is not the one Pigeon wrote); refusing to read it";
 
 export interface OutputSlot {
   id: number;
@@ -108,7 +109,9 @@ export class CommandOutputStore {
   #assertNoLinks(target: string): void {
     const rel = path.relative(this.#base, target);
     if (rel.startsWith("..") || path.isAbsolute(rel)) {
-      throw new OutputPathError(`落盘目录不在治理根之下：${target}`);
+      throw new OutputPathError(
+        `The output directory is not inside the governance directory: ${target}`
+      );
     }
     let current = this.#base;
     for (const part of rel.split(path.sep).filter(Boolean)) {
@@ -120,7 +123,9 @@ export class CommandOutputStore {
         return;
       }
       if (stat.isSymbolicLink()) {
-        throw new OutputPathError(`落盘目录里的 ${current} 被换成了链接，拒绝读写`);
+        throw new OutputPathError(
+          `${current} in the output directory has been replaced with a link; refusing to read or write`
+        );
       }
     }
   }
@@ -327,7 +332,7 @@ export class CommandOutputStore {
     const match = URI_PATTERN.exec(uri);
     if (match === null) {
       throw new OutputPathError(
-        `虚拟路径只能是 ${OUTPUTS_URI_PREFIX}<会话号>/<编号>（run_command 结果里给出的那个）：${uri}`
+        `A virtual path must have the form ${OUTPUTS_URI_PREFIX}<session-id>/<number> (as given in a run_command result): ${uri}`
       );
     }
     const [, session, idText] = match as unknown as [string, string, string];
@@ -335,7 +340,9 @@ export class CommandOutputStore {
       this.#readable ??= new Set(this.#ancestors?.() ?? []);
     }
     if (session !== this.#sessionId && !this.#readable?.has(session)) {
-      throw new OutputPathError(`${uri} 是别的会话的输出：只能读本会话及其分叉来源存下的输出`);
+      throw new OutputPathError(
+        `${uri} is another session's output: only output saved by this session or the sessions it was branched from can be read`
+      );
     }
     const file = path.join(this.#outputsRoot, session, `${idText}.log`);
     this.#assertNoLinks(file);
@@ -348,8 +355,8 @@ export class CommandOutputStore {
     if (record === undefined) {
       throw new OutputPathError(
         loaded.evicted.has(id)
-          ? `${uri}：该输出已按落盘总量上限清理，需要时重新运行命令`
-          : `${uri} 不存在（编号不对）`
+          ? `${uri}: this output was removed to stay within the storage limit; run the command again if you need it`
+          : `${uri} does not exist (wrong number)`
       );
     }
     return { file, record };
@@ -364,7 +371,7 @@ export class CommandOutputStore {
       fd = openSync(file, constants.O_RDONLY | NOFOLLOW);
     } catch (error) {
       throw new OutputPathError(
-        `${uri} 打不开（${(error as NodeJS.ErrnoException).code ?? "未知错误"}），可能已被换成链接或清理`
+        `${uri} could not be opened (${(error as NodeJS.ErrnoException).code ?? "unknown error"}); it may have been replaced with a link or removed`
       );
     }
     let same: boolean;
@@ -376,7 +383,7 @@ export class CommandOutputStore {
     }
     if (!same) {
       closeSync(fd);
-      throw new OutputPathError(`${uri}：${CHANGED}`);
+      throw new OutputPathError(`${uri}: ${CHANGED}`);
     }
     const hash = createHash("sha256");
     const inWindow = (line: number) => line >= offset && line < offset + limit;
@@ -411,7 +418,7 @@ export class CommandOutputStore {
     if (unterminated && inWindow(current)) lines.push(decodeLine(pending));
     const sha256 = hash.digest("hex");
     if (bytes !== record.size || sha256 !== record.sha256) {
-      throw new OutputPathError(`${uri}：${CHANGED}`);
+      throw new OutputPathError(`${uri}: ${CHANGED}`);
     }
     return { file, totalLines: current - 1 + (unterminated ? 1 : 0), lines, sha256 };
   }
@@ -498,8 +505,8 @@ export function composeOutput(section: OutputSection): {
     section.totalBytes - Buffer.byteLength(head) - Buffer.byteLength(tail)
   );
   const marker =
-    `…（输出已截断：共 ${section.totalBytes} 字节、${section.totalLines} 行；` +
-    `保留开头 ${headLines} 行与末尾 ${tailLines} 行，中间省略 ${omittedLines} 行、${omittedBytes} 字节）`;
+    `… [output truncated: ${section.totalBytes} bytes, ${section.totalLines} lines in total; ` +
+    `showing the first ${headLines} and last ${tailLines} lines, ${omittedLines} lines (${omittedBytes} bytes) omitted in between]`;
   return {
     text: `${head}${head.endsWith("\n") || head === "" ? "" : "\n"}${marker}\n${tail}`,
     omittedLines,

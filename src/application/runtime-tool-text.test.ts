@@ -68,7 +68,7 @@ test("容器执行端（linux）且自动批准：系统提示与 run_command �
     assert.ok(systemPrompt.includes(texts.prompt), systemPrompt);
     assert.ok(status.includes(`Writes are approved automatically.\n${texts.approval}`), status);
     assert.equal(runCommand, texts.tool);
-    assert.doesNotMatch(systemPrompt + status, /人工批准|不经 shell/);
+    assert.doesNotMatch(systemPrompt + status, /人工批准|不经 shell|user's approval|confirms them/);
   } finally {
     d.cleanup();
   }

@@ -100,13 +100,16 @@ test("超长输出：留开头与末尾、注明省略的行数与全文路径�
     assert.match(text, /\nline 1\n/);
     assert.match(text, /line 3000\n/);
     assert.doesNotMatch(text, /line 1500\n/);
-    const omitted = Number(/中间省略 (\d+) 行/.exec(text)?.[1]);
+    const omitted = Number(/, (\d+) lines \(\d+ bytes\) omitted in between/.exec(text)?.[1]);
     const shown = (text.match(/^line \d+$/gm) ?? []).length;
     assert.equal(omitted + shown, LINES);
-    assert.match(text, new RegExp(`全文共 ${LINES} 行，已存为 pigeon://outputs/s1/1`));
+    assert.match(
+      text,
+      new RegExp(`Full output \\(${LINES} lines\\) saved as pigeon://outputs/s1/1`)
+    );
     assert.ok(text.includes(VIRTUAL_PATH_HINT));
     assert.match(middle, /^1500\| line 1500$/m);
-    assert.match(middle, /共 3000 行/);
+    assert.match(middle, /\] 3000 lines \(showing /);
     // 没超过的输出原样给出，不落盘、不给路径
     const run = createRunCommandTool({ workspaceRoot: root, output: { store } });
     const short = textOf(await run.execute("c2", { command: printLines(3) }));
@@ -139,13 +142,13 @@ test("分行只按 \\n：单独的 \\r 不算断行，总行数与 run_command �
       store,
       `node -e "for(let i=1;i<=${LINES};i++){process.stdout.write('p'+i+'\\r');console.log('line '+i)}"`
     );
-    assert.match(text, new RegExp(`全文共 ${LINES} 行`));
+    assert.match(text, new RegExp(`Full output \\(${LINES} lines\\)`));
     const read = createReadFileTool(root, { editMode: "replace", outputs: store });
     const middle = textOf(
       await read.execute("r", { path: "pigeon://outputs/s1/1", offset: 1500, limit: 1 })
     );
     assert.match(middle, /^1500\| p1500\rline 1500$/m);
-    assert.match(middle, new RegExp(`共 ${LINES} 行`));
+    assert.match(middle, new RegExp(`\\] ${LINES} lines \\(showing `));
   } finally {
     cleanup();
   }
@@ -172,7 +175,7 @@ test("虚拟路径只认 pigeon://outputs/<会话号>/<编号>：越界写法一
     }
     await assert.rejects(
       () => read.execute("r", { path: "pigeon://outputs/worker/1" }),
-      /别的会话/
+      /is another session's output/
     );
     const parent = textOf(
       await read.execute("r", { path: "pigeon://outputs/parent/1", offset: 7, limit: 1 })
@@ -195,18 +198,18 @@ test("读取只认 Pigeon 写下的那份：原地改了内容、换成同内容
     const tampered = Buffer.from(original);
     tampered[0] = 0x4c;
     writeFileSync(file, tampered);
-    await assert.rejects(readBack, /已被改动/);
+    await assert.rejects(readBack, /has been changed \(it is not the one Pigeon wrote\)/);
     writeFileSync(file, original);
     assert.match(textOf(await readBack()), /^1\| line 1$/m);
     // 内容逐字节相同的另一个文件（先建好再换上，免得删掉原文件后 inode 被立即复用）
     writeFileSync(join(root, "copy.log"), original);
     renameSync(join(root, "copy.log"), file);
-    await assert.rejects(readBack, /已被改动/);
+    await assert.rejects(readBack, /has been changed \(it is not the one Pigeon wrote\)/);
     // 硬链接到工作区里的别的文件
     writeFileSync(join(root, "secret.txt"), "secret\n");
     unlinkSync(file);
     linkSync(join(root, "secret.txt"), file);
-    await assert.rejects(readBack, /已被改动/);
+    await assert.rejects(readBack, /has been changed \(it is not the one Pigeon wrote\)/);
   } finally {
     cleanup();
   }
@@ -224,7 +227,7 @@ test.skipIf(NO_SYMLINKS)("读取只认 Pigeon 写下的那份：换成符号链�
     const read = createReadFileTool(root, { editMode: "replace", outputs: store });
     await assert.rejects(
       () => read.execute("r", { path: "pigeon://outputs/s1/1" }),
-      /链接|已被改动/
+      /link|has been changed/
     );
   } finally {
     cleanup();
@@ -241,9 +244,12 @@ test.skipIf(NO_SYMLINKS)(
       mkdirSync(outputsRoot, { recursive: true });
       symlinkSync(outside, join(outputsRoot, "s1"));
       const read = createReadFileTool(root, { outputs: store });
-      await assert.rejects(() => read.execute("r", { path: "pigeon://outputs/s1/1" }), /链接/);
+      await assert.rejects(
+        () => read.execute("r", { path: "pigeon://outputs/s1/1" }),
+        /replaced with a link/
+      );
       const text = await runLong(root, store);
-      assert.match(text, /全文未能保存（[^）]*链接/);
+      assert.match(text, /The full output could not be saved \([^)]*replaced with a link/);
       assert.deepEqual(readdirSync(outside), ["1.log"]);
       assert.equal(readFileSync(join(outside, "1.log"), "utf8"), "host secret\n");
       unlinkSync(join(outputsRoot, "s1"));
@@ -273,14 +279,14 @@ test("写到一半出错：照常给出头尾并注明原因，不留半截文�
     const failed = await runLong(root, store);
     failing.mockRestore();
     syncBuiltinESMExports();
-    assert.match(failed, /全文未能保存（[^）]*ENOSPC/);
+    assert.match(failed, /The full output could not be saved \([^)]*ENOSPC/);
     assert.match(failed, /line 3000\n/);
     assert.deepEqual(
       readdirSync(store.dir).filter((name) => name !== "index.json"),
       []
     );
     const text = await runLong(root, store);
-    assert.match(text, /已存为 pigeon:\/\/outputs\/s1\/2/);
+    assert.match(text, /saved as pigeon:\/\/outputs\/s1\/2/);
     const read = createReadFileTool(root, { editMode: "replace", outputs: store });
     const back = textOf(
       await read.execute("r", { path: "pigeon://outputs/s1/2", offset: LINES, limit: 1 })
@@ -297,7 +303,10 @@ test("落盘总量满了从最旧的删起，刚写的那份保留，剩下的�
   const { root, store, cleanup } = workspace(40_000);
   try {
     for (let run = 0; run < 3; run += 1) await runLong(root, store);
-    assert.throws(() => store.resolve("pigeon://outputs/s1/1"), /已按落盘总量上限清理/);
+    assert.throws(
+      () => store.resolve("pigeon://outputs/s1/1"),
+      /was removed to stay within the storage limit/
+    );
     assert.ok(store.resolve("pigeon://outputs/s1/3").file.endsWith("3.log"));
     assert.ok(store.totalBytes() <= 40_000, String(store.totalBytes()));
   } finally {
@@ -314,7 +323,10 @@ test("按配额删旧文件只删身份与记录一致的：被换成别的文�
     writeFileSync(first, "precious\n");
     await runLong(root, store);
     assert.equal(readFileSync(first, "utf8"), "precious\n");
-    assert.throws(() => store.resolve("pigeon://outputs/s1/1"), /已按落盘总量上限清理/);
+    assert.throws(
+      () => store.resolve("pigeon://outputs/s1/1"),
+      /was removed to stay within the storage limit/
+    );
     assert.ok(store.totalBytes() <= 40_000, String(store.totalBytes()));
   } finally {
     cleanup();

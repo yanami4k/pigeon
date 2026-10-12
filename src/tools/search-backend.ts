@@ -41,11 +41,13 @@ export async function searchStart(
 ): Promise<{ rel: string; isFile: boolean }> {
   const resolveForRead = host.resolveForRead;
   if (resolveForRead === undefined) {
-    throw new SearchEnvironmentError("本执行端不能按读档规则解析路径，grep、glob 不可用");
+    throw new SearchEnvironmentError(
+      "This execution environment cannot resolve paths under the read rules, so grep and glob are unavailable"
+    );
   }
   const resolve = async (input: string): Promise<string> => {
     const resolved = await resolveForRead.call(host, input);
-    if (resolved.outside) throw new SearchToolError(`路径越出工作区根：${input}`);
+    if (resolved.outside) throw new SearchToolError(`Path is outside the workspace root: ${input}`);
     return resolved.path;
   };
   const root = await resolve(".");
@@ -107,7 +109,7 @@ export function runSearch(
   } = {}
 ): Promise<HostExecResult> {
   if (host.execHelper === undefined) {
-    throw new SearchEnvironmentError("本执行端不支持 grep、glob");
+    throw new SearchEnvironmentError("This execution environment does not support grep or glob");
   }
   return host.execHelper(program, args, {
     env: allowedEnv(process.env),
@@ -248,10 +250,10 @@ export function inGitDir(relPath: string): boolean {
 
 // 后端出错（退出码不是 0 或 1）且没有任何结果：正则写错等归模型侧，其余归环境
 export function backendFailure(stderr: string, exitCode: number | null): Error {
-  const message = stderr.trim().slice(0, 1000) || `退出码 ${exitCode}`;
+  const message = stderr.trim().slice(0, 1000) || `exit code ${exitCode}`;
   return /regex|regular expression|parse error|Unmatched|Invalid|unmatched|invalid/.test(message)
-    ? new SearchToolError(`模式有误：${message}`)
-    : new SearchEnvironmentError(`搜索出错：${message}`);
+    ? new SearchToolError(`Invalid pattern: ${message}`)
+    : new SearchEnvironmentError(`Search failed: ${message}`);
 }
 
 // 逐个文件按真实路径筛（决策 355 / 368，三种后端一律如此）：文件名含换行或控制字符的略去；超出 SCREEN_LIMIT 的不查、
@@ -264,7 +266,9 @@ export async function screenFiles(
   signal: AbortSignal | undefined
 ): Promise<Map<string, string>> {
   if (host.classifyReadPaths === undefined) {
-    throw new SearchEnvironmentError("本执行端不能按真实路径检查结果，grep、glob 不可用");
+    throw new SearchEnvironmentError(
+      "This execution environment cannot check results by real path, so grep and glob are unavailable"
+    );
   }
   const safe: string[] = [];
   for (const rel of new Set(relPaths)) {
@@ -326,7 +330,9 @@ async function exec(
     ...(stdin !== undefined ? { stdin } : {}),
   });
   if (result.timedOut) {
-    throw new SearchEnvironmentError("搜索超时；请缩小范围（更具体的 path 或 glob）");
+    throw new SearchEnvironmentError(
+      "The search timed out; narrow it (a more specific path or glob)"
+    );
   }
   return result;
 }
@@ -649,8 +655,8 @@ export function resultNotes(input: {
   // 输出超过上限，没有统计完（total 为"超过"）
   incomplete: boolean;
   omitted: Omitted;
+  // 计数的名词（复数，如 matches、files）
   unit: string;
-  measure: string;
   none: string;
   narrow: string;
 }): string[] {
@@ -659,21 +665,40 @@ export function resultNotes(input: {
     notes.push(input.none);
   } else if (input.incomplete || input.total > input.shown) {
     const count = input.incomplete
-      ? `超过 ${input.total} ${input.unit}（输出过大，未统计完）`
-      : `共 ${input.total} ${input.unit}`;
-    notes.push(`${count}，只列出前 ${input.shown} ${input.measure}；请缩小范围（${input.narrow}）`);
+      ? `More than ${input.total} ${input.unit} (the output was too large to count them all)`
+      : `${input.total} ${input.unit} in total`;
+    notes.push(
+      `${count}; only the first ${input.shown} are listed. Narrow the search (${input.narrow})`
+    );
   }
   return [...notes, ...omittedNotes(input.omitted)];
+}
+
+// "1 file" / "2 files"
+export function filesText(count: number): string {
+  return `${count} file${count === 1 ? "" : "s"}`;
 }
 
 // 各类略去的文件数（没有略去的不写）
 export function omittedNotes(omitted: Omitted): string[] {
   const notes: string[] = [];
   const { outside, unsafe, unchecked } = omitted;
-  if (outside > 0) notes.push(`已略去经链接指向工作区以外的 ${outside} 个文件`);
-  if (unsafe > 0) notes.push(`已略去文件名含换行或控制字符的 ${unsafe} 个文件`);
+  const were = (count: number) => (count === 1 ? "was" : "were");
+  if (outside > 0) {
+    notes.push(
+      `${filesText(outside)} linked to locations outside the workspace ${were(outside)} omitted`
+    );
+  }
+  if (unsafe > 0) {
+    notes.push(
+      `${filesText(unsafe)} with line breaks or control characters in the name ${were(unsafe)} omitted`
+    );
+  }
   if (unchecked > 0) {
-    notes.push(`${unchecked} 个文件未及按真实路径检查（文件过多或检查超时），已略去，结果不完整`);
+    notes.push(
+      `${filesText(unchecked)} could not be checked by real path in time (too many files, or the check timed out) ` +
+        `and ${were(unchecked)} omitted; the result is incomplete`
+    );
   }
   return notes;
 }

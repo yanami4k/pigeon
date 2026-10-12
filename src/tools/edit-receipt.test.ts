@@ -23,7 +23,7 @@ test("回执给出改动在新文件里的行区间与上下各两行（带行�
     const text = textOf(
       await edit.execute("e", { path: "a.txt", old_string: "l4", new_string: "X\nY" })
     );
-    assert.match(text, /新文件第 4–5 行/);
+    assert.match(text, /; lines 4–5 of the new file:/);
     assert.ok(text.endsWith("2| l2\n3| l3\n4| X\n5| Y\n6| l5\n7| l6"), text);
   }));
 
@@ -33,10 +33,10 @@ test("纯删除写明删去处并给出前后两行；改在文件开头时上�
     const removed = textOf(
       await edit.execute("e1", { path: "a.txt", old_string: "l4\n", new_string: "" })
     );
-    assert.match(removed, /删去处在新文件第 4 行之前/);
+    assert.match(removed, /deleted before line 4 of the new file/);
     assert.ok(removed.endsWith("2| l2\n3| l3\n4| l5\n5| l6"), removed);
     const top = textOf(
       await edit.execute("e2", { path: "a.txt", old_string: "l1", new_string: "L1" })
     );
-    assert.ok(top.endsWith("新文件第 1–1 行：\n1| L1\n2| l2\n3| l3"), top);
+    assert.ok(top.endsWith("lines 1–1 of the new file:\n1| L1\n2| l2\n3| l3"), top);
   }));

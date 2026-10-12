@@ -25,16 +25,16 @@ test("容器执行端（linux）且自动批准：需要 shell 的命令经 /bin
   // 决策 363：系统提示里的一句只说经哪个 shell，不提审批；审批的说法在状态块一节与工具说明里
   assertIncludesAll(texts.prompt, ["/bin/sh -c"]);
   assert.doesNotMatch(texts.prompt, /批准|放权|approv/i);
-  for (const text of [texts.approval, texts.tool]) {
-    assertIncludesAll(text, ["/bin/sh -c", "命令自动批准"]);
-  }
-  // 决策 413：多行命令经 /bin/sh -c（决策 428：系统提示里的一句为英文）
+  assertIncludesAll(texts.approval, ["/bin/sh -c", "commands are approved automatically"]);
+  assertIncludesAll(texts.tool, ["/bin/sh -c", "Commands are approved automatically"]);
+  // 决策 413：多行命令经 /bin/sh -c（决策 428：系统提示、状态块与工具说明都为英文）
   assertIncludesAll(texts.prompt, ["multiple lines"]);
-  for (const text of [texts.approval, texts.tool]) assertIncludesAll(text, ["多行"]);
+  assertIncludesAll(texts.approval, ["multiple lines"]);
+  assertIncludesAll(texts.tool, ["multi-line commands (run line by line)"]);
   // 三种情形共用的工具说明尾句（commands 短名、文件变化不含治理目录）只在这里核对一次
-  assertIncludesAll(texts.tool, ["commands 一节", ".pigeon"]);
+  assertIncludesAll(texts.tool, ["commands section of the settings", ".pigeon"]);
   for (const text of Object.values(texts)) {
-    assert.doesNotMatch(text, /人工批准|不经 shell，不支持/);
+    assert.doesNotMatch(text, /user's approval|confirms them|not supported/);
   }
 });
 
@@ -46,10 +46,16 @@ test("本地 Windows 执行端且有人工审批：需要 shell 的命令经人�
   );
   assertIncludesAll(texts.prompt, ["cmd.exe"]);
   assert.doesNotMatch(texts.prompt, /批准|放权|approv|multiple lines/i);
-  assertIncludesAll(texts.approval, ["人确认后经 cmd.exe", "每条命令都要人工批准"]);
-  assertIncludesAll(texts.tool, ["人确认后经 cmd.exe", "每条命令都需要人工批准"]);
+  assertIncludesAll(texts.approval, [
+    "run through cmd.exe only after the user confirms them",
+    "every command needs the user's approval",
+  ]);
+  assertIncludesAll(texts.tool, [
+    "run through cmd.exe only after the user confirms them",
+    "Every command needs the user's approval",
+  ]);
   // 决策 415：Windows 上写明不支持多行命令与改法
-  assertIncludesAll(texts.tool, ["不支持多行命令", "write_file"]);
+  assertIncludesAll(texts.tool, ["Multi-line commands are not supported", "write_file"]);
 });
 
 test("没有审批通道（无人值守且未放权）：命令须有放权规则放行，否则被拒绝", () => {
@@ -57,7 +63,10 @@ test("没有审批通道（无人值守且未放权）：命令须有放权规�
   // 系统提示里的一句与审批状态无关（续跑与 /reload 后逐字节不变）
   assert.equal(texts.prompt, runCommandTexts({ platform: "linux", approval: "yolo" }).prompt);
   for (const text of [texts.approval, texts.tool]) {
-    assertIncludesAll(text, ["/bin/sh -c", "未被放权规则放行的命令会被拒绝"]);
+    assertIncludesAll(text, [
+      "/bin/sh -c",
+      "commands not allowed by a permission rule are refused",
+    ]);
   }
 });
 
@@ -81,9 +90,9 @@ test("工具说明取执行端的平台与传入的审批状态；不给审批�
 
 test("决策 409、410：说明写明一直运行的进程用后台作业（服务标保留），非放到后台不可时先把输出重定向到文件", () => {
   const withJobs = runCommandTexts({ platform: "linux", approval: "yolo", backgroundJobs: 2 }).tool;
-  assertIncludesAll(withJobs, [`${KEEP_AFTER_SESSION_PARAM}: true`, "> 文件 2>&1 &"]);
+  assertIncludesAll(withJobs, [`${KEEP_AFTER_SESSION_PARAM}: true`, "> <file> 2>&1 &"]);
   const withoutJobs = runCommandTexts({ platform: "linux", approval: "yolo" }).tool;
-  assertIncludesAll(withoutJobs, ["> 文件 2>&1 &"]);
+  assertIncludesAll(withoutJobs, ["> <file> 2>&1 &"]);
   assert.ok(!withoutJobs.includes(KEEP_AFTER_SESSION_PARAM), withoutJobs);
   assertIncludesAll(runCommandTexts({ platform: "win32", approval: "yolo" }).tool, ["start /b"]);
 });

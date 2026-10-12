@@ -96,8 +96,10 @@ export interface MemoryLimitExceeded {
 // 给 agent 与人的同一句：明确报出超出沙箱内存上限及其数值，免得当作普通报错反复重试
 export function memoryLimitText(exceeded: MemoryLimitExceeded): string {
   return exceeded.certain
-    ? `超出沙箱内存上限 ${exceeded.limit}：命令或它起的进程被内核终止（OOM）。原样重试多半还会被杀，先减少并行度或内存占用`
-    : `可能超出沙箱内存上限 ${exceeded.limit}：命令以退出码 137 结束（被 SIGKILL 终止），读不到容器的内存事件计数，无法确认`;
+    ? `Exceeded the sandbox memory limit of ${exceeded.limit}: the command or a process it started was killed by the kernel (OOM). ` +
+        "Running it again unchanged will most likely be killed again; reduce parallelism or memory use first"
+    : `Possibly exceeded the sandbox memory limit of ${exceeded.limit}: the command ended with exit code 137 (killed by SIGKILL), ` +
+        "and the container's memory event counters could not be read to confirm it";
 }
 
 // 文件清单不跟进的目录，本地与容器实现共用这一份口径。

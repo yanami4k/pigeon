@@ -19,21 +19,21 @@ test("read_file replace 模式：每行 `行号| 内容`、头部只有路径与
     writeFileSync(join(root, "a.ts"), content);
     writeFileSync(join(root, "empty.ts"), "");
     const tool = createReadFileTool(root, { editMode: "replace" });
-    assert.match(tool.description, /不要带行号前缀/);
+    assert.match(tool.description, /without the line-number prefix/);
     assert.equal(
       textOf(await tool.execute("tc-1", { path: "a.ts" })),
-      "[a.ts] 共 3 行（窗口 1-3）\n1| alpha\n2| beta\n3| gamma"
+      "[a.ts] 3 lines (showing 1-3)\n1| alpha\n2| beta\n3| gamma"
     );
     assert.equal(
       textOf(await tool.execute("tc-2", { path: "a.ts", offset: 2, limit: 1 })),
-      "[a.ts] 共 3 行（窗口 2-2）\n2| beta\n还有 1 行未读，下一窗口参数 offset=3"
+      "[a.ts] 3 lines (showing 2-2)\n2| beta\n1 line not read yet; next window: offset=3"
     );
-    assert.equal(textOf(await tool.execute("tc-3", { path: "empty.ts" })), "[empty.ts] 空文件");
+    assert.equal(textOf(await tool.execute("tc-3", { path: "empty.ts" })), "[empty.ts] empty file");
 
     const hashline = createReadFileTool(root);
     assert.equal(
       textOf(await hashline.execute("tc-4", { path: "a.ts" })),
-      `[a.ts#${snapshotTag(content)}] 共 3 行（窗口 1-3）\n1#${lineTag("alpha")}| alpha\n2#${lineTag("beta")}| beta\n3#${lineTag("gamma")}| gamma`
+      `[a.ts#${snapshotTag(content)}] 3 lines (showing 1-3)\n1#${lineTag("alpha")}| alpha\n2#${lineTag("beta")}| beta\n3#${lineTag("gamma")}| gamma`
     );
   } finally {
     rmSync(root, { recursive: true, force: true });

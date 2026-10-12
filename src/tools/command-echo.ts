@@ -23,11 +23,11 @@ function clipped(text: string, max: number): string {
 }
 
 // run_command 结果与报错里的回显；where 说明完整命令在哪
-export function commandEcho(command: string, where = "本次调用"): string {
+export function commandEcho(command: string, where = "this call's arguments"): string {
   const shape = shapeOf(command);
   if (shape.lines === 1 && shape.first.length <= COMMAND_ECHO_CHARS) return command;
-  const total = shape.lines > 1 ? `共 ${shape.lines} 行` : `共 ${shape.chars} 字`;
-  return `${clipped(shape.first, COMMAND_ECHO_CHARS)}（${total}，其余已省略，完整命令见${where}）`;
+  const total = shape.lines > 1 ? `${shape.lines} lines` : `${shape.chars} characters`;
+  return `${clipped(shape.first, COMMAND_ECHO_CHARS)} (${total}; the rest is omitted, the full command is in ${where})`;
 }
 
 // 后台作业在作业列表、作业输出与通知里的简短标识
@@ -36,6 +36,6 @@ export function commandLabel(command: string): string {
   if (shape.lines === 1 && shape.first.length <= COMMAND_LABEL_CHARS) return command;
   const head = clipped(shape.first, COMMAND_LABEL_CHARS);
   return shape.lines > 1
-    ? `${head.endsWith("…") ? head : `${head}…`}（共 ${shape.lines} 行）`
+    ? `${head.endsWith("…") ? head : `${head}…`} (${shape.lines} lines)`
     : head;
 }

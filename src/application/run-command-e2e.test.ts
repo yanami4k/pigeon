@@ -198,9 +198,12 @@ test("tester 角色：只能运行设置 commands 一节为它登记的命令（
       await bundle.sessionStore.close();
     }
     assert.equal(toolResults[0]?.isError, false);
-    assert.ok(toolResults[0]?.text.includes("（短名 hello）"), toolResults[0]?.text);
+    assert.ok(toolResults[0]?.text.includes(" (short name hello)"), toolResults[0]?.text);
     assert.equal(toolResults[1]?.isError, true);
-    assert.ok(toolResults[1]?.text.includes("不在本角色允许清单内"), toolResults[1]?.text);
+    assert.ok(
+      toolResults[1]?.text.includes("is not on this role's allowlist"),
+      toolResults[1]?.text
+    );
 
     const stored = storeFacts(root, sessionId).toolResults;
     assert.equal(stored.length, 2);

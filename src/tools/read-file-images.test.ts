@@ -83,7 +83,7 @@ test("能看图：四种图片按文件头认出（扩展名不算数），交�
       for (const [name, bytes, mimeType, dims] of images) {
         const result = await read.execute("r", { path: name });
         const [head, image] = blocksOf(result);
-        assert.match(head?.text ?? "", new RegExp(`${name}.*${dims}.*${bytes.length} 字节`));
+        assert.match(head?.text ?? "", new RegExp(`${name}.*${dims}.*${bytes.length} bytes`));
         assert.deepEqual(image, { type: "image", data: bytes.toString("base64"), mimeType });
         assert.equal(reads.unchangedSinceRead(join(root, name), bytes), true, name);
       }
@@ -102,12 +102,12 @@ test("不能看图：图片只给元信息；其他二进制（开头有 NUL、�
   return withFiles(files, async (root) => {
     const reads = new FileReadTracker();
     const read = createReadFileTool(root, { reads });
-    assert.doesNotMatch(read.description, /PNG|图片/);
+    assert.doesNotMatch(read.description, /PNG|image/i);
     const image = blocksOf(await read.execute("r", { path: "a.png" }));
     assert.equal(image.length, 1);
     assert.match(image[0]?.text ?? "", /3×2/);
     for (const [name, pattern] of [
-      ["x.bin", /二进制/],
+      ["x.bin", /binary file/],
       ["doc.pdf", /PDF/],
       ["gbk.txt", /UTF-8.*iconv/],
     ] as const) {
@@ -161,14 +161,14 @@ test("截断的图在交出前被拦下只给元信息；图像库载入失败�
     };
     const cut = await kinds(createReadFileTool(root, { imageInput: true }), "cut.png");
     assert.deepEqual(cut.types, ["text"]);
-    assert.match(cut.text, /40×30.*解不开/);
+    assert.match(cut.text, /40×30.*could not be decoded/);
     const broken = createReadFileTool(root, {
       imageInput: true,
       prepareImage: createPhotonPreparer(() => Promise.reject(new Error("载入失败"))),
     });
     const ok = await kinds(broken, "ok.png");
     assert.deepEqual(ok.types, ["text"]);
-    assert.match(ok.text, /3×2.*载入失败/);
+    assert.match(ok.text, /3×2.*image library failed to load/);
   }));
 
 test("其他工具结果里的图片块走同一道关口：好图照交、截断的换成一行说明、超限的缩小后交出，文字块不动", async () => {
@@ -201,7 +201,7 @@ test("其他工具结果里的图片块走同一道关口：好图照交、截�
     ["text", "image", "text", "text", "image"]
   );
   assert.equal(content[1]?.data, good.toString("base64"));
-  assert.match(content[2]?.text ?? "", /未交出.*解不开.*40×30/);
+  assert.match(content[2]?.text ?? "", /Image not returned.*could not be decoded.*40×30/);
   assert.match(content[3]?.text ?? "", /2000×10/);
   assert.equal(detectImage(Buffer.from(content[4]?.data ?? "", "base64"))?.width, 2000);
 });
@@ -219,7 +219,7 @@ test("少量非法字节的文本照常按行读（带锚点、分页不变）",
     async (root) => {
       const text = blocksOf(await createReadFileTool(root).execute("r", { path: "mostly.txt" }))[0]
         ?.text;
-      assert.match(text ?? "", /共 201 行/);
+      assert.match(text ?? "", /\] 201 lines \(showing /);
       assert.match(text ?? "", /^201#\w+\| line 200$/m);
     }
   );

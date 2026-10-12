@@ -150,11 +150,11 @@ test("同时在跑的上限：本会话超出即拒绝并列出在跑的作业�
     await a.background(a.node(LONG));
     await a.background(a.node(LONG));
     await assert.rejects(a.background(a.node(LONG)), (error: Error) =>
-      ["本会话", "2", "j1", "j2"].every((part) => error.message.includes(part))
+      ["This session", "2", "j1", "j2"].every((part) => error.message.includes(part))
     );
     await b.background(b.node(LONG));
     await assert.rejects(b.background(b.node(LONG)), (error: Error) =>
-      ["整次运行", "3"].every((part) => error.message.includes(part))
+      ["This run", "3"].every((part) => error.message.includes(part))
     );
     assert.equal(pool.running().length, 3);
     await a.kill("j1");
@@ -215,7 +215,7 @@ test("单个输出文件超过上限只留末尾，并注明丢弃了前面多�
     const result = await h.output({ job_id: "j1", wait_seconds: 30 });
     const text = result.content.map((block) => (block.type === "text" ? block.text : "")).join("");
     assert.match(text, /line-399-/);
-    assert.ok(text.includes("丢弃"), text);
+    assert.ok(text.includes("bytes were discarded"), text);
     assert.ok(text.includes(VIRTUAL_PATH_HINT), text);
     const job = h.jobs.get("j1");
     const window = await h.store.readWindow(job.outputUri, 1, 1000);
@@ -238,7 +238,7 @@ test("期间变化：作业开始与结束时比出，扣除这期间 Pigeon 已
     await h.output({ job_id: "j1", wait_seconds: 30 });
     const changes = h.jobs.get("j1").fileChanges;
     assert.deepEqual(changes?.added, ["b.txt"]);
-    assert.match(changes?.note ?? "", /不精确/);
+    assert.match(changes?.note ?? "", /imprecise/);
   } finally {
     await h.cleanup();
   }

@@ -39,10 +39,12 @@ export interface GlobDetails {
 
 export function globDescription(maxResults: number): string {
   return (
-    "在工作区内按文件名模式找文件，按修改时间从新到旧排列。缺省遵守 .gitignore、跳过 .git，含隐藏文件。" +
-    "pattern 如 **/*.ts、src/*.json（* 不跨目录，** 跨任意层目录，? 一个字符，{a,b} 任选其一）；" +
-    "path 为起点目录（缺省工作区根），pattern 相对它匹配。" +
-    `最多列 ${maxResults} 个，超出时给出总数，请缩小范围再找。`
+    "Finds files in the workspace by file name pattern, newest first by modification time. " +
+    "By default it respects .gitignore, skips .git, and includes hidden files. " +
+    "pattern is like **/*.ts or src/*.json (* does not cross directories, ** crosses any number of directories, " +
+    "? matches one character, {a,b} matches either); path is the directory to start from (default: the workspace root), " +
+    "and pattern is matched relative to it. " +
+    `At most ${maxResults} files are listed; beyond that, the total is given, so narrow the search and try again.`
   );
 }
 
@@ -65,12 +67,12 @@ export function createGlobTool(
       // Windows 本机的 find 是另一个程序：没有 rg 与 git 时不降级
       if (backend.kind === "grep" && host.platform === "win32") {
         throw new SearchEnvironmentError(
-          "本机没有 ripgrep 与 git，无法列出文件；可改用 run_command"
+          "Neither ripgrep nor git is available on this machine, so files cannot be listed; use run_command instead"
         );
       }
       const start = await searchStart(host, args.path ?? ".");
       if (start.isFile) {
-        throw new SearchToolError(`path 须是目录：${args.path}`);
+        throw new SearchToolError(`path must be a directory: ${args.path}`);
       }
       const listing = await runListing(host, backend, start, {
         prefilter: backend.kind === "rg" ? basenamePrefilter(args.pattern) : undefined,
@@ -91,10 +93,9 @@ export function createGlobTool(
         shown: shown.length,
         incomplete: listing.incomplete,
         omitted: listing.omitted,
-        unit: "个文件",
-        measure: "个",
-        none: "没有匹配的文件",
-        narrow: "更具体的 pattern 或 path",
+        unit: "files",
+        none: "No matching files",
+        narrow: "a more specific pattern or path",
       });
       return {
         content: [{ type: "text", text: [...shown, ...notes].join("\n") }],

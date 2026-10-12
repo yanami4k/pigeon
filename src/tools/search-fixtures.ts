@@ -85,7 +85,10 @@ export async function searchOutputs(
   const grepOut: string[] = [];
   for (const query of GREP_QUERIES) {
     grepOut.push(
-      text(await grep.execute("tc", query)).replace(/^本次用 .+ 搜索（扩展正则）\n?/, "")
+      text(await grep.execute("tc", query)).replace(
+        /^Searched with .+ \(extended regular expressions\)\n?/,
+        ""
+      )
     );
   }
   const globOut: string[] = [];

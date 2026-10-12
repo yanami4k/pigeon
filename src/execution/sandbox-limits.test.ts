@@ -183,7 +183,7 @@ test("开沙箱：执行端按生效的内存上限判定超限，提示经 noti
       );
       assert.deepEqual(result.memoryLimitExceeded, { limit: "8 GiB", certain: true });
       assert.equal(notices.length, 1);
-      assert.match(notices[0] ?? "", /^超出沙箱内存上限 8 GiB/);
+      assert.match(notices[0] ?? "", /^Exceeded the sandbox memory limit of 8 GiB/);
     } finally {
       await sandbox.discard();
     }
@@ -230,11 +230,11 @@ test("超限判定：命令前后 oom_kill 计数增加即报“超出沙箱内�
     );
     const result = await tool.execute("c1", { command: "sh oom.sh" }, undefined);
     const text = result.content.map((part) => ("text" in part ? part.text : "")).join("");
-    assert.match(text, /超出沙箱内存上限 8 GiB/);
-    assert.doesNotMatch(text, /可能超出/);
+    assert.match(text, /Exceeded the sandbox memory limit of 8 GiB/);
+    assert.doesNotMatch(text, /Possibly exceeded/);
     assert.deepEqual(result.details.memoryLimitExceeded, { limit: "8 GiB", certain: true });
     assert.equal(h.notices.length, 1);
-    assert.match(h.notices[0] ?? "", /^超出沙箱内存上限 8 GiB/);
+    assert.match(h.notices[0] ?? "", /^Exceeded the sandbox memory limit of 8 GiB/);
     // 计数读得到而没有增加：退出码 137 也不报
     const plain = await h.host.exec(
       { program: "sh", args: ["-c", "exit 137"], verbatim: false },
@@ -261,7 +261,7 @@ test("超限判定：读不到计数时，退出码 137 报“可能超出沙箱
     const killed = await run(137);
     assert.deepEqual(killed.memoryLimitExceeded, { limit: "8 GiB", certain: false });
     assert.equal(h.notices.length, 1);
-    assert.match(h.notices[0] ?? "", /^可能超出沙箱内存上限 8 GiB/);
+    assert.match(h.notices[0] ?? "", /^Possibly exceeded the sandbox memory limit of 8 GiB/);
     const failed = await run(1);
     assert.equal(failed.memoryLimitExceeded, undefined);
     assert.equal(h.notices.length, 1);

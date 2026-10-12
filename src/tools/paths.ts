@@ -41,7 +41,9 @@ export function hasControlChars(value: string): boolean {
 }
 
 export function controlCharsRefused(inputPath: string): WorkspacePathError {
-  return new WorkspacePathError(`路径含换行或控制字符，拒绝：${JSON.stringify(inputPath)}`);
+  return new WorkspacePathError(
+    `Refused: the path contains a line break or control character: ${JSON.stringify(inputPath)}`
+  );
 }
 
 // 版本库元数据不可写：.git 里的配置（过滤、钩子、fsmonitor 等）能让 git 执行任意命令，写工具一律不写。
@@ -52,7 +54,7 @@ export function insideGitMetadata(relative: string): boolean {
 
 export function gitMetadataRefused(inputPath: string): WorkspaceWriteRefusedError {
   return new WorkspaceWriteRefusedError(
-    `版本库元数据（.git）不可写：${inputPath}——其中的配置能让 git 执行任意命令`
+    `Repository metadata (.git) cannot be written: ${inputPath}. Its configuration can make git run arbitrary commands`
   );
 }
 
@@ -111,7 +113,8 @@ export interface WriteToolOptions {
 }
 
 // 决策 407：放权时写工具的说明里交代可写工作区以外
-export const OUTSIDE_WRITE_SENTENCE = "工作区以外的文件也可写（用绝对路径）。";
+export const OUTSIDE_WRITE_SENTENCE =
+  "Files outside the workspace can be written too (use absolute paths).";
 
 // 把 inputPath 解析成工作区根内的真实绝对路径；逃逸（../、根外绝对路径、
 // 符号链接/junction 解析后越界）一律拒绝。目标必须已存在（realpath 解析符号链接的前提）——
@@ -133,13 +136,13 @@ function resolveRealPath(workspaceRoot: string, inputPath: string, outside: bool
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
     throw code === "ENOENT" || code === "ENOTDIR"
-      ? new WorkspacePathNotFoundError(`路径不存在或不可读：${inputPath}`)
-      : new WorkspacePathError(`路径不存在或不可读：${inputPath}`);
+      ? new WorkspacePathNotFoundError(`Path does not exist or cannot be read: ${inputPath}`)
+      : new WorkspacePathError(`Path does not exist or cannot be read: ${inputPath}`);
   }
   // path.relative 判包含关系：win32 下大小写不敏感，越界时为 .. 加分隔符开头或给出绝对路径
   const rel = path.relative(realRoot, realTarget);
   if (!outside && isOutsideRelative(rel)) {
-    throw new WorkspacePathError(`路径越出工作区根：${inputPath}`);
+    throw new WorkspacePathError(`Path is outside the workspace root: ${inputPath}`);
   }
   return realTarget;
 }
@@ -209,14 +212,14 @@ export function assertWritePathUnchanged(resolvedPath: string): void {
 export function assertWritePathText(inputPath: string): void {
   if (hasControlChars(inputPath)) {
     throw new WorkspaceWriteRefusedError(
-      `路径含换行或其他控制字符，拒绝写入：${JSON.stringify(inputPath)}`
+      `Refused to write: the path contains a line break or other control character: ${JSON.stringify(inputPath)}`
     );
   }
 }
 
 export function symlinkRefused(inputPath: string, target: string): WorkspaceWriteRefusedError {
   return new WorkspaceWriteRefusedError(
-    `要写的文件是符号链接（${inputPath} → ${target}），拒绝写入：请改为编辑它指向的文件`
+    `Refused to write: the file is a symbolic link (${inputPath} → ${target}); edit the file it points to instead`
   );
 }
 
@@ -225,8 +228,8 @@ export function pathChanged(
   now: string | undefined
 ): WorkspaceWriteRefusedError {
   return new WorkspaceWriteRefusedError(
-    `路径已变：${resolvedPath} 在检查之后${now === undefined ? "已不存在" : `改为解析到 ${now}`}，拒绝写入；` +
-      "请重新 read_file 后再编辑"
+    `Refused to write: the path changed after it was checked; ${resolvedPath} ${now === undefined ? "no longer exists" : `now resolves to ${now}`}. ` +
+      "Read it again with read_file before editing"
   );
 }
 
@@ -268,14 +271,16 @@ export function resolveWorkspaceCreatePath(
   try {
     realExisting = realpathSync(existing);
   } catch {
-    throw new WorkspacePathError(`路径上的 ${existing} 解析不了（悬空的符号链接？）：${inputPath}`);
+    throw new WorkspacePathError(
+      `${existing} on the path cannot be resolved (a dangling symbolic link?): ${inputPath}`
+    );
   }
   if (!lstatSync(realExisting).isDirectory()) {
-    throw new WorkspacePathError(`路径上的 ${existing} 不是目录：${inputPath}`);
+    throw new WorkspacePathError(`${existing} on the path is not a directory: ${inputPath}`);
   }
   const target = path.join(realExisting, ...rest);
   if (options.outside !== true && isOutsideRelative(path.relative(realRoot, target))) {
-    throw new WorkspacePathError(`路径越出工作区根：${inputPath}`);
+    throw new WorkspacePathError(`Path is outside the workspace root: ${inputPath}`);
   }
   assertNotGitMetadata(realRoot, target, inputPath);
   return { path: target, exists: false };
@@ -286,7 +291,9 @@ export function resolveWorkspaceCreatePath(
 export function createWorkspaceFile(resolvedPath: string, content: string): void {
   const { existing, rest } = deepestExisting(resolvedPath);
   if (rest.length === 0) {
-    throw new WorkspaceWriteRefusedError(`文件在检查之后已被创建，未覆盖：${resolvedPath}`);
+    throw new WorkspaceWriteRefusedError(
+      `The file was created after it was checked, so it was not overwritten: ${resolvedPath}`
+    );
   }
   let now: string | undefined;
   try {
@@ -302,7 +309,9 @@ export function createWorkspaceFile(resolvedPath: string, content: string): void
     writeFileSync(resolvedPath, content, { encoding: "utf8", flag: "wx" });
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "EEXIST") {
-      throw new WorkspaceWriteRefusedError(`文件在检查之后已被创建，未覆盖：${resolvedPath}`);
+      throw new WorkspaceWriteRefusedError(
+        `The file was created after it was checked, so it was not overwritten: ${resolvedPath}`
+      );
     }
     throw error;
   }

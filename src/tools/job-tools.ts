@@ -40,14 +40,16 @@ export interface JobToolDetails {
 }
 
 export const JOB_OUTPUT_DESCRIPTION =
-  "查看本会话后台作业（run_command 带 background 启动的）的状态与新增输出。" +
-  "给 job_id：交回这个作业的状态与上次查看之后的新增输出，已结束的另给退出码、全文位置与作业期间的文件变化；" +
-  `带 wait_seconds（至多 ${JOB_WAIT_MAX_SECONDS}）先等它结束，到时没结束也照样交回。` +
-  "不给 job_id：带 wait_seconds 等任意一个作业结束，不带则列出本会话的全部作业。" +
-  `要等作业就带 wait_seconds，不带等待的连续查询至多 ${JOB_IDLE_QUERY_LIMIT - 1} 次。`;
+  "Shows the status and new output of this session's background jobs (started by run_command with background). " +
+  "With job_id: returns that job's status and the output added since you last checked; for a finished job, also its exit code, " +
+  "where the full output is saved, and the file changes during the job. " +
+  `With wait_seconds (at most ${JOB_WAIT_MAX_SECONDS}), it first waits for the job to end, and returns anyway when the time is up. ` +
+  "Without job_id: with wait_seconds, it waits for any job to end; without it, it lists all jobs in this session. " +
+  `To wait for jobs, pass wait_seconds; at most ${JOB_IDLE_QUERY_LIMIT - 1} queries in a row without waiting are allowed.`;
 
 export const JOB_KILL_DESCRIPTION =
-  "停掉本会话的一个后台作业（连同它起的子进程），交回最后的状态、输出位置与作业期间的文件变化。";
+  "Stops one of this session's background jobs (along with the processes it started) and returns its final status, " +
+  "where its output is saved, and the file changes during the job.";
 
 function details(jobs: readonly BackgroundJob[]): JobToolDetails {
   return {
@@ -63,7 +65,7 @@ function details(jobs: readonly BackgroundJob[]): JobToolDetails {
 function jobText(job: BackgroundJob, outputBytes: number): string {
   const changes = job.state === "running" ? undefined : jobChangesText(job);
   return [
-    `作业 ${job.id}：${jobStateText(job)}`,
+    `Job ${job.id}: ${jobStateText(job)}`,
     `$ ${commandLabel(job.command)}`,
     takeNewOutput(job, outputBytes),
     jobOutputText(job),
@@ -73,7 +75,7 @@ function jobText(job: BackgroundJob, outputBytes: number): string {
 
 function listText(jobs: readonly BackgroundJob[]): string {
   return jobs
-    .map((job) => `${job.id}：${jobStateText(job)}　$ ${commandLabel(job.command)}`)
+    .map((job) => `${job.id}: ${jobStateText(job)}  $ ${commandLabel(job.command)}`)
     .join("\n");
 }
 
@@ -97,15 +99,16 @@ export function createJobOutputTool(
       const all = jobs.list();
       if (all.length === 0) {
         return {
-          content: [{ type: "text", text: "本会话还没有后台作业" }],
+          content: [{ type: "text", text: "This session has no background jobs yet" }],
           details: details([]),
         };
       }
       const idle = jobs.noteQuery(waited);
       if (waitMs === 0 && idle >= JOB_IDLE_QUERY_LIMIT && jobs.running().length > 0) {
         throw new BackgroundJobError(
-          `已连续 ${idle} 次不带 wait_seconds 查询后台作业，作业都还在跑、没有变化。` +
-            "要等它们就带 wait_seconds（会在作业结束时提前返回），或者先去做别的事，作业结束时会通知你"
+          `You have queried background jobs ${idle} times in a row without wait_seconds, and they are all still running with no change. ` +
+            "To wait for them, pass wait_seconds (it returns early when a job ends), or do something else first; " +
+            "you will be notified when a job ends"
         );
       }
       if (parsed.job_id !== undefined) {
@@ -121,9 +124,11 @@ export function createJobOutputTool(
         const parts =
           ended.length > 0
             ? ended.map((job) => jobText(job, outputBytes))
-            : [`等了 ${Math.round(waitMs / 1000)} 秒，没有作业结束`];
+            : [
+                `Waited ${Math.round(waitMs / 1000)} second${Math.round(waitMs / 1000) === 1 ? "" : "s"}; no job ended`,
+              ];
         for (const job of ended) jobs.markReported(job);
-        if (rest.length > 0) parts.push(`其余作业：\n${listText(rest)}`);
+        if (rest.length > 0) parts.push(`Other jobs:\n${listText(rest)}`);
         return { content: [{ type: "text", text: parts.join("\n\n") }], details: details(all) };
       }
       return { content: [{ type: "text", text: listText(all) }], details: details(all) };
@@ -147,7 +152,7 @@ export function createJobKillTool(
       const job = jobs.get(parsed.job_id);
       const wasRunning = job.state === "running";
       await jobs.kill(job, "job_kill");
-      const text = `${wasRunning ? "" : "作业已经结束，不用停。\n"}${jobText(job, outputBytes)}`;
+      const text = `${wasRunning ? "" : "The job had already ended; there was nothing to stop.\n"}${jobText(job, outputBytes)}`;
       jobs.markReported(job);
       return { content: [{ type: "text", text }], details: details([job]) };
     },

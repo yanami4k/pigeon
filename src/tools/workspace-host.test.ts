@@ -80,7 +80,7 @@ function textOf(result: { content: Array<{ type: string; text?: string }> }): st
 test("工具只调执行端接口：read_file / edit_file（两种模式）经内存执行端读写，不碰宿主文件系统", async () => {
   const { host, files, calls } = memoryHost({ [`${FAKE_ROOT}/src/a.txt`]: "one\ntwo\n" });
   const read = await createReadFileTool(host).execute("c1", { path: "src/a.txt" });
-  assert.match(textOf(read), /共 2 行/);
+  assert.match(textOf(read), /\] 2 lines \(showing 1-2\)/);
   assert.equal(read.details.resolvedPath, `${FAKE_ROOT}/src/a.txt`);
 
   const hashline = createEditFileTool(host);

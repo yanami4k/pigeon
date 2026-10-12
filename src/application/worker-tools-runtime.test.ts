@@ -109,8 +109,8 @@ test("worker 只有给了的工具与范围：注册与提示只含它们，越�
   }
   // 状态块的审批一节只说 run_command，不说写操作；联网一节不出现（worker 没给联网工具）
   assert.match(status, /name="Approvals"/);
-  assert.ok(status.includes("run_command："), status);
-  for (const absent of ["edit_file", "list_sessions", "web_search", "web_fetch", "写操作"]) {
+  assert.ok(status.includes("run_command: "), status);
+  for (const absent of ["edit_file", "list_sessions", "web_search", "web_fetch", "Writes "]) {
     assert.ok(!prompt.includes(absent) && !status.includes(absent), absent);
   }
   assert.deepEqual(

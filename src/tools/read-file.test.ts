@@ -35,7 +35,7 @@ test("输出带锚点：头部 [PATH#TAG] 快照，每行 N#TAG 前缀，details
     assert.ok(text.includes(`1#${lineTag("one")}| one`), text);
     assert.ok(text.includes(`2#${lineTag("two")}| two`), text);
     assert.ok(text.includes(`3#${lineTag("three")}| three`), text);
-    assert.ok(text.includes("共 3 行"), text);
+    assert.ok(text.includes("] 3 lines (showing 1-3)"), text);
 
     const details = result.details as ReadFileDetails;
     assert.equal(details.snapshot, snap);
@@ -52,11 +52,11 @@ test("offset/limit 窗口：截取中间段，末尾给出下一窗口提示", a
     const tool = createReadFileTool(root);
     const result = await tool.execute("tc-1", { path: "a.ts", offset: 2, limit: 2 });
     const text = textOf(result);
-    assert.ok(text.includes("窗口 2-3"), text);
+    assert.ok(text.includes("(showing 2-3)"), text);
     assert.ok(text.includes(`2#${lineTag("l2")}| l2`), text);
     assert.ok(text.includes(`3#${lineTag("l3")}| l3`), text);
     assert.ok(!text.includes("| l1"), text);
-    assert.ok(text.includes("还有 2 行未读"), text);
+    assert.ok(text.includes("2 lines not read yet"), text);
     assert.ok(text.includes("offset=4"), text);
   } finally {
     cleanup();
@@ -67,7 +67,10 @@ test("offset 超界抛错（教练文案）", async () => {
   const { root, cleanup } = makeWorkspace({ "a.ts": "only\n" });
   try {
     const tool = createReadFileTool(root);
-    await assert.rejects(() => tool.execute("tc-1", { path: "a.ts", offset: 9 }), /超出文件范围/);
+    await assert.rejects(
+      () => tool.execute("tc-1", { path: "a.ts", offset: 9 }),
+      /offset 9 is past the end of the file \(1 line\)/
+    );
   } finally {
     cleanup();
   }
@@ -78,7 +81,7 @@ test("空文件可读", async () => {
   try {
     const tool = createReadFileTool(root);
     const result = await tool.execute("tc-1", { path: "empty.txt" });
-    assert.ok(textOf(result).includes("空文件"));
+    assert.ok(textOf(result).includes("empty file"));
   } finally {
     cleanup();
   }
@@ -135,7 +138,7 @@ test("目录与非文件目标拒绝", async () => {
   try {
     mkdirSync(join(root, "dir"));
     const tool = createReadFileTool(root);
-    await assert.rejects(() => tool.execute("tc-1", { path: "dir" }), /不是常规文件/);
+    await assert.rejects(() => tool.execute("tc-1", { path: "dir" }), /Not a regular file/);
   } finally {
     cleanup();
   }

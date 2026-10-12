@@ -320,7 +320,9 @@ test("deny 清单绝对：两种模式都拒，且不弹人工审批", async () 
       assert.equal(toolResult.isError, true);
       const text = toolResult.content[0];
       assert.ok(
-        text?.type === "text" && text.text === "deny 清单精确匹配，任何模式一律拒绝：read_file",
+        text?.type === "text" &&
+          text.text ===
+            "The tool is on the deny list (exact match), which applies in every approval mode: read_file",
         JSON.stringify(toolResult)
       );
 

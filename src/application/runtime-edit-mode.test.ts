@@ -75,7 +75,7 @@ test("编辑模式显式 hashline：edit_file 与 read_file 的描述带锚点�
   assert.doesNotMatch(systemPrompt ?? "", /自动批准|approved automatically|auto-approved/i);
   // 决策 359：临时目录里没有历史会话，会话检索三件不注册，提示里也没有那一句
   assert.doesNotMatch(systemPrompt ?? "", /list_sessions/);
-  assertInOrder(edit?.description, ["N#TAG", "snapshot", "快照过期"]);
+  assertInOrder(edit?.description, ["N#TAG", "snapshot", "stale snapshot"]);
   assert.match(edit?.description ?? "", /replace[^\n]*insertAfter[^\n]*delete/);
   assertInOrder(read?.description, ["N#TAG", "[PATH#TAG]", "offset"]);
   assert.deepEqual(Object.keys(edit?.parameters.properties ?? {}).sort(), [
@@ -96,7 +96,7 @@ test("编辑模式缺省为 replace：不传编辑模式时装配出 replace 版
     "old_string",
     "path",
   ]);
-  assert.match(read?.description ?? "", /不要带行号前缀/);
+  assert.match(read?.description ?? "", /without the line-number prefix/);
   assert.match(systemPrompt ?? "", /old_string/);
   assert.doesNotMatch(systemPrompt ?? "", /N#TAG/);
   // 截断后拆小引导（决策 063）：replace 模式同样追加（hashline 模式由上一条核对）

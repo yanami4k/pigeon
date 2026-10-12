@@ -121,6 +121,7 @@ test("无实际变化的编辑拒绝", () => {
   const lines = ["a", "b"];
   assert.throws(
     () => applyHashlineEdits(lines, [{ op: "replace", anchor: `1#${lineTag("a")}`, lines: ["a"] }]),
-    (error) => error instanceof HashlineError && /没有产生任何实际变化/.test(error.message)
+    (error) =>
+      error instanceof HashlineError && /^The edit makes no actual change$/.test(error.message)
   );
 });

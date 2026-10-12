@@ -50,8 +50,8 @@ export function resolveLocalReadPath(workspaceRoot: string, inputPath: string): 
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
     throw code === "ENOENT" || code === "ENOTDIR"
-      ? new WorkspacePathNotFoundError(`路径不存在或不可读：${inputPath}`)
-      : new WorkspacePathError(`路径不存在或不可读：${inputPath}`);
+      ? new WorkspacePathNotFoundError(`Path does not exist or cannot be read: ${inputPath}`)
+      : new WorkspacePathError(`Path does not exist or cannot be read: ${inputPath}`);
   }
   return { path: realTarget, outside: !containedIn(realRoot, realTarget, LOCAL_PATH_RULES) };
 }
