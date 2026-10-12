@@ -642,7 +642,7 @@ export class ScriptRuns implements ScriptKindRegistry {
     const collection =
       ending.kind === "completed"
         ? await this.#collect(run, outcome.value)
-        : ({ kind: "skipped", reason: "脚本没有正常结束" } as const);
+        : ({ kind: "skipped", reason: "the script did not finish normally" } as const);
     return summaryText(this.#summary(run, ending, collection, outcome.value, notStarted));
   }
 
@@ -920,7 +920,7 @@ export class ScriptRuns implements ScriptKindRegistry {
       targets.push({ name: record.name, worktree: record.worktree, base: record.base });
     }
     if (targets.length === 0) {
-      return { kind: "skipped", reason: "没有要收回的" };
+      return { kind: "skipped", reason: "there was nothing to collect" };
     }
     const approved = await this.#deps.approveCollect({
       runId: run.runId,
@@ -929,7 +929,7 @@ export class ScriptRuns implements ScriptKindRegistry {
       targets,
     });
     if (!approved) {
-      return { kind: "skipped", reason: "人没有批准" };
+      return { kind: "skipped", reason: "the user did not approve" };
     }
     const applied: string[] = [];
     const conflicts: string[] = [];

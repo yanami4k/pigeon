@@ -142,13 +142,11 @@ export interface SummaryInput {
   returned?: unknown;
 }
 
-// 没有收回的原因：调用方（script-runner.ts）给的键沿用中文写法，汇总里写成英文
-export type CollectionSkip = "脚本没有正常结束" | "人没有批准" | "没有要收回的";
-const COLLECTION_SKIP_TEXTS: Readonly<Record<CollectionSkip, string>> = {
-  脚本没有正常结束: "the script did not finish normally",
-  人没有批准: "the user did not approve",
-  没有要收回的: "there was nothing to collect",
-};
+// 没有收回的原因：原样写进汇总（决策 428，给模型看，为英文；不落盘）
+export type CollectionSkip =
+  | "the script did not finish normally"
+  | "the user did not approve"
+  | "there was nothing to collect";
 
 // 条数与名词：1 minute、2 minutes
 function counted(count: number, noun: string): string {
@@ -192,7 +190,7 @@ export function summaryText(input: SummaryInput): string {
   lines.push(
     collection.kind === "done"
       ? `Collected: applied ${list(collection.applied)}; conflicts, not written: ${list(collection.conflicts)}; deleted by workers, not deleted here: ${list(collection.deletedByWorker)}.`
-      : `Not collected: ${COLLECTION_SKIP_TEXTS[collection.reason]}.`
+      : `Not collected: ${collection.reason}.`
   );
   if (input.returned !== undefined && input.returned !== null) {
     let text: string;
