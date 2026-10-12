@@ -200,18 +200,18 @@ interface ScriptRun {
 
 // 298 的六种说法（加未派出）
 const STATUS_WORDS: Partial<Record<string, string>> = {
-  completed: "完成",
-  "wall-clock-limit": "超时",
-  "turn-limit": "撞上限",
-  "token-limit": "撞上限",
-  cancelled: "取消",
-  aborted: "取消",
-  stalled: "卡住",
-  "not-started": "未派出",
+  completed: "done",
+  "wall-clock-limit": "timed out",
+  "turn-limit": "hit a limit",
+  "token-limit": "hit a limit",
+  cancelled: "cancelled",
+  aborted: "cancelled",
+  stalled: "stalled",
+  "not-started": "not spawned",
 };
 
 function statusWord(status: string): string {
-  return STATUS_WORDS[status] ?? "失败";
+  return STATUS_WORDS[status] ?? "failed";
 }
 
 function defaultRunId(): string {
@@ -223,7 +223,7 @@ export function spentText(tally: CostTally): string {
   const parts: string[] = [];
   if (tally.cost > 0) parts.push(`$${tally.cost.toFixed(2)}`);
   if (tally.cny > 0) parts.push(`¥${tally.cny.toFixed(2)}`);
-  if (tally.unpricedTokens > 0) parts.push(`${tally.unpricedTokens} token（无价格）`);
+  if (tally.unpricedTokens > 0) parts.push(`${tally.unpricedTokens} tokens (no price)`);
   return parts.length > 0 ? parts.join(" + ") : "0";
 }
 
@@ -545,7 +545,7 @@ export class ScriptRuns implements ScriptKindRegistry {
         (summary) => post(`${SCRIPT_NOTICE_PREFIX}${summary}`),
         (error: unknown) =>
           post(
-            `${SCRIPT_NOTICE_PREFIX}脚本 ${run.spec.name}（运行号 ${run.runId}）出错：${
+            `${SCRIPT_NOTICE_PREFIX}Script ${run.spec.name} (run ${run.runId}) failed: ${
               error instanceof Error ? error.message : String(error)
             }。`
           )
@@ -607,9 +607,9 @@ export class ScriptRuns implements ScriptKindRegistry {
       });
       void proc.exited.then((exit) =>
         resolve({
-          error: `执行器退出（退出码 ${exit.code ?? "无"}）${
+          error: `The script runner exited (exit code ${exit.code ?? "none"})${
             exit.stderr.trim() !== ""
-              ? `：${exit.stderr.trim().split("\n").slice(-3).join(" ")}`
+              ? `: ${exit.stderr.trim().split("\n").slice(-3).join(" ")}`
               : ""
           }`,
         })
@@ -642,7 +642,7 @@ export class ScriptRuns implements ScriptKindRegistry {
     const collection =
       ending.kind === "completed"
         ? await this.#collect(run, outcome.value)
-        : ({ kind: "skipped", reason: "脚本没有正常结束" } as const);
+        : ({ kind: "skipped", reason: "the script did not finish normally" } as const);
     return summaryText(this.#summary(run, ending, collection, outcome.value, notStarted));
   }
 
@@ -710,14 +710,14 @@ export class ScriptRuns implements ScriptKindRegistry {
     const role = input.role === undefined ? "implementer" : String(input.role);
     const badRef = `bad-${run.calls.size + 1}`;
     if (task === "") {
-      return failureResult(badRef, where, "bad-call", "任务不能为空");
+      return failureResult(badRef, where, "bad-call", "the task must not be empty");
     }
     if (!isWorkerRole(role)) {
       return failureResult(
         badRef,
         where,
         "bad-call",
-        `没有角色 ${role}；可选：${WORKER_ROLES.join("、")}`
+        `no role ${role}; available: ${WORKER_ROLES.join(", ")}`
       );
     }
     const schema = input.schema;
@@ -725,7 +725,7 @@ export class ScriptRuns implements ScriptKindRegistry {
       schema !== undefined &&
       (typeof schema !== "object" || schema === null || Array.isArray(schema))
     ) {
-      return failureResult(badRef, where, "bad-call", "schema 须为一个 JSON Schema 对象");
+      return failureResult(badRef, where, "bad-call", "schema must be a JSON Schema object");
     }
     let upstream: CallState | undefined;
     if (input.relay !== undefined) {
@@ -735,7 +735,7 @@ export class ScriptRuns implements ScriptKindRegistry {
           badRef,
           where,
           "relay-unavailable",
-          "接力的上游没有做完（relay 须为本次脚本里一次成功的 agent 结果）"
+          "the upstream work to relay from did not finish (relay must be a successful agent result from this script)"
         );
       }
     }
@@ -767,12 +767,22 @@ export class ScriptRuns implements ScriptKindRegistry {
     }
     if (run.stopped) {
       call.notStarted = "stopped";
-      call.result = failureResult(fingerprint, where, "stopped", "脚本已停止，没有派出");
+      call.result = failureResult(
+        fingerprint,
+        where,
+        "stopped",
+        "the script was stopped, so this was not spawned"
+      );
       return call.result;
     }
     if (run.exhausted || this.#deps.hostExhausted?.() === true) {
       call.notStarted = "budget";
-      call.result = failureResult(fingerprint, where, "budget-exhausted", "额度用完，没有派出");
+      call.result = failureResult(
+        fingerprint,
+        where,
+        "budget-exhausted",
+        "the budget is used up, so this was not spawned"
+      );
       return call.result;
     }
     run.nextIndex += 1;
@@ -831,7 +841,7 @@ export class ScriptRuns implements ScriptKindRegistry {
         fingerprint,
         where,
         outcome.errorKind ?? "no-worktree",
-        outcome.error ?? "worker 没有工作树",
+        outcome.error ?? "the worker has no worktree",
         outcome.status
       );
       return call.result;
@@ -844,7 +854,7 @@ export class ScriptRuns implements ScriptKindRegistry {
         ...call.result,
         ok: false,
         errorKind: "output-invalid",
-        error: `输出不合格式（已让它改正 ${SCRIPT_OUTPUT_CORRECTIONS} 次）：${problems.join("；")}`,
+        error: `the output does not match the schema (it was asked to correct it ${SCRIPT_OUTPUT_CORRECTIONS} times): ${problems.join("; ")}`,
       };
     }
     return call.result;
@@ -854,7 +864,7 @@ export class ScriptRuns implements ScriptKindRegistry {
     if (outcome.status !== "completed") return [];
     const structured = outcome.result?.structured;
     if (structured === undefined) {
-      return ["最后一条回复里没有可解析的 JSON 对象"];
+      return ["the last reply has no JSON object that can be parsed"];
     }
     return checkJsonSchema(schema, structured);
   }
@@ -910,7 +920,7 @@ export class ScriptRuns implements ScriptKindRegistry {
       targets.push({ name: record.name, worktree: record.worktree, base: record.base });
     }
     if (targets.length === 0) {
-      return { kind: "skipped", reason: "没有要收回的" };
+      return { kind: "skipped", reason: "there is nothing to take back" };
     }
     const approved = await this.#deps.approveCollect({
       runId: run.runId,
@@ -919,7 +929,7 @@ export class ScriptRuns implements ScriptKindRegistry {
       targets,
     });
     if (!approved) {
-      return { kind: "skipped", reason: "人没有批准" };
+      return { kind: "skipped", reason: "the human did not approve" };
     }
     const applied: string[] = [];
     const conflicts: string[] = [];
@@ -932,7 +942,7 @@ export class ScriptRuns implements ScriptKindRegistry {
         deletedByWorker.push(...result.deletedByWorker);
       } catch (error) {
         conflicts.push(
-          `${target.name}（收回失败：${error instanceof Error ? error.message : String(error)}）`
+          `${target.name} (taking it back failed: ${error instanceof Error ? error.message : String(error)})`
         );
       }
     }
@@ -959,7 +969,7 @@ export class ScriptRuns implements ScriptKindRegistry {
     const who = (call: CallState): string => {
       const name =
         call.record?.name ?? (call.task.length > 20 ? `${call.task.slice(0, 20)}…` : call.task);
-      return call.label !== undefined ? `${name}（${call.label}）` : name;
+      return call.label !== undefined ? `${name} (${call.label})` : name;
     };
     const failures: SummaryInput["failures"][number][] = [];
     const awaiting: SummaryInput["awaitingApproval"][number][] = [];
@@ -973,7 +983,7 @@ export class ScriptRuns implements ScriptKindRegistry {
       failures.push({
         who: who(call),
         status: statusWord(result.status),
-        reason: result.error ?? result.errorKind ?? "原因不明",
+        reason: result.error ?? result.errorKind ?? "unknown reason",
       });
     }
     return {
