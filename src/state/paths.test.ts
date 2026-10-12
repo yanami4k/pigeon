@@ -12,6 +12,7 @@ import {
   projectLocalSettingsPath,
   sessionSearchCacheDirOf,
   sessionsDirOf,
+  userMigrationBackupDirOf,
   userSettingsPath,
   worktreesDirOf,
 } from "./paths.ts";
@@ -33,6 +34,12 @@ test("迁移备份在用户级程序状态下按项目分开：目录名为项�
   assert.notEqual(a, b);
   assert.equal(migrationBackupDirOf("/w/one/app", "/h"), a, "同一项目总是同一目录");
   assert.match(migrationBackupDirOf("/w/my app:x", "/h"), /my_app_x-[0-9a-f]{12}$/);
+  // 决策 431：不属于某个项目的用户级文件进同一目录下的 user/（项目目录名总带哈希后缀，不相撞）
+  assert.equal(
+    userMigrationBackupDirOf("/h"),
+    join("/h", ".pigeon", "state", "migration-backup", "user")
+  );
+  assert.doesNotMatch(userMigrationBackupDirOf("/h"), /-[0-9a-f]{12}$/);
 });
 
 test("快照与叠加排除的只是程序状态与个人设置；可提交的设置与技能不排除", () => {

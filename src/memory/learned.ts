@@ -1,13 +1,17 @@
-// 学到的记忆的文件格式（决策 332）：两层各一个文件——项目级 .pigeon/state/memory.md、用户级 ~/.pigeon/state/memory.md。
-// 文件头为标题加一行注释，其后一行一条：`- [P3] 内容 〔2026-10-01 · 终端界面 · 会话 sess_…〕`。agent 只写内容，
-// 编号、日期、来源（哪个入口）与会话编号由工具补上；〔〕一段可缺（人手加的条目），编号不可缺。本模块只做纯函数：解析、
-// 序列化、计字符与写满判定，无 IO。
+// 学到的记忆的文件格式（决策 332、431）：两层各一个文件——项目级 .pigeon/state/memory.md、用户级 ~/.pigeon/state/memory.md。
+// 文件头为标题加一行注释（英文），其后一行一条：`- [P3] 内容 (recorded 2026-10-01 · tui · session sess_…)`。agent 只写内容，
+// 编号、日期、来源（入口的英文短名）与会话编号由工具补上；尾巴一段可缺（人手加的条目），编号不可缺。本模块只做纯函数：解析、
+// 序列化、计字符与写满判定，无 IO。决策 431 之前的旧格式（中文文件头、〔日期 · 终端界面 · 会话 X〕尾巴）只由迁移代码
+// （memory-migration.ts）认读并一次性改写，这里只认新格式。
 // - 编号：项目级以 P 开头、用户级以 U 开头，后接正整数；一层之内不重复。新编号取现有最大编号加一，且删掉的编号
 //   不再分配（决策 382：已分配过的最大编号另记在 memory.md 旁的 .maxid 小文件里，见 update-memory-tool.ts）。
 // - 逐字往返：解析保留文件头原文与最后一条之后的换行、空行（文件尾），规范写法的文件序列化回去逐字相同。
+// - 尾巴：行末最后一段 ` (recorded 日期 · 来源 · session 会话号)` 才算；内容本身可以带任何括号，连同形如尾巴的文字——
+//   内容在前、尾巴取最后一段，工具写入的条目总带一段真尾巴，解析时内容里那段原样留在内容里。没有尾巴的人手条目若以形如
+//   尾巴的文字结尾，即按尾巴读出，序列化回去逐字相同。
 // - 条目区从第一个以"- "开头的行起，到文件尾都必须是规范的条目行；不合规即报出第一处不对的行号（人手改坏时工具据此拒绝
 //   写入，推送照原文推入）。文件头只认第一个"- "行之前的内容，原样保留、不校验。
-// - 上限只计条目区（文件头不计），单位为字符，按 Unicode 码点计；〔〕一段也计在内（它同样推送给模型）。
+// - 上限只计条目区（文件头不计），单位为字符，按 Unicode 码点计；尾巴一段也计在内（它同样推送给模型）。
 
 import { pigeonRel, userPigeonRel } from "../state/paths.ts";
 
@@ -32,22 +36,23 @@ export const MEMORY_DISPLAY_PATHS: Readonly<Record<MemoryLayer, string>> = {
 
 // 记忆文字的版本（推送段、工具说明、写满被拒的文字）：随 Run 开始条目落盘。v1 为决策 191–233 的原文（三行一条、单层），
 // v2 为决策 328、329、331、332 的文字；v3 为决策 363 改的几句（推送段搬进开工状态块，会话中被改动时整段追加）；
-// v4 为决策 428 的英文改写（意思逐句照旧；记忆文件的文件头与条目尾巴是落盘格式，不在其列）
-export const MEMORY_TEXT_VERSION = "v4";
+// v4 为决策 428 的英文改写（意思逐句照旧；记忆文件的文件头与条目尾巴是落盘格式，不在其列）；v5 为决策 431：条目尾巴改为
+// 英文的 (recorded 日期 · 来源 · session 会话号)、来源取英文短名，推送段里讲尾巴的那句随之改写
+export const MEMORY_TEXT_VERSION = "v5";
 
-// 新建文件时写入的文件头；已有文件的文件头原样保留
+// 新建文件时写入的文件头；已有文件的文件头原样保留（决策 431 之前的中文文件头由迁移换成这里的）
 export const MEMORY_FILE_HEADERS: Readonly<Record<MemoryLayer, string>> = {
   project:
-    "# 学到的记忆（本项目）\n" +
-    "<!-- 由 Pigeon 的 update_memory 维护，也可以用终端界面的 /memory edit project 修改。一行一条：编号、内容，〔〕里是记下的日期、来源与会话编号。 -->\n" +
+    "# Learned memory (this project)\n" +
+    "<!-- Maintained by Pigeon's update_memory; you can also edit it with /memory edit project in the terminal UI. One entry per line: ID and content, followed by (recorded date · source · session ID). -->\n" +
     "\n",
   user:
-    "# 学到的记忆（所有项目）\n" +
-    "<!-- 由 Pigeon 的 update_memory 维护，也可以用终端界面的 /memory edit user 修改。一行一条：编号、内容，〔〕里是记下的日期、来源与会话编号。 -->\n" +
+    "# Learned memory (all projects)\n" +
+    "<!-- Maintained by Pigeon's update_memory; you can also edit it with /memory edit user in the terminal UI. One entry per line: ID and content, followed by (recorded date · source · session ID). -->\n" +
     "\n",
 };
 
-// 条目的来处（工具补在行内）：日期（YYYY-MM-DD）、来源（入口名）、会话编号
+// 条目的来处（工具补在行内）：日期（YYYY-MM-DD）、来源（入口的英文短名，如 tui、cli；人手写的或迁移时认不出的照原文）、会话编号
 export interface MemoryOrigin {
   date: string;
   source: string;
@@ -76,7 +81,8 @@ export type ParsedMemory =
 
 const ORIGIN_SEPARATOR = " · ";
 const ENTRY_LINE = /^- \[([PU])([1-9]\d*)\] (.+)$/;
-const ORIGIN_TAIL = /^(.*\S) 〔(\d{4}-\d{2}-\d{2}) · ([^·〔〕]+?) · 会话 ([^\s·〔〕]+)〕$/;
+// 尾巴：内容（贪婪）之后的最后一段；来源不含"·"，会话号不含空白与"·"
+const ORIGIN_TAIL = /^(.*\S) \(recorded (\d{4}-\d{2}-\d{2}) · ([^·]+?) · session ([^\s·]+)\)$/;
 
 // 条目区的起点：第一个以"- "开头的行的字符偏移；没有即 -1
 function entriesOffset(text: string): number {
@@ -87,7 +93,7 @@ function entriesOffset(text: string): number {
   return found < 0 ? -1 : found + 1;
 }
 
-// 一行条目：编号前缀须与层相符；〔〕一段按固定写法取出，取不出即整段算内容
+// 一行条目：编号前缀须与层相符；行末的尾巴按固定写法取出，取不出即整段算内容
 function parseEntryLine(line: string, layer: MemoryLayer): MemoryEntry | undefined {
   const match = ENTRY_LINE.exec(line);
   if (match === null || match[1] !== MEMORY_LAYER_PREFIX[layer]) {
@@ -143,12 +149,13 @@ export function entryId(layer: MemoryLayer, id: number): string {
   return `${MEMORY_LAYER_PREFIX[layer]}${id}`;
 }
 
+// 行末的尾巴（连同前导空格）：` (recorded 2026-10-01 · tui · session sess_…)`；迁移旧格式时同样经它写出
+export function originTail(origin: MemoryOrigin): string {
+  return ` (recorded ${[origin.date, origin.source, `session ${origin.sessionId}`].join(ORIGIN_SEPARATOR)})`;
+}
+
 export function serializeEntry(entry: MemoryEntry, layer: MemoryLayer): string {
-  const origin = entry.origin;
-  const tail =
-    origin === undefined
-      ? ""
-      : ` 〔${[origin.date, origin.source, `会话 ${origin.sessionId}`].join(ORIGIN_SEPARATOR)}〕`;
+  const tail = entry.origin === undefined ? "" : originTail(entry.origin);
   return `- [${entryId(layer, entry.id)}] ${entry.content}${tail}`;
 }
 

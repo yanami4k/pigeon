@@ -1,8 +1,9 @@
 // 记忆工具 update_memory（决策 217、328、329、331、332）：在项目级或用户级新增、按编号替换、按编号删除学到的记忆，
-// 只写不读（两层记忆已在开工状态块的「记忆」一节里）。说明、参数说明与各情形的返回文字为记忆文字 v4（MEMORY_TEXT_VERSION）。
+// 只写不读（两层记忆已在开工状态块的「记忆」一节里）。说明、参数说明与各情形的返回文字为记忆文字 v5（MEMORY_TEXT_VERSION）。
 // - 只给有人对话的入口（终端界面主会话含沙箱会话、--line 命令行对话）；pigeon run、worker 与跑批器只推送、不注册（331）。
 // - 写入不审批（331），写入后经 onWritten 交给入口在消息区显示一行（记下的内容与层级）。
-// - agent 只写内容；编号、日期、来源（入口名）与会话编号由工具补在行内（332）。内容完全相同即不新增。
+// - agent 只写内容；编号、日期、来源（入口的英文短名）与会话编号由工具补在行尾（332、431）。内容完全相同即不新增。
+// - 决策 431：锁内现读时遇到旧格式的记忆文件，先一次性迁移（备份、改写）再写；迁移出错即照常抛出，不在没有备份时覆盖旧文件。
 // - 写满判定在锁内：拿到锁后现读现判。新增被拒与替换被拒分开写（328）：新增写当前用量、该条字数与还差多少；替换写被替换
 //   条目现有字数、新内容字数、替换后总数与超出多少；两种都附现有条目编号与各条字数。替换后不比替换前长（改短或等长）时
 //   一律放行，即使该层已超上限（人手改出来的）。
@@ -31,23 +32,23 @@ import {
 import {
   type MemoryLocation,
   memoryLocation,
-  readMemoryFile,
   readMemoryMaxId,
   withMemoryLock,
   writeMemoryFile,
   writeMemoryMaxId,
 } from "./learned-store.ts";
+import { migrateMemoryFileLocked } from "./memory-migration.ts";
 
 export const UPDATE_MEMORY_TOOL = "update_memory";
 
-// 写入的来源（哪个入口；沙箱会话按它所在的入口记）：补在每条的〔〕里
+// 写入的来源（哪个入口；沙箱会话按它所在的入口记）：以英文短名补在每条的尾巴里（决策 431）
 export type MemorySource = "tui" | "line";
 export const MEMORY_SOURCE_LABELS: Readonly<Record<MemorySource, string>> = {
-  tui: "终端界面",
-  line: "命令行对话",
+  tui: "tui",
+  line: "cli",
 };
 
-// 工具说明（记忆文字 v4；决策 383 加的"新增前去重"与"纠正过时条目"两句不升 MEMORY_TEXT_VERSION：跑批不注册
+// 工具说明（记忆文字 v5；决策 383 加的"新增前去重"与"纠正过时条目"两句不升 MEMORY_TEXT_VERSION：跑批不注册
 // update_memory，说明的变化到不了跑批，不影响实验条件）
 export const UPDATE_MEMORY_DESCRIPTION = [
   `Add, rewrite, or delete learned memory entries. Memory has two layers: project applies only to this project (${MEMORY_DISPLAY_PATHS.project}), and user applies to all projects (${MEMORY_DISPLAY_PATHS.user}). This tool only writes and does not read: both layers are already in the startup status.`,
@@ -59,7 +60,7 @@ export const UPDATE_MEMORY_DESCRIPTION = [
   "Rewrite or delete an entry the user explicitly asked for only when the user changes their mind.",
 ].join("\n");
 
-// 参数（说明文字为记忆文字 v4）。必填与否随动作而定，由工具自己检查并按固定文字回话，schema 里 id 与 content 可选
+// 参数（说明文字为记忆文字 v5）。必填与否随动作而定，由工具自己检查并按固定文字回话，schema 里 id 与 content 可选
 export const UpdateMemoryParamsSchema = Type.Object({
   action: Type.Union([Type.Literal("add"), Type.Literal("replace"), Type.Literal("remove")], {
     description:
@@ -83,7 +84,7 @@ export const UpdateMemoryParamsSchema = Type.Object({
 });
 export type UpdateMemoryParams = Static<typeof UpdateMemoryParamsSchema>;
 
-// 返回给 agent 的文字（记忆文字 v4）；layer 为层的键（project 或 user）
+// 返回给 agent 的文字（记忆文字 v5）；layer 为层的键（project 或 user）
 export const UPDATE_MEMORY_TEXTS = {
   added: (layer: string, id: string, used: number, limit: number) =>
     `Added ${id} to the ${layer} memory (now ${used}/${limit} characters).`,
@@ -144,14 +145,11 @@ function sizeList(entries: readonly MemoryEntry[], layer: MemoryLayer): string {
     : entries.map((entry) => `${entryId(layer, entry.id)}: ${entryChars(entry, layer)}`).join(", ");
 }
 
-// 一处文字里的换行与首尾空白：每条只占一行，换行并成一个空格；〔〕留给工具补的来处，内容里换成普通括号
+// 一处文字里的换行与首尾空白：每条只占一行，换行并成一个空格。括号不改（决策 431）：工具总在行尾补一段尾巴，解析取最后
+// 一段，内容里形如尾巴的文字留在内容里
 function oneLine(text: string): string {
   // 折叠一切换行（含 Unicode 行分隔符 \u2028/\u2029）：记忆一行一条
-  return text
-    .replace(/\s*[\r\n\u2028\u2029]+\s*/g, " ")
-    .replace(/〔/g, "（")
-    .replace(/〕/g, "）")
-    .trim();
+  return text.replace(/\s*[\r\n\u2028\u2029]+\s*/g, " ").trim();
 }
 
 // 编号的写法：P3、p3 或 3 都认（前缀须与层相符）
@@ -203,7 +201,7 @@ export interface UpdateMemoryOptions {
   governanceRoot: string;
   // 用户级记忆所在的主目录（缺省 os.homedir()；测试注入临时目录）
   homeDir?: string;
-  // 本会话编号与来源：补在每条的〔〕里
+  // 本会话编号与来源：补在每条的尾巴里
   sessionId: string;
   source: MemorySource;
   // 两层上限（字符，按码点计）
@@ -260,7 +258,8 @@ export async function applyMemoryUpdate(
   const result = await withMemoryLock(
     location.lock,
     () => {
-      const current = readMemoryFile(location.file);
+      // 决策 431：旧格式先在锁内一次性迁移（备份、改写），之后按新格式读
+      const current = migrateMemoryFileLocked(location);
       const parsed = parseMemory(current.text, layer);
       if (!parsed.ok) {
         return reply(UPDATE_MEMORY_TEXTS.broken(location.display, parsed.line, layer), {

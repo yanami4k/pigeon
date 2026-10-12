@@ -33,3 +33,15 @@ export function dedupedWarner(sink: WarnSink = stderrWarn): (error: unknown, lin
     sink(line);
   };
 }
+
+// 逐字相同的一行只输出一次的告警器：会反复重试、每次说同一句的告警（如记忆旧格式没能落盘改写，决策 431）不刷屏
+export function onceEachLine(sink: WarnSink = stderrWarn): WarnSink {
+  const seen = new Set<string>();
+  return (line) => {
+    if (seen.has(line)) {
+      return;
+    }
+    seen.add(line);
+    sink(line);
+  };
+}
