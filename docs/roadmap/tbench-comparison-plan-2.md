@@ -91,3 +91,5 @@
 ## 修订
 
 （提交后的修订按日期追加于此。）
+
+- 2026-10-12（冒烟与正式各遍之前，未看任何本实验的 agent 结果）：P 单独在 6 道题上做一次探索性运行——winning-avg-corewars、make-doom-for-mips、largest-eigenval、feal-differential-cryptanalysis、extract-elf、dna-insert（第一次比较里 P 的超长回复集中在这几题），每题一次，设置同附录 A，并发 3。只看超长回复与运行情况，不进结论、不与 D 比较。若据此修改 P，在冒烟之前以修订行更新附录 A 的版本与摘要，并注明依据的是这次探索性运行。
