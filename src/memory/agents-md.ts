@@ -153,7 +153,7 @@ export function loadAgentsInstructions(options: AgentsMdOptions): AgentsMdInstru
       ].join("; ")}. Use read_file to read the full text when needed.)`
     : undefined;
   const blocks = [
-    "## 人写的说明（AGENTS.md）",
+    "## Project instructions (AGENTS.md)",
     "The following was read when the session started; if these files change during the session, the updated content is appended as a whole section.",
     ...parts,
     ...(overflowForModel !== undefined ? [overflowForModel] : []),

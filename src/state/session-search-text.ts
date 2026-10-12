@@ -92,9 +92,9 @@ function docOf(message: ViewMessage, text: string, call?: ViewToolCall): SearchD
   const details = provenance && isObject(message.raw.details) ? message.raw.details : undefined;
   const outcome =
     message.isError === true
-      ? "出错"
+      ? "error"
       : typeof details?.exitCode === "number"
-        ? `退出码 ${details.exitCode}`
+        ? `exit code ${details.exitCode}`
         : undefined;
   const tokens = tokenizeSearchText(text);
   let length = 0;

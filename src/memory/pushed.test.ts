@@ -78,7 +78,7 @@ test("可写入的入口：两层各一小段，带写入说明与交互版的�
     assert.equal(
       pushed.section,
       [
-        "## 学到的记忆",
+        "## Learned memory",
         PUSHED_MEMORY_INTRO,
         MEMORY_CONFLICT_TEXTS.interactive,
         MEMORY_WRITE_GUIDANCE,

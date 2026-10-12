@@ -32,8 +32,8 @@ import { readSessionView, sessionRefTime } from "./session-catalog.ts";
 import type { SessionFileRef } from "./session-reader.ts";
 
 // 缓存格式版本：抽取口径或文件形状一变即加一，旧缓存随之整体重建。v2 = 决策 339 的初版；v3 = 决策 384
-//（每条消息加词频表与工具输出的来历）
-export const SESSION_SEARCH_CACHE_VERSION = 3;
+//（每条消息加词频表与工具输出的来历）；v4 = 决策 428（工具输出来历里的"出错""退出码 N"改为英文）
+export const SESSION_SEARCH_CACHE_VERSION = 4;
 
 const SourceSchema = Type.Object({
   path: Type.String(),

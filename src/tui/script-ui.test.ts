@@ -222,7 +222,7 @@ test("界面上停止整个脚本：树形视图里选中脚本下的 worker 按
       summary,
       new RegExp(`Script t \\(run ID ${runId}\\) was stopped\\. Workers: 2; succeeded 0, failed 2`)
     );
-    assert.match(summary, /Failed: [^\n]*取消/);
+    assert.match(summary, /Failed: [^\n]*cancelled/);
     assert.equal(harness.sink.spawned.length, 2, "停止之后不再派");
     // 那一行写在主会话的消息区：关上树形视图再看
     await type(term, CTRL_X);

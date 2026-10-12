@@ -404,7 +404,7 @@ test("无人值守：worker 要跑命令即停下、以可恢复错误交回，�
   );
   const awaiting = SPAWN_WORKER_TEXTS.awaitingApproval(
     { name: "runner", role: "tester", branch: "pigeon/runner" },
-    "跑命令 node -v",
+    "run the command node -v",
     { kind: "unattended" }
   );
   assert.ok(

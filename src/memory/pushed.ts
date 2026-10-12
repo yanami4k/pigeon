@@ -133,7 +133,7 @@ export function loadPushedMemory(input: {
     return { section: "", manifest };
   }
   const section = [
-    "## 学到的记忆",
+    "## Learned memory",
     input.writable ? PUSHED_MEMORY_INTRO : PUSHED_MEMORY_INTRO_UNATTENDED,
     MEMORY_CONFLICT_TEXTS[input.writable ? "interactive" : "unattended"],
     ...(input.writable ? [MEMORY_WRITE_GUIDANCE] : []),

@@ -107,12 +107,12 @@ test("只推送：推送段在开工状态块里、排在人写的说明与 Skil
       const snapshot = bundle.adapter.snapshot();
       // 决策 363：推送段在开工状态块里，稳定的在前——人写的说明、Skill 目录之后才是记忆
       const prompt = statusTextOf(streamFn.calls[0]);
-      const resident = prompt.indexOf("## 人写的说明（AGENTS.md）");
+      const resident = prompt.indexOf("## Project instructions (AGENTS.md)");
       const skills = prompt.indexOf("- deploy: 部署步骤 (.pigeon/skills/deploy)");
-      const pushed = prompt.indexOf("## 学到的记忆");
+      const pushed = prompt.indexOf("## Learned memory");
       assert.ok(resident >= 0 && skills > resident && pushed > skills, prompt);
       // 三段都只在状态块里：系统提示里没有记忆、Skill 目录与人写的说明
-      for (const moved of ["## 学到的记忆", "deploy", "人写的规矩"]) {
+      for (const moved of ["## Learned memory", "deploy", "人写的规矩"]) {
         assert.ok(!snapshot.context.systemPrompt.includes(moved), moved);
       }
       assert.ok(prompt.includes(PROJECT_ENTRY.trimEnd()));
@@ -158,7 +158,7 @@ test("关着（缺省）：没有推送段、不注册 update_memory、Run 开�
     try {
       await bundle.adapter.run("你好");
       const snapshot = bundle.adapter.snapshot();
-      assert.ok(!statusTextOf(streamFn.calls[0]).includes("## 学到的记忆"));
+      assert.ok(!statusTextOf(streamFn.calls[0]).includes("## Learned memory"));
       assert.ok(!snapshot.tools.advertised.includes("update_memory"));
       await bundle.sessionStore.flush();
       assert.equal(runStarts(root, bundle.adapter.sessionId)[0]?.pushedMemory, undefined);

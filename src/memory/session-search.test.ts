@@ -200,7 +200,7 @@ test("决策 384：命中在工具输出上的带来历（工具名、关键参�
     const hits = await collect(createSessionSearch(dir).search({ keywords: ["needle"] }));
     assert.deepEqual(
       hits.map((hit) => [hit.role, hit.toolName, hit.toolParams, hit.toolOutcome]),
-      [["toolResult", "run_command", '{"command":"npm test"}', "退出码 1"]]
+      [["toolResult", "run_command", '{"command":"npm test"}', "exit code 1"]]
     );
   }));
 

@@ -47,7 +47,7 @@ test("逐层拼接：用户级在前，项目级自仓库根往下到工作目�
     assert.equal(
       loaded.section,
       [
-        "## 人写的说明（AGENTS.md）",
+        "## Project instructions (AGENTS.md)",
         "The following was read when the session started; if these files change during the session, the updated content is appended as a whole section.",
         "### ~/.pigeon/AGENTS.md\n用户",
         "### AGENTS.md\n根",

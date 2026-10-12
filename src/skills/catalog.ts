@@ -304,7 +304,7 @@ export function loadSkillCatalog(options: SkillCatalogOptions): SkillCatalog {
     skills.length === 0
       ? ""
       : [
-          "## Skill 目录",
+          "## Skill catalog",
           "The Skills below were registered when the session started; when Skills are added, removed, or changed during the session, " +
             "this whole section is appended again. When needed, read the full SKILL.md with load_skill(name), " +
             "then, as it directs, read references, templates, or scripts with load_skill(name, resource) " +

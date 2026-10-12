@@ -82,7 +82,10 @@ test("agent 与结构化输出：合格、改正后合格、两次仍不合（�
     /your last reply must contain only one JSON object that conforms to the JSON Schema below/
   );
   assert.match(notice, /succeeded 2, failed 1/);
-  assert.match(notice, /输出不合格式（已让它改正 2 次）/);
+  assert.match(
+    notice,
+    /the output does not match the schema \(it was asked to correct it 2 times\)/
+  );
 });
 
 test("parallel 为屏障：全部结束才返回；pipeline 每项各自走完、不等齐；phase、log 与 args", async () => {
@@ -244,7 +247,7 @@ test("单个失败不中断：agent 照常返回原因；pipeline 跳过该项�
   assert.ok(!seen.includes("二 坏"));
   assert.ok(seen.includes("二 好") && seen.includes("最后"));
   assert.match(notice, /completed\. Workers: 4; succeeded 3, failed 1/);
-  assert.match(notice, /Failed: \S+: 失败, 编译不过/);
+  assert.match(notice, /Failed: \S+: failed, 编译不过/);
 });
 
 test("等审批超时单独标出（补批后可续跑）", async () => {
@@ -260,7 +263,7 @@ test("等审批超时单独标出（补批后可续跑）", async () => {
   assert.match(
     notice,
     new RegExp(
-      `Waiting for approval timed out \\(after approval, resume with resume_run=${runId}\\): ${runId}-1: 跑命令 npm test`
+      `Waiting for approval timed out \\(after approval, resume with resume_run=${runId}\\): ${runId}-1: run the command npm test`
     )
   );
   assert.ok(!/Failed: /.test(notice));
@@ -297,7 +300,7 @@ test("花费上限：到限即不再派、在跑的做完、汇总写明做完�
   );
   assert.equal(tokens.sink.spawned.length, 2);
   assert.match(byTokens.notice, /Not done because the budget ran out: 1 call was not spawned/);
-  assert.match(byTokens.notice, /Spent 1200 token（无价格）/);
+  assert.match(byTokens.notice, /Spent 1200 tokens \(no price\)/);
 });
 
 test("脚本出错与 worker 名：脚本抛错即以出错结束；角色写错的调用照常返回失败", async () => {
@@ -308,7 +311,7 @@ test("脚本出错与 worker 名：脚本抛错即以出错结束；角色写错
   );
   assert.deepEqual(returned(bad.notice), {
     ok: false,
-    e: "没有角色 boss；可选：explorer、implementer、tester",
+    e: "no role boss; available: explorer, implementer, tester",
   });
   const thrown = await runToEnd(harness, 'await agent("做"); throw new Error("不对");');
   assert.match(thrown.notice, /failed with an error: Error: 不对\./);
