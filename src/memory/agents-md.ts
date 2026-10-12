@@ -109,7 +109,9 @@ export function loadAgentsInstructions(options: AgentsMdOptions): AgentsMdInstru
   ];
   const manifest: MemoryManifestEntry[] = [];
   const parts: string[] = [];
+  // 截断说明两份：给模型的（英文，进「项目说明」一节）与给人的（中文，终端一行）
   const truncated: string[] = [];
+  const truncatedForModel: string[] = [];
   const skipped: string[] = [];
   let used = 0;
   for (const file of files) {
@@ -125,6 +127,9 @@ export function loadAgentsInstructions(options: AgentsMdOptions): AgentsMdInstru
       parts.push(`### ${file.display}\n${partial.trimEnd()}`);
       manifest.push({ ...identity, truncated: true, included: true });
       truncated.push(`${file.display} 只放入前 ${Buffer.byteLength(partial)} 字节`);
+      truncatedForModel.push(
+        `${file.display}: only the first ${Buffer.byteLength(partial)} bytes are included`
+      );
       used = limit;
     } else {
       manifest.push({ ...identity, truncated: false, included: false });
@@ -134,18 +139,24 @@ export function loadAgentsInstructions(options: AgentsMdOptions): AgentsMdInstru
   if (parts.length === 0 && skipped.length === 0) {
     return { section: "", manifest };
   }
-  const overflow =
-    truncated.length > 0 || skipped.length > 0
-      ? `合计超出 ${limit / 1024} KiB 上限，已截断：${[
-          ...truncated,
-          ...(skipped.length > 0 ? [`${skipped.join("、")} 未放入`] : []),
-        ].join("；")}`
-      : undefined;
+  const overflowed = truncated.length > 0 || skipped.length > 0;
+  const overflow = overflowed
+    ? `合计超出 ${limit / 1024} KiB 上限，已截断：${[
+        ...truncated,
+        ...(skipped.length > 0 ? [`${skipped.join("、")} 未放入`] : []),
+      ].join("；")}`
+    : undefined;
+  const overflowForModel = overflowed
+    ? `(The human-written instructions exceed the ${limit / 1024} KiB total limit and were truncated: ${[
+        ...truncatedForModel,
+        ...(skipped.length > 0 ? [`${skipped.join(", ")}: not included`] : []),
+      ].join("; ")}. Use read_file to read the full text when needed.)`
+    : undefined;
   const blocks = [
     "## 人写的说明（AGENTS.md）",
-    "以下内容在会话开始时读取；会话中这些文件被改动时，改后的内容会整段追加。",
+    "The following was read when the session started; if these files change during the session, the updated content is appended as a whole section.",
     ...parts,
-    ...(overflow !== undefined ? [`（人写的说明${overflow}；需要时用 read_file 读取全文。）`] : []),
+    ...(overflowForModel !== undefined ? [overflowForModel] : []),
   ];
   return {
     section: blocks.join("\n\n"),

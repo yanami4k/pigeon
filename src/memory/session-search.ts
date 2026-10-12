@@ -168,10 +168,12 @@ export function normalizeKeywords(keywords: readonly string[]): NormalizedKeywor
     });
   }
   if (normalized.length === 0) {
-    throw new Error("Session Search 至少需要一个关键词");
+    throw new Error("Session Search needs at least one keyword");
   }
   if (normalized.every((keyword) => keyword.terms.length === 0 && keyword.singles.length === 0)) {
-    throw new Error("Session Search 关键词里没有可检索的词（只含标点等不切词的字符）");
+    throw new Error(
+      "Session Search keywords contain no searchable terms (only punctuation or other characters that are not split into terms)"
+    );
   }
   return normalized;
 }

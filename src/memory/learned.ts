@@ -31,8 +31,9 @@ export const MEMORY_DISPLAY_PATHS: Readonly<Record<MemoryLayer, string>> = {
 };
 
 // 记忆文字的版本（推送段、工具说明、写满被拒的文字）：随 Run 开始条目落盘。v1 为决策 191–233 的原文（三行一条、单层），
-// v2 为决策 328、329、331、332 的文字；v3 为决策 363 改的几句（推送段搬进开工状态块，会话中被改动时整段追加）
-export const MEMORY_TEXT_VERSION = "v3";
+// v2 为决策 328、329、331、332 的文字；v3 为决策 363 改的几句（推送段搬进开工状态块，会话中被改动时整段追加）；
+// v4 为决策 428 的英文改写（意思逐句照旧；记忆文件的文件头与条目尾巴是落盘格式，不在其列）
+export const MEMORY_TEXT_VERSION = "v4";
 
 // 新建文件时写入的文件头；已有文件的文件头原样保留
 export const MEMORY_FILE_HEADERS: Readonly<Record<MemoryLayer, string>> = {

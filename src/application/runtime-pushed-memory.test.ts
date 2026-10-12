@@ -124,7 +124,7 @@ test("只推送：推送段在开工状态块里、排在人写的说明与 Skil
       const [start] = runStarts(root, bundle.adapter.sessionId);
       const hash = (text: string) => createHash("sha256").update(text).digest("hex");
       assert.deepEqual(start?.pushedMemory, {
-        textVersion: "v3",
+        textVersion: "v4",
         layers: [
           {
             layer: "project",
@@ -244,15 +244,15 @@ test("两层上限取设置的 memory 一节：推送段与记忆工具都按它
     try {
       await bundle.adapter.run("记");
       const prompt = statusTextOf(streamFn.calls[0]);
-      assert.ok(prompt.includes("/1234 字符"), prompt);
-      assert.ok(prompt.includes("/567 字符"), prompt);
+      assert.ok(prompt.includes("/1234 characters"), prompt);
+      assert.ok(prompt.includes("/567 characters"), prompt);
     } finally {
       await disposeRuntime(bundle);
     }
     // 工具回话里的上限取设置的值
     assert.match(
       JSON.stringify(streamFn.calls[1]?.context.messages),
-      /已在项目级新增 P2（当前 \d+\/1234 字符）。/
+      /Added P2 to the project memory \(now \d+\/1234 characters\)\./
     );
     assert.ok(readMemory(root, "project").includes("- [P2] 甲 〔2026-10-01 · 终端界面 · 会话 "));
   }));

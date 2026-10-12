@@ -76,9 +76,9 @@ test("选项关闭：历史与读原文提示未持久化与字节数，检索�
     ).content
       .map((block) => ("text" in block ? block.text : ""))
       .join("");
-    const body = `[thinking 未持久化，${bytes} 字节]\n好的`;
+    const body = `[thinking not persisted, ${bytes} bytes]\n好的`;
     assert.deepEqual(text.split("\n").slice(1), [
-      `--- 正文（共 ${body.length} 字，显示第 0–${body.length} 字）---`,
+      `--- Text (${body.length} characters in total, showing 0–${body.length}) ---`,
       ...body.split("\n"),
     ]);
     assert.equal(text.includes(THINKING), false);

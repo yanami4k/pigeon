@@ -368,7 +368,7 @@ test("元字符按字面匹配：a.b 不命中 axb；只含标点的关键词响
       (await collect(search.search({ keywords: ["f(x)*"] }))).map((hit) => hit.runSeq),
       [3]
     );
-    await assert.rejects(collect(search.search({ keywords: ["["] })), /没有可检索的词/);
+    await assert.rejects(collect(search.search({ keywords: ["["] })), /no searchable terms/);
   }));
 
 test("完整存储不截断：64 KiB 之后的内容也可命中；片段是覆盖命中词的约 400 字窗口", () =>
@@ -486,7 +486,7 @@ test("读正被写入的会话：撕裂的末行不产出命中，文件一个�
 test("空关键词响亮拒绝；无会话目录返回零命中", () =>
   withDir(async (dir) => {
     const search = createSessionSearch(join(dir, "不存在"));
-    await assert.rejects(collect(search.search({ keywords: ["  "] })), /至少需要一个关键词/);
+    await assert.rejects(collect(search.search({ keywords: ["  "] })), /at least one keyword/);
     assert.deepEqual(await collect(search.search({ keywords: ["x"] })), []);
   }));
 
