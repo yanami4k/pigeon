@@ -430,7 +430,7 @@ describe("摘要请求的两种发法（决策 424）", () => {
     return { streamFn, outcome, result, record, kinds };
   }
 
-  test("接续式：会话原样在前、末尾一条摘要指令，选项同会话另带输出上限与 toolChoice none；切点、保留段与还原同独立式", async () => {
+  test("接续式：会话（系统提示、工具、消息）原样在前、末尾一条摘要指令，选项同会话另带输出上限、不带 toolChoice；切点、保留段与还原同独立式", async () => {
     // 第一条回复改过 a.ts：读改文件清单两种发法相同
     const messages = longConversation();
     const edited = messages[1] as AssistantMessage;
@@ -449,13 +449,15 @@ describe("摘要请求的两种发法（决策 424）", () => {
     const sent = source.build().context;
     assert.deepEqual(continued.kinds, ["continuation"]);
     assert.equal(call?.context.systemPrompt, sent.systemPrompt);
+    // 工具定义原样带上：去掉或改动会让服务方换一种方式组织提示，前缀对不上
+    assert.equal(JSON.stringify(call?.context.tools), JSON.stringify(sent.tools));
     assert.equal(
       JSON.stringify(call?.context.messages.slice(0, -1)),
       JSON.stringify(sent.messages)
     );
     assert.deepEqual(
       [call?.options?.reasoning, call?.options?.toolChoice, call?.options?.maxTokens],
-      ["high", "none", Math.floor(0.8 * 16_384)]
+      ["high", undefined, Math.floor(0.8 * 16_384)]
     );
     assert.deepEqual(continued.record, { mode: "continuation" });
     assert.ok(continued.result?.summary.startsWith("## Goal\n接续式"));

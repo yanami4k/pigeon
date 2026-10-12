@@ -212,9 +212,10 @@ export function isEmptyPreparation(preparation: CompactionPreparation): boolean 
 
 // —— 摘要请求的两种发法（决策 424）——
 // 接续式：沿用原会话——与下一次主请求同一个模型对象、系统提示、工具与消息（运行面按主请求的转换给出），选项同主请求（推理档位、
-// 温度等），末尾追加一条摘要指令（用户消息），前缀与上一次主请求逐字节相同，命中服务方的前缀缓存。请求带 toolChoice none
-// （pi-ai 的通用选项，各家线路自行翻译；DeepSeek 的 Anthropic 兼容端点文档写明完全支持 none）；推理档位不改，免得服务方因思考
-// 设置不同而换一种方式组织历史、前缀对不上。只取一条回复：回复里有工具调用、没有文字或请求出错时作废，改走一次独立式。
+// 温度等），末尾追加一条摘要指令（用户消息），前缀与上一次主请求逐字节相同，命中服务方的前缀缓存。不带 toolChoice：实测
+// 带 none 时服务方把工具定义从提示里拿掉，前缀对不上、缓存全不命中；"只写摘要、不调工具"由摘要指令约束。推理档位不改，免得
+// 服务方因思考设置不同而换一种方式组织历史、前缀对不上。只取一条回复：回复里有工具调用、没有文字或请求出错时作废，改走一次
+// 独立式。
 // 独立式：上游 compact 的做法——待摘要部分另组成一条请求、配专门的摘要系统提示，不请求推理。用于：因上下文超长触发（422，
 // 整段已放不下）、整段放不下（见 fitsWindow）、没有会话可接、接续式作废。
 // 两种发法的切点、保留段、压缩条目与还原相同；摘要文本的结构沿用上游（含被切开一轮的处理，见 summaryInstruction）。
@@ -618,7 +619,7 @@ export class ContextCompactor {
       const stream = await this.#streamFn(
         model,
         { ...context, messages: [...context.messages, instruction] },
-        { ...options, maxTokens, toolChoice: "none", signal: input.signal }
+        { ...options, maxTokens, signal: input.signal }
       );
       reply = await stream.result();
     } catch (error) {

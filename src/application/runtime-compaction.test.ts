@@ -101,7 +101,7 @@ test("调低触发点：一次 Run 内轮间压缩；接续式摘要请求经同
     assert.equal(options.temperature, 0);
     assert.equal(options.reasoning, undefined);
     assert.equal(options.maxTokens, Math.floor(0.8 * 16_384));
-    assert.equal(options.toolChoice, "none");
+    assert.equal(options.toolChoice, undefined);
     const [start] = runStarts(join(root, ".pigeon", "state", "sessions"), result.sessionId);
     assert.deepEqual(start?.compaction, {
       contextWindow: 1_000_000,

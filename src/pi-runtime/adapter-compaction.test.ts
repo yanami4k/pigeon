@@ -264,7 +264,7 @@ test("轮间挂点：上下文超过触发点时在下一轮之前压缩，下�
       "user",
     ]);
     assert.ok(summary !== undefined && isContinuationSummary(summary.context));
-    assert.equal(summary.options?.toolChoice, "none");
+    assert.equal(summary.options?.toolChoice, undefined);
 
     await h.store.flush();
     const main = mainBranch(h.sessions, h.sessionId);
